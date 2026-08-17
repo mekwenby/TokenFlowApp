@@ -1,0 +1,32 @@
+# Gradle and Android build state
+.gradle/
+.kotlin/
+build/
+**/build/
+local.properties
+
+# Android Studio and editors
+.idea/
+.vscode/
+*.iml
+
+# Signing, secrets, and exported configuration
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.secret
+*.tfcfg
+.env
+.env.*
+
+# Generated packages and local archives
+*.apk
+*.aab
+archive/legacy-apks/*.apk
+
+# OS files
+.DS_Store
+Thumbs.db

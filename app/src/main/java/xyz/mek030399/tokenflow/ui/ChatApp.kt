@@ -281,7 +281,9 @@ object UiTestTags {
     const val ABOUT_SCREEN = "about_screen"
     const val ABOUT_EXA_KEY_LINK = "about_exa_key_link"
     const val ABOUT_MIMO_KEY_LINK = "about_mimo_key_link"
+    const val ABOUT_THIRD_PARTY_NOTICES = "about_third_party_notices"
     const val ABOUT_USER_AGREEMENT = "about_user_agreement"
+    const val THIRD_PARTY_NOTICES_SCREEN = "third_party_notices_screen"
     const val USER_AGREEMENT_SCREEN = "user_agreement_screen"
 
     fun conversationItem(id: String) = "conversation_item_$id"

@@ -33,7 +33,9 @@
 | Apache POI ooxml/scratchpad | 5.4.1 | Word/Excel 文本提取 | Apache-2.0 |
 | commonmark + autolink + GFM tables | 0.24.0 | Markdown、链接和表格 | BSD-2-Clause |
 
-“主要许可证”是维护摘要，不替代各发布 artifact 内的版权与许可证文件。正式分发前应从最终依赖解析结果生成并审阅完整第三方声明。
+“主要许可证”是维护摘要，不替代各发布 artifact 内的版权与许可证文件。App 会随包分发 [`third_party_notices.md`](../app/src/main/res/raw/third_party_notices.md)，其中列出 `releaseRuntimeClasspath` 最终解析得到的全部直接和传递 artifact 坐标，并提供适用许可证全文及必要 NOTICE；用户可在“关于 > 第三方开源声明”中离线阅读。
+
+`verifyThirdPartyNotices` 会双向比较声明中的反引号坐标与 Release 运行时解析结果：缺失依赖或遗留坐标都会使构建失败。坐标集合来自 Gradle 解析结果，许可证及 NOTICE 文本则应同时核对精确 artifact 缓存和对应版本的上游源代码分发，不能根据 group 名称自动推断。
 
 ## 测试依赖
 
@@ -62,9 +64,10 @@ Debug 变体还包含 Compose UI tooling 和 test manifest；这些组件不会�
 1. 在独立改动中更新一个依赖域，避免同时升级 AGP、Kotlin、Room 和 Compose。
 2. 查阅新版本的 minSdk、JDK、Kotlin/KSP 兼容要求及许可证变化。
 3. 若升级 Room 或改变实体，新增显式 migration，并提交新的 schema JSON。
-4. 运行 `testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest`。
-5. 对涉及 UI、数据库、相机、Media3 或 Keystore 的升级，在隔离设备运行对应 instrumentation。
-6. Release 构建后检查 R8 warning、包体、启动和 `mapping.txt`。
-7. 同步更新本清单、[本地编译环境](LOCAL_BUILD.md) 和 App 内第三方组件说明。
+4. 同步更新 App 内 [`third_party_notices.md`](../app/src/main/res/raw/third_party_notices.md)，复核新增或变更组件的许可证、版权声明、嵌入数据许可证和上游 NOTICE。
+5. 运行 `testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest verifyThirdPartyNotices`。
+6. 对涉及 UI、数据库、相机、Media3 或 Keystore 的升级，在隔离设备运行对应 instrumentation。
+7. Release 构建后检查 R8 warning、包体、启动和 `mapping.txt`。
+8. 同步更新本清单和[本地编译环境](LOCAL_BUILD.md)。
 
-运行时用户协议由 [`app/src/main/res/raw/user_agreement.md`](../app/src/main/res/raw/user_agreement.md) 提供；[`ABOUT_AND_USER_AGREEMENT_DRAFT.md`](ABOUT_AND_USER_AGREEMENT_DRAFT.md) 仅是历史审阅材料。
+默认英文运行时用户协议由 [`app/src/main/res/raw/user_agreement.md`](../app/src/main/res/raw/user_agreement.md) 提供，简体中文本地化文件位于 `app/src/main/res/raw-zh-rCN/user_agreement.md`；[`ABOUT_AND_USER_AGREEMENT_DRAFT.md`](ABOUT_AND_USER_AGREEMENT_DRAFT.md) 仅是历史审阅材料。

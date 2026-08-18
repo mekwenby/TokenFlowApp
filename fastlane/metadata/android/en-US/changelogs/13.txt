@@ -1,0 +1,3 @@
+* Added an F-Droid-compatible unsigned release build path.
+* Added offline third-party notices and bilingual legal information.
+* Improved open-source build and release validation.

@@ -698,6 +698,8 @@ class TokenFlowAppTest {
         composeRule.onNodeWithText("Jetpack Compose / Material 3").assertIsDisplayed()
         about.performScrollToNode(hasText("commonmark-java"))
         composeRule.onNodeWithText("commonmark-java").assertIsDisplayed()
+        about.performScrollToNode(hasTestTag(UiTestTags.ABOUT_THIRD_PARTY_NOTICES))
+        composeRule.onNodeWithTag(UiTestTags.ABOUT_THIRD_PARTY_NOTICES).assertIsDisplayed()
         about.performScrollToNode(hasTestTag(UiTestTags.ABOUT_USER_AGREEMENT))
         composeRule.onNodeWithTag(UiTestTags.ABOUT_USER_AGREEMENT).assertIsDisplayed()
     }
@@ -737,6 +739,12 @@ class TokenFlowAppTest {
     fun userAgreementOpensAndBackReturnsToAbout() {
         val fake = UiFakeDataSource(withModel = true)
         val viewModel = AppViewModel(fake)
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val agreement = context.resources.openRawResource(xyz.mek030399.tokenflow.R.raw.user_agreement)
+            .bufferedReader(Charsets.UTF_8)
+            .use { it.readText() }
+        val versionText = if ("协议版本：1.1" in agreement) "协议版本：1.1" else "Agreement version: 1.1"
+        val contactHeading = if ("## 14. 联系方式" in agreement) "14. 联系方式" else "14. Contact"
         composeRule.setContent { TokenFlowTheme { TokenFlowApp(viewModel) } }
         composeRule.waitUntil(5_000) { fake.initialized }
 
@@ -746,8 +754,8 @@ class TokenFlowAppTest {
         composeRule.onNodeWithTag(UiTestTags.ABOUT_USER_AGREEMENT).performClick()
 
         composeRule.onNodeWithTag(UiTestTags.USER_AGREEMENT_SCREEN).assertIsDisplayed()
-        composeRule.onNodeWithText("协议版本：1.0").assertIsDisplayed()
-        composeRule.onNodeWithText("15. 联系方式").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText(versionText).assertIsDisplayed()
+        composeRule.onNodeWithText(contactHeading).performScrollTo().assertIsDisplayed()
 
         pressBack()
         composeRule.onNodeWithTag(UiTestTags.ABOUT_SCREEN).assertIsDisplayed()
@@ -756,6 +764,26 @@ class TokenFlowAppTest {
         pressBack()
         composeRule.waitUntil(5_000) { viewModel.state.value.screen == AppScreen.CHAT }
         composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).assertIsDisplayed()
+    }
+
+    @Test
+    fun thirdPartyNoticesOpenOfflineAndBackReturnsToAbout() {
+        val fake = UiFakeDataSource(withModel = true)
+        val viewModel = AppViewModel(fake)
+        composeRule.setContent { TokenFlowTheme { TokenFlowApp(viewModel) } }
+        composeRule.waitUntil(5_000) { fake.initialized }
+
+        viewModel.openScreen(AppScreen.ABOUT)
+        composeRule.onNodeWithTag(UiTestTags.ABOUT_SCREEN)
+            .performScrollToNode(hasTestTag(UiTestTags.ABOUT_THIRD_PARTY_NOTICES))
+        composeRule.onNodeWithTag(UiTestTags.ABOUT_THIRD_PARTY_NOTICES).performClick()
+
+        composeRule.onNodeWithTag(UiTestTags.THIRD_PARTY_NOTICES_SCREEN).assertIsDisplayed()
+        composeRule.onNodeWithText("Apache License 2.0 components").performScrollTo().assertIsDisplayed()
+
+        pressBack()
+        composeRule.onNodeWithTag(UiTestTags.ABOUT_SCREEN).assertIsDisplayed()
+        composeRule.onAllNodesWithTag(UiTestTags.THIRD_PARTY_NOTICES_SCREEN).assertCountEquals(0)
     }
 
     @Test

@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   verify:
-    name: Test and build Debug APK
+    name: Test and build Android artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -56,7 +56,34 @@ jobs:
         run: |
           set -Eeuo pipefail
           chmod +x ./gradlew
-          ./gradlew testDebugUnitTest --rerun-tasks lintDebug assembleDebug assembleDebugAndroidTest
+          ./gradlew testDebugUnitTest --rerun-tasks lintDebug assembleDebug assembleDebugAndroidTest verifyThirdPartyNotices
+
+      - name: Build unsigned F-Droid Release APK
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./gradlew -PfdroidBuild=true assembleRelease --no-configuration-cache
+
+          unsigned_apk="app/build/outputs/apk/release/app-release-unsigned.apk"
+          android_sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          [[ -f "$unsigned_apk" ]] || {
+            echo "Unsigned F-Droid APK was not produced at $unsigned_apk." >&2
+            exit 1
+          }
+          [[ -n "$android_sdk" ]] || {
+            echo "ANDROID_SDK_ROOT and ANDROID_HOME are both unavailable." >&2
+            exit 1
+          }
+          aapt2="$android_sdk/build-tools/36.0.0/aapt2"
+          apksigner="$android_sdk/build-tools/36.0.0/apksigner"
+          [[ -x "$aapt2" ]] || { echo "aapt2 36.0.0 is unavailable." >&2; exit 1; }
+          [[ -x "$apksigner" ]] || { echo "apksigner 36.0.0 is unavailable." >&2; exit 1; }
+
+          "$aapt2" dump badging "$unsigned_apk" >/dev/null
+          if "$apksigner" verify "$unsigned_apk" >/dev/null 2>&1; then
+            echo "F-Droid build unexpectedly produced a signed APK." >&2
+            exit 1
+          fi
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

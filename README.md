@@ -24,7 +24,7 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 版本 | `2.4.3`（`versionCode 12`） |
+| 版本 | `2.4.4`（`versionCode 13`） |
 | 正式包名 | `xyz.mek030399.tokenflow` |
 | Debug 包名 | `xyz.mek030399.tokenflow.debug` |
 | 正式证书 SHA-256 | `FEC865BEDC77C742B0E1B3D93A05FCEEBFA6075F46E1C8242B8F2261F0767AFE` |
@@ -39,9 +39,12 @@
 ## 下载 APK
 
 - 正式版从 [GitHub Releases](https://github.com/mekwenby/TokenFlowApp/releases) 下载。本项目自动上传的 Release 附件只有使用项目正式证书签名的 APK 及其 SHA-256 校验文件；GitHub 还会自动提供对应源码归档。
+- 项目已完成 F-Droid 构建适配，计划申请收录到 [F-Droid 主仓库](https://f-droid.org/packages/xyz.mek030399.tokenflow/)，但尚未提交申请。F-Droid 从公开源码独立构建并使用 F-Droid 自己的证书签名，不使用或接触项目正式私钥。
 - 每次 `main` 提交和 Pull Request 都会运行 [Android CI](https://github.com/mekwenby/TokenFlowApp/actions/workflows/android-ci.yml)。成功构建的 Debug APK 可在对应运行记录的 Artifacts 区域下载，保留 7 天。Pull Request artifact 可能包含尚未合并的贡献者代码，只能在信任其来源时安装，并且不要录入真实 API Key 或私人数据。
 
 Debug APK 使用 `xyz.mek030399.tokenflow.debug` 包名和临时 Debug 证书，只适合测试，不能作为正式版升级包。正式发布必须先把版本提交合入 `main`，再推送与 `versionName` 完全一致的 `vX.Y.Z` 标签。
+
+GitHub Release 与 F-Droid APK 虽然包名相同，但签名不同，不能相互覆盖安装。切换渠道前必须卸载现有版本；卸载会删除应用私有数据。当前配置导出不包含完整会话、消息、附件、收藏、笔记、知识文件、头像或显示偏好，因此在需要保留这些数据时不要切换安装渠道。
 
 ## 从源码构建
 
@@ -70,13 +73,21 @@ macOS 或 Linux：
 ./gradlew testDebugUnitTest --rerun-tasks lintDebug assembleDebug assembleDebugAndroidTest
 ```
 
+F-Droid 构建服务器使用专用属性生成由 F-Droid 后续签名的未签名 Release APK：
+
+```bash
+./gradlew -PfdroidBuild=true assembleRelease --no-configuration-cache
+```
+
+`fdroidBuild=true` 仅用于 F-Droid 的源码构建和本地兼容性验证。该模式拒绝任何签名变量，产物不得作为 GitHub 正式版或手工分发包。普通 Release 构建仍然要求完整的四项签名变量。
+
 Debug APK 输出到：
 
 ```text
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-首次配置环境、SDK 路径和故障处理见 [本地编译环境](docs/LOCAL_BUILD.md)。Release 构建不会使用 Debug 签名，必须先阅读 [签名与发布](docs/SIGNING_AND_RELEASE.md)。
+首次配置环境、SDK 路径和故障处理见 [本地编译环境](docs/LOCAL_BUILD.md)。普通 Release 构建不会使用 Debug 签名，必须先阅读 [签名与发布](docs/SIGNING_AND_RELEASE.md)。
 
 ## 首次使用
 
@@ -103,7 +114,7 @@ app/build/outputs/apk/debug/app-debug.apk
 | [架构说明](docs/ARCHITECTURE.md) | 分层、依赖注入、消息生成、知识检索和响应式 UI |
 | [功能与限制](docs/FEATURES.md) | 对话、附件、工作区、知识库、工具、语音和关键上限 |
 | [数据与安全](docs/DATA_AND_SECURITY.md) | Room、私有文件、凭据加密、配置归档、网络边界和数据外发 |
-| [依赖清单](docs/DEPENDENCIES.md) | 构建插件、直接依赖、版本来源和许可证维护说明 |
+| [依赖清单](docs/DEPENDENCIES.md) | 构建插件、完整运行时依赖、版本来源和第三方许可证维护说明 |
 | [测试与设备部署](docs/TESTING_AND_DEVICE.md) | JVM、Lint、instrumentation、设备部署和验收矩阵 |
 | [独立项目迁移记录](docs/PROJECT_MIGRATION.md) | 来源、迁移边界、历史资产和 Git 重建状态 |
 | [设计参考说明](design-references/README.md) | 现有探索稿的用途和非权威边界 |
@@ -124,6 +135,7 @@ TokenFlowApp/
 ├── archive/                         # 历史设计输出，不参与构建
 ├── design-references/               # UI 探索图，仅作参考
 ├── docs/                            # 项目文档
+├── fastlane/metadata/android/       # F-Droid 商店文案、图标和版本说明；截图待申请前补充
 ├── gradle/wrapper/                  # 固定版本 Gradle Wrapper
 ├── LICENSE                          # Apache License 2.0
 └── README.md                        # 项目入口
@@ -146,6 +158,6 @@ Instrumentation 测试必须使用可丢弃的隔离 AVD，不要在保留用户
 
 ## 许可证
 
-除另有明确标注的第三方内容外，本仓库中由项目维护者拥有授权权利的代码、文档和视觉资产均按照 [Apache License 2.0](LICENSE) 提供。第三方组件继续适用各自的许可证和版权声明；详情见 [依赖清单](docs/DEPENDENCIES.md)。
+除另有明确标注的第三方内容外，本仓库中由项目维护者拥有授权权利的代码、文档和视觉资产均按照 [Apache License 2.0](LICENSE) 提供。第三方组件继续适用各自的许可证和版权声明；详情见 [依赖清单](docs/DEPENDENCIES.md)，随 APK 分发的完整文本位于 `app/src/main/res/raw/third_party_notices.md`。
 
 Apache License 2.0 不授予项目名称或相关商标的使用权。

@@ -111,7 +111,7 @@ cd C:\Users\Mek\Works\TokenFlowApp
 本地提交前的 Android 门禁：
 
 ```powershell
-.\gradlew.bat testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
+.\gradlew.bat testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest verifyThirdPartyNotices
 ```
 
 不要用裸 `assemble` 或 `build` 代替上述 Debug 任务。项目会把这两个任务视为包含 Release，并在签名参数缺失时立即失败。
@@ -122,10 +122,19 @@ cd C:\Users\Mek\Works\TokenFlowApp
 | --- | --- | --- |
 | Debug APK | `app/build/outputs/apk/debug/app-debug.apk` | `xyz.mek030399.tokenflow.debug` |
 | AndroidTest APK | `app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk` | `xyz.mek030399.tokenflow.debug.test` |
-| Release APK | `app/build/outputs/apk/release/app-release.apk` | `xyz.mek030399.tokenflow` |
+| 签名 Release APK | `app/build/outputs/apk/release/app-release.apk` | `xyz.mek030399.tokenflow` |
+| F-Droid 未签名 Release APK | `app/build/outputs/apk/release/app-release-unsigned.apk` | `xyz.mek030399.tokenflow` |
 | Release AAB | `app/build/outputs/bundle/release/app-release.aab` | `xyz.mek030399.tokenflow` |
 
-Release 产物需要外部签名参数，详见 [签名与发布](SIGNING_AND_RELEASE.md)。
+普通签名 Release 产物需要外部签名参数，详见 [签名与发布](SIGNING_AND_RELEASE.md)。
+
+F-Droid 从源码构建时使用显式属性生成未签名 Release：
+
+```powershell
+.\gradlew.bat -PfdroidBuild=true assembleRelease --no-configuration-cache
+```
+
+运行前必须确保四个 `TOKENFLOW_*` 签名值全部未设置。该模式不读取或生成项目私钥，产物由 F-Droid 使用自己的证书签名，因此不能直接覆盖从 GitHub Release 安装的版本。普通 Release 构建仍必须提供全部四个签名值。
 
 ## 常见问题
 
@@ -154,6 +163,10 @@ Release 产物需要外部签名参数，详见 [签名与发布](SIGNING_AND_RE
 ### Release 构建提示缺少 TOKENFLOW_KEYSTORE
 
 这是预期保护。Debug 构建请使用 `assembleDebug`；正式发布请按 [签名与发布](SIGNING_AND_RELEASE.md) 配置四个签名值。
+
+### F-Droid 构建提示检测到签名值
+
+这是预期保护。清理当前进程中的四个 `TOKENFLOW_*` 签名环境变量或 Gradle properties 后再运行 `-PfdroidBuild=true assembleRelease`。不要把正式签名材料传给 F-Droid 构建。
 
 ### 依赖或 Wrapper 下载失败
 

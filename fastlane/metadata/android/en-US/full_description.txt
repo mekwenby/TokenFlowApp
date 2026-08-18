@@ -1,0 +1,26 @@
+TokenFlow is an open-source, native Android AI client. It follows a bring-your-own-key (BYOK) model: you choose the model and tool services, supply their API credentials, and connect directly to their endpoints. The project does not provide an account, hosted model backend, or cloud synchronization service.
+
+Features include:
+
+* OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages compatible APIs
+* Streaming conversations, reasoning and tool progress, retry, branching, context cleanup, and concurrent generation
+* Image, camera, PDF, Word, Excel, text, and source-code attachments
+* Favorites, Markdown notes, agents, and a locally indexed knowledge library
+* Optional web search, URL reading, and text-to-speech tools
+* English and Chinese interfaces, light and dark themes, and responsive phone and tablet layouts
+
+Data and network boundaries
+
+Conversations and workspace data are primarily stored in the Android app sandbox. API keys are protected using Android Keystore-backed encrypted storage. The Room database and private files do not have additional app-level full-database encryption.
+
+When you request a network feature, relevant prompts, attachments, URLs, search terms, or response text are sent directly to the model or tool service you selected. API keys are sent to the corresponding endpoint for authentication. Only configure services and HTTPS endpoints that you trust and are authorized to use.
+
+Optional non-free network services
+
+The app can connect to user-selected model providers and optionally to Exa for web search, the public InfoFlow service for URL reading, and Xiaomi MiMo for speech generation. These services are not bundled software dependencies; their servers, terms, privacy practices, quotas, pricing, and availability are controlled by their respective operators and may be proprietary. F-Droid therefore marks this app with the NonFreeNet anti-feature. These integrations are optional.
+
+Moving between distribution channels
+
+F-Droid builds and GitHub Release APKs use different signing certificates, so one cannot be installed as an update over the other. Switching channels requires uninstalling the installed app, which deletes its private local data.
+
+The password-encrypted .tfcfg export contains configuration and credentials, but it is not a complete workspace backup. It does not export conversations, messages, attachments, favorites, notes, knowledge files, avatars, or all interface preferences. There is currently no complete workspace export. Review what can be preserved before uninstalling or switching channels.

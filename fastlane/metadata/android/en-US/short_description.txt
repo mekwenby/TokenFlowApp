@@ -1,0 +1,1 @@
+A local-first BYOK Android client for multiple AI model APIs

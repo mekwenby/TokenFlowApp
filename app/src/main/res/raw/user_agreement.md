@@ -1,111 +1,104 @@
-**协议版本：1.0**
+**Agreement version: 1.1**
 
-**生效日期：2026 年 8 月 17 日**
+**Effective date: August 18, 2026**
 
-欢迎使用一念通流（以下简称“本应用”）。本应用通过“关于 > 用户协议”提供本协议，不设置首次启动强制勾选。请在使用本应用前主动阅读；如您不同意本协议，请停止使用本应用。适用法律要求另行告知或取得单独同意的，以相应法律要求为准。
+Welcome to TokenFlow (the "App"). This agreement is available under About > User agreement and is not presented as a mandatory first-launch checkbox. Please read it before using network-connected features. Rights granted by the App's free and open-source licenses are independent of this agreement and are described in Section 8.
 
-## 1. 协议范围
+## 1. Scope
 
-1. 本协议由您与本应用开发者就本应用的下载、安装和使用订立。
-2. 本应用连接的模型、搜索、网页读取、语音生成及其他外部服务，由相应服务运营者提供。除本应用开发者明确说明由其提供的服务外，这些服务受各自运营者的协议、隐私政策、计费规则和使用限制约束。
-3. 如第三方规则与本协议存在差异，涉及第三方服务的部分以第三方规则为准；本协议不改变您依法享有且不可放弃的消费者权利。
+1. This agreement describes the relationship between you and the App developer when you install and use the distributed App.
+2. Model inference, search, web reading, speech generation, and other external services are supplied by their respective operators. Unless the App developer expressly identifies a service as its own, your use of that service is also governed by the operator's terms, privacy policy, billing rules, and service limits.
+3. External-service terms govern only your account and use of that external service. They do not reduce or replace rights granted to you under a free or open-source license covering the App or a component of it.
+4. Nothing in this agreement limits consumer or other statutory rights that cannot lawfully be waived.
 
-## 2. 服务内容与性质
+## 2. What the App does
 
-1. 本应用是由用户自行配置服务地址和 API Key 的 Android AI 客户端，可提供模型对话、附件处理、会话管理、收藏、笔记、智能体、本地知识库、联网搜索、网页读取和语音生成等功能。
-2. 模型能力、搜索结果、网页内容和语音生成能力来自用户选择、配置或启用的外部服务。除本应用开发者明确说明由其提供的服务外，本应用开发者不控制相关服务的模型、内容、价格、额度或运行状态。
-3. 部分功能属于可选扩展。相关功能处于启用状态时，可能由您主动发起，也可能由模型在对话过程中调用工具而触发，不一定在每次调用前再次确认。
-4. 本应用的功能、兼容范围和界面可能随版本更新而调整。本应用开发者不承诺所有功能永久免费、永久可用或始终兼容所有第三方接口。
+1. TokenFlow is an Android AI client in which you provide service addresses and API keys. It supports model conversations, attachments, conversation management, saved messages, notes, agents, local knowledge, web search, web reading, and speech generation.
+2. Models, search results, web content, and generated speech come from services that you select, configure, or enable. The App developer does not control their content, prices, quotas, or availability unless expressly stated otherwise.
+3. Some optional tools can be invoked by you or by a configured model during a conversation. A separate confirmation may not be shown before every invocation.
+4. Features and compatibility can change between releases. No promise is made that every external service will remain available, free, or compatible.
 
-## 3. API Key、账户与费用
+## 3. API keys, accounts, and charges
 
-1. 您应通过合法渠道取得并使用模型供应商、Exa、Xiaomi MiMo 或其他第三方服务的账户和 API Key，并保证您有权使用所配置的服务地址和凭据。
-2. 您应妥善保管 API Key、配置归档密码和设备访问权限，不得向无权使用的人披露。发现凭据遗失、泄露或异常使用时，您应及时在对应第三方平台撤销或更换凭据。
-3. 本应用会使用 Android 提供的安全能力加密保存已配置的敏感凭据；配置导出文件会使用您设置的密码进行加密。任何安全措施均不能绝对消除泄露、设备损坏或数据丢失风险。
-4. 第三方服务产生的订阅费、调用费、网络费、税费或其他费用，由您与相应第三方按照其规则结算。本应用开发者不代为承诺第三方价格、免费额度或退款政策。
+1. You are responsible for obtaining accounts and credentials lawfully and for having permission to use each configured endpoint.
+2. Protect API keys, archive passwords, and device access. If a credential may have been exposed, revoke or replace it at the corresponding provider.
+3. The App uses Android security facilities to protect configured secrets and encrypts configuration archives with the password you choose. No security measure can eliminate all risks of disclosure, device loss, or data loss.
+4. Subscription fees, usage charges, network costs, taxes, and refunds are matters between you and the relevant service operator.
 
-## 4. 用户内容与必要授权
+## 4. Your content
 
-1. “用户内容”包括您在本应用中输入、导入、拍摄、保存或选择处理的提示词、系统提示词、对话、图片、文档、网页地址、收藏、笔记、智能体配置、知识材料及其他数据。
-2. 您应确保自己有权处理用户内容，不侵犯他人的著作权、商标权、隐私权、个人信息权益、商业秘密或其他合法权益。
-3. 您保留对用户内容依法享有的权利。为执行您的操作，本应用仅在必要范围内对用户内容进行本地存储、解析、索引、格式转换，并按您的配置或指令发送给相应第三方服务。本协议不要求您向本应用开发者授予永久、独占或可转授权的内容许可。
-4. 您不应在缺乏合法依据或必要授权时上传他人的个人信息、保密资料、受限制数据或无权使用的内容。
+1. "Your content" includes prompts, system instructions, conversations, images, documents, URLs, saved messages, notes, agent settings, knowledge materials, and other data you enter, import, capture, save, or select for processing.
+2. You retain the rights you hold in your content. To carry out your instructions, the App processes it locally and sends only the material needed for the selected feature to the services you configure.
+3. This agreement does not require you to grant the App developer a permanent, exclusive, or sublicensable license to your content.
+4. You are responsible for having a lawful basis and any required permissions to process personal information, confidential material, copyrighted works, and other protected content.
 
-## 5. 本地存储与数据传输
+## 5. Local storage and data transfers
 
-1. 聊天记录、收藏、笔记、智能体、知识文件及相关配置主要保存在本应用的私有存储空间。本应用当前不提供聊天数据的云端同步或云端恢复服务。
-2. 为完成您发起的功能，相关数据可能离开设备并发送给下列服务：
-   - 您配置的 API Key 会作为认证信息发送至相应服务地址。使用自定义模型服务地址时，该地址的运营者将收到对应凭据和请求内容，请仅配置您信任且有权使用的地址。
-   - 对话历史、系统提示词、附件内容或描述，以及检索到的知识片段，可能发送给您配置的模型供应商。
-   - 笔记正文可能发送给您选择的模型，用于生成标题或重新总结正文。
-   - 搜索词及搜索参数会发送给 Exa，用于联网搜索。
-   - 待读取的 URL 及与读取有关的信息可能发送给 InfoFlow、目标网站，或由本应用直接访问目标网站。
-   - Exa 返回的搜索结果和网页读取所得正文，可能作为工具结果继续发送给您配置的模型供应商。
-   - 您选择生成语音的文本及语音参数会发送给 Xiaomi MiMo。
-3. 接收数据的外部服务运营者可能按照其自身规则记录、处理、存储或跨境传输收到的数据。本应用无法控制其他运营者的数据保留期限和后续处理方式。请在启用相应服务前查阅其协议和隐私政策。
-4. 语音文件等临时结果可能保存在应用缓存中，并可能被系统或本应用清理。您主动导出的加密配置文件由您自行保管，不再受本应用私有存储范围保护。
-5. 删除本地内容或卸载本应用，只会影响本应用能够控制的本地副本，不代表第三方服务、外部存储或您自行导出的文件中的副本同时被删除。
+1. Conversations, saved messages, notes, agents, knowledge files, and related settings are primarily stored in the App's private storage. The App does not currently provide cloud synchronization or recovery of conversation data.
+2. When you use a feature, relevant data can leave the device as follows:
+   - An API key is sent as authentication to the service endpoint you configure. A custom endpoint operator will receive the corresponding credential and request content.
+   - Conversation history, system instructions, attachment content or descriptions, and retrieved knowledge passages can be sent to the configured model provider.
+   - Note content can be sent to a model you choose to generate a title or rewrite the note.
+   - Search queries and parameters are sent to Exa when web search is used.
+   - A URL and related request data can be sent to InfoFlow, sent to the target website, or fetched directly by the App.
+   - Search results and extracted web content can be forwarded to the configured model as tool results.
+   - Text selected for speech and speech parameters are sent to Xiaomi MiMo.
+3. External operators can log, process, retain, or transfer received data under their own policies. Review those policies before enabling a service.
+4. Temporary results such as audio files can be stored in the App cache and removed by Android or the App. Exported encrypted configuration files are under your control outside private App storage.
+5. Deleting local content or uninstalling the App affects only copies controlled by the App. It does not delete copies retained by external services or in files you exported.
 
-## 6. 第三方服务与外部链接
+## 6. External services and links
 
-1. 本应用提供的第三方申请链接、项目链接和网页链接仅用于帮助您访问相关资源，不表示本应用开发者对第三方内容作出认可、担保或持续可用承诺。
-2. 第三方可能调整接口、模型、服务条款、地区限制、认证方式、价格或配额，并可能发生中断、限流或停止服务。本应用开发者无法控制上述变化。
-3. 因您配置错误、第三方账户状态、额度不足、接口变更、网络环境或第三方服务故障导致的功能异常，应优先按照相应第三方规则处理。客户端可能显示相关错误信息；能否通过后续版本恢复兼容取决于具体接口变化。
+1. Provider application links, project links, and web links are supplied for convenience and do not constitute a warranty or endorsement.
+2. External operators can change interfaces, models, terms, regional access, authentication, prices, or quotas, and can interrupt or end a service.
+3. Problems caused by configuration, account status, quota, network conditions, or an external-service change are subject to that operator's rules. A later App release may or may not restore compatibility.
+4. Obligations imposed by an external operator apply to your use of that operator's service. They do not impose additional conditions on using, studying, modifying, or distributing free and open-source App code under its applicable license.
 
-## 7. AI 输出与使用风险
+## 7. AI output and risk
 
-1. 模型生成的文本、图片描述、搜索摘要、笔记总结和其他输出可能不准确、不完整、过时、带有偏见，或与第三方权利发生冲突。
-2. AI 输出不构成医疗、法律、金融、投资、就业、教育录取、人身安全或其他专业意见，也不应作为高风险决策的唯一依据。您应结合可靠来源和专业人员意见进行人工核验。
-3. 您应判断输出是否适合您的具体用途，并对复制、发布、执行或依赖输出所产生的后果负责。
-4. 输出内容的权利归属可能取决于适用法律、第三方模型条款、输入内容权利和具体使用方式。本应用开发者不保证您必然取得输出的完整或排他权利。
+1. Generated text, search summaries, note rewrites, and other output can be inaccurate, incomplete, outdated, biased, or inconsistent with third-party rights.
+2. AI output is not medical, legal, financial, investment, employment, admissions, safety, or other professional advice and should not be the sole basis for a high-risk decision.
+3. Check output against reliable sources and qualified professionals where appropriate. You are responsible for deciding whether output is suitable for your intended use.
+4. Rights in output can depend on applicable law, provider terms, input rights, and the particular use. The App developer does not guarantee exclusive or complete rights in any output.
 
-## 8. 使用规范
+## 8. Free and open-source licenses
 
-您不得利用本应用从事下列行为：
+1. Except for third-party material that is clearly identified, code, documentation, and visual assets in the TokenFlowApp repository for which the project maintainers hold the necessary licensing rights are provided under the Apache License, Version 2.0. The license text is available at <https://github.com/mekwenby/TokenFlowApp/blob/main/LICENSE>.
+2. Subject to the Apache License 2.0, you may use the covered material for any purpose, reproduce it, modify it, create derivative works, publicly display or perform it, sublicense it, and distribute it. This agreement adds no restriction to those license rights.
+3. Third-party components and materials remain subject to their own copyright notices and licenses. Their coordinates, notices, and license texts are available offline under About > Third-party notices.
+4. If this agreement conflicts with an applicable free or open-source license, the license controls for the covered material.
+5. Apache License 2.0 does not grant permission to use the TokenFlow or 一念通流 names, logos, or other source identifiers as trademarks, except as required for reasonable and customary description of the origin of the work.
 
-1. 违反适用法律法规、法院命令或监管要求；
-2. 侵犯他人的知识产权、隐私权、个人信息权益、商业秘密或其他合法权益；
-3. 实施欺诈、骚扰、威胁、仇恨、暴力、恶意自动化或其他危害他人的行为；
-4. 未经授权攻击、扫描、干扰网络、设备、账户或服务，传播恶意代码，或规避安全、认证、配额及访问限制；
-5. 冒用他人身份、盗用凭据，或使用来源不合法的 API Key、数据和内容；
-6. 以其他可能损害本应用、第三方服务或其他用户合法权益的方式使用本应用。
+## 9. Changes, availability, and stopping use
 
-## 9. 知识产权与开源组件
+1. Future versions can be changed, discontinued, or left without maintenance or technical support because of feature work, security risks, legal requirements, or external-service changes.
+2. You can stop using network-connected features or uninstall the App at any time. Current configuration export includes providers and keys, models, some global settings, Exa and MiMo settings, and agents. It does not include conversations, messages, attachments, saved messages, notes, knowledge files, avatars, or display preferences.
+3. The current App does not provide a complete export, backup, or cloud recovery mechanism for all local workspace data. Uninstalling, system cleanup, or device failure can make that data unrecoverable.
 
-1. 除用户内容和明确标注的第三方内容外，本应用的名称、图标、界面设计、文档及其他受保护内容的权利归相应权利人所有。
-2. 未经权利人许可，您不得删除权利标识，或对受保护内容进行超出法律允许范围的复制、发行和商业利用。
-3. 本应用使用多个开源组件。开源组件仍适用各自的开源许可证和版权声明；如本协议与某项开源许可证冲突，就该组件以相应开源许可证为准。
-4. 使用开源组件不表示本应用全部代码均已按同一许可证开源。
+## 10. Disclaimers and liability
 
-## 10. 服务变更、暂停与终止
+1. To the extent permitted by applicable law, the App is provided on an "AS IS" basis. The App developer aims to maintain the client but does not guarantee uninterrupted operation, compatibility with external services, preservation of data, or freedom from security incidents.
+2. Responsibility for loss directly caused by an external service, configuration, network, device state, your content, or reliance on AI output is determined under applicable law and the circumstances of the case.
+3. No disclaimer or limitation in this agreement excludes liability that cannot lawfully be excluded or limits mandatory consumer, privacy, personal-information, or other statutory rights.
+4. License-specific warranty disclaimers and liability limitations continue to apply to material distributed under the corresponding free or open-source license.
 
-1. 本应用开发者可因功能改进、安全风险、法律要求、第三方接口变化或维护需要，调整后续版本、停止分发或停止维护与技术支持，并可通过应用更新说明或发布页面说明相关变化。
-2. 您可以随时停止使用并卸载本应用。当前配置导出只包含供应商与密钥、模型、部分全局设置、Exa 与 MiMo 配置及智能体，不包含会话、消息、附件、收藏、笔记、知识文件、头像或显示偏好。本应用当前不提供这些本地工作区数据的完整导出、备份或云端恢复能力；卸载、系统清理或设备故障可能导致其无法恢复。
+## 11. Minors
 
-## 11. 免责声明与责任限制
+1. A person who has not reached the age of independent consent or legal capacity in their location should use the App only with guidance and consent from a parent or guardian where required.
+2. Guardians should help assess external services, content, AI output, accounts, API keys, charges, and data-transfer risks.
+3. A feature must not be used by a minor where applicable law or an external-service rule prohibits that use.
 
-1. 在适用法律允许的范围内，本应用按现状提供。本应用开发者会合理维护客户端功能，但不保证本应用或第三方服务不发生错误、中断、兼容性问题、数据丢失或安全事件。
-2. 对由第三方服务、用户配置、网络环境、设备状态、用户内容或用户对 AI 输出的采用直接造成的损失，各方应依据过错程度和适用法律承担责任。
-3. 本协议中的任何免责声明或责任限制，均不排除或限制依法不得排除或限制的责任，也不影响您依法享有的消费者保护、个人信息保护和其他强制性权利。
+## 12. Agreement updates
 
-## 12. 未成年人
+1. This agreement can be updated when features, data handling, external services, or legal requirements change. The current text will be provided in About > User agreement or on the App's release page.
+2. Material changes will be highlighted or presented for separate consent when applicable law requires it.
+3. An update applies from its stated effective date to the matters governed by this agreement. It does not retroactively alter or revoke rights already granted under an open-source license.
 
-1. 未达到所在地法律规定的独立同意年龄或完全民事行为能力的用户，应在父母或其他监护人阅读并同意本协议后，在其指导和监督下使用本应用。
-2. 监护人应帮助未成年人判断第三方服务、用户内容和 AI 输出的适用性，并管理相关账户、API Key、费用和数据传输风险。
-3. 如适用法律禁止向特定年龄的未成年人提供相关功能，未成年人不得使用该等功能。
+## 13. Governing law and disputes
 
-## 13. 协议更新
+1. This agreement is subject to mandatory law that applies in your location and cannot be excluded by contract.
+2. You can first contact the App developer about a dispute. Either party can then use a court, consumer authority, regulator, or other competent dispute-resolution body as permitted by law.
 
-1. 本协议可能因功能、数据处理方式、第三方服务或法律要求变化而更新。更新文本会在“关于 > 用户协议”、版本更新说明或应用发布页面中提供。
-2. 如适用法律要求对重大变更进行显著告知或另行取得同意，应按照相应要求处理。
-3. 更新后的协议自其标明的生效时间起适用。请在更新后重新阅读；如您不同意更新内容，请停止使用本应用。
+## 14. Contact
 
-## 14. 适用法律与争议解决
-
-1. 本协议的订立、履行和解释，应遵守您所在地不可通过协议排除的强制性法律。
-2. 因本协议或使用本应用产生争议时，您可先通过本协议所列渠道与本应用开发者协商解决。
-3. 协商无法解决的，任何一方均可依法向有管辖权的法院、消费者保护机构、监管机构或其他依法可受理的争议解决机构提出请求。
-
-## 15. 联系方式
-
-如您对本协议、本应用功能或数据处理方式有疑问、意见或权利请求，可通过您获取本应用的发布平台所列开发者渠道联系，或前往项目维护页面查看最新公开信息：<https://github.com/mekwenby/TokenFlow>。
+For questions about this agreement, the App, or data handling, use the developer contact listed by the distribution platform from which you obtained the App, or visit the current project page: <https://github.com/mekwenby/TokenFlowApp>.

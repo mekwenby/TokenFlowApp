@@ -1,4 +1,48 @@
 import java.util.Locale
+import org.gradle.api.DefaultTask
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.provider.ListProperty
+import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
+
+abstract class VerifyThirdPartyNotices : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val noticesFile: RegularFileProperty
+
+    @get:Input
+    abstract val artifactCoordinates: ListProperty<String>
+
+    @TaskAction
+    fun verify() {
+        val coordinatePattern = Regex("""`([^`:\s]+):([^`:\s]+):([^`:\s]+)`""")
+        val declaredCoordinates = coordinatePattern
+            .findAll(noticesFile.asFile.get().readText())
+            .map { match -> match.groupValues.drop(1).joinToString(":") }
+            .toSortedSet()
+        val resolvedCoordinates = artifactCoordinates.get().toSortedSet()
+        val missingCoordinates = resolvedCoordinates - declaredCoordinates
+        val unexpectedCoordinates = declaredCoordinates - resolvedCoordinates
+
+        check(missingCoordinates.isEmpty() && unexpectedCoordinates.isEmpty()) {
+            buildString {
+                appendLine("Third-party notices do not match releaseRuntimeClasspath artifacts.")
+                if (missingCoordinates.isNotEmpty()) {
+                    appendLine("Missing coordinates:")
+                    missingCoordinates.forEach { appendLine("  $it") }
+                }
+                if (unexpectedCoordinates.isNotEmpty()) {
+                    appendLine("Unexpected coordinates:")
+                    unexpectedCoordinates.forEach { appendLine("  $it") }
+                }
+            }.trimEnd()
+        }
+    }
+}
 
 plugins {
     id("com.android.application")
@@ -10,6 +54,14 @@ plugins {
 fun secret(name: String): String? = providers.gradleProperty(name).orNull
     ?: providers.environmentVariable(name).orNull
 
+val fdroidBuild = providers.gradleProperty("fdroidBuild")
+    .map { value ->
+        require(value == "true" || value == "false") {
+            "fdroidBuild must be either true or false"
+        }
+        value.toBooleanStrict()
+    }
+    .getOrElse(false)
 val releaseRequested = gradle.startParameter.taskNames.any { requestedTask ->
     val taskName = requestedTask.substringAfterLast(':').lowercase(Locale.ROOT)
     taskName.contains("release") || taskName == "build" || taskName == "assemble"
@@ -20,10 +72,21 @@ val signingValues = mapOf(
     "alias" to secret("TOKENFLOW_KEY_ALIAS"),
     "keyPassword" to secret("TOKENFLOW_KEY_PASSWORD"),
 )
+val anySigningValueSupplied = signingValues.values.any { it != null }
+val allSigningValuesPresent = signingValues.values.all { !it.isNullOrBlank() }
 
-if (releaseRequested) {
-    require(signingValues.values.all { !it.isNullOrBlank() }) {
-        "Release builds require TOKENFLOW_KEYSTORE_PATH, TOKENFLOW_KEYSTORE_PASSWORD, TOKENFLOW_KEY_ALIAS, and TOKENFLOW_KEY_PASSWORD"
+if (fdroidBuild) {
+    require(!anySigningValueSupplied) {
+        "F-Droid builds must not receive any TokenFlow release signing values"
+    }
+} else {
+    require(!anySigningValueSupplied || allSigningValuesPresent) {
+        "Release signing values must be either all present and non-blank or all absent"
+    }
+    if (releaseRequested) {
+        require(allSigningValuesPresent) {
+            "Release builds require TOKENFLOW_KEYSTORE_PATH, TOKENFLOW_KEYSTORE_PASSWORD, TOKENFLOW_KEY_ALIAS, and TOKENFLOW_KEY_PASSWORD"
+        }
     }
 }
 
@@ -36,14 +99,14 @@ android {
         applicationId = "xyz.mek030399.tokenflow"
         minSdk = 26
         targetSdk = 36
-        versionCode = 12
-        versionName = "2.4.3"
+        versionCode = 13
+        versionName = "2.4.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
 
     signingConfigs {
-        if (signingValues.values.all { !it.isNullOrBlank() }) {
+        if (allSigningValuesPresent) {
             create("release") {
                 storeFile = file(signingValues.getValue("path")!!)
                 storePassword = signingValues.getValue("storePassword")
@@ -127,4 +190,29 @@ dependencies {
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+}
+
+val verifyThirdPartyNotices = tasks.register<VerifyThirdPartyNotices>("verifyThirdPartyNotices") {
+    group = "verification"
+    description = "Verifies that third-party notices exactly cover Release runtime artifacts."
+    noticesFile.set(layout.projectDirectory.file("src/main/res/raw/third_party_notices.md"))
+}
+
+configurations.configureEach {
+    if (name == "releaseRuntimeClasspath") {
+        val coordinates = incoming.artifacts.resolvedArtifacts.map { artifacts ->
+            artifacts.map { artifact ->
+                val component = artifact.id.componentIdentifier
+                require(component is ModuleComponentIdentifier) {
+                    "Unsupported non-module Release runtime artifact: $component"
+                }
+                with(component) { "$group:$module:$version" }
+            }
+                .distinct()
+                .sorted()
+        }
+        verifyThirdPartyNotices.configure {
+            artifactCoordinates.set(coordinates)
+        }
+    }
 }

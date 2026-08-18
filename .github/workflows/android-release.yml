@@ -84,7 +84,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           chmod +x ./gradlew
-          ./gradlew testDebugUnitTest --rerun-tasks lintDebug assembleDebug assembleDebugAndroidTest
+          ./gradlew testDebugUnitTest --rerun-tasks lintDebug assembleDebug assembleDebugAndroidTest verifyThirdPartyNotices
 
       - name: Prepare release keystore
         id: keystore

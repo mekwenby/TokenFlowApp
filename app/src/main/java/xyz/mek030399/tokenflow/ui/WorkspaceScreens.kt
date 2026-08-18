@@ -979,22 +979,50 @@ private const val KNOWLEDGE_PLAIN_BLOCK_CODE_POINTS = 8_192
 @Composable
 private fun AboutScreen(viewModel: AppViewModel, showBack: Boolean) {
     var showAgreement by rememberSaveable { mutableStateOf(false) }
+    var showThirdPartyNotices by rememberSaveable { mutableStateOf(false) }
+    val showDetail = showAgreement || showThirdPartyNotices
     val navigateBack = {
-        if (showAgreement) showAgreement = false else viewModel.openScreen(AppScreen.CHAT)
+        if (showDetail) {
+            showAgreement = false
+            showThirdPartyNotices = false
+        } else {
+            viewModel.openScreen(AppScreen.CHAT)
+        }
     }
-    BackHandler(enabled = showAgreement || showBack, onBack = navigateBack)
+    BackHandler(enabled = showDetail || showBack, onBack = navigateBack)
     WorkspaceScaffold(
-        title = stringResource(if (showAgreement) R.string.user_agreement else R.string.about),
-        showBack = showAgreement || showBack,
+        title = stringResource(
+            when {
+                showAgreement -> R.string.user_agreement
+                showThirdPartyNotices -> R.string.third_party_notices
+                else -> R.string.about
+            },
+        ),
+        showBack = showDetail || showBack,
         onBack = navigateBack,
     ) { padding ->
-        if (showAgreement) UserAgreementContent(padding)
-        else AboutOverview(padding, onOpenAgreement = { showAgreement = true })
+        when {
+            showAgreement -> BundledMarkdownContent(padding, R.raw.user_agreement, UiTestTags.USER_AGREEMENT_SCREEN)
+            showThirdPartyNotices -> BundledMarkdownContent(
+                padding,
+                R.raw.third_party_notices,
+                UiTestTags.THIRD_PARTY_NOTICES_SCREEN,
+            )
+            else -> AboutOverview(
+                padding,
+                onOpenThirdPartyNotices = { showThirdPartyNotices = true },
+                onOpenAgreement = { showAgreement = true },
+            )
+        }
     }
 }
 
 @Composable
-private fun AboutOverview(padding: PaddingValues, onOpenAgreement: () -> Unit) {
+private fun AboutOverview(
+    padding: PaddingValues,
+    onOpenThirdPartyNotices: () -> Unit,
+    onOpenAgreement: () -> Unit,
+) {
     val uriHandler = LocalUriHandler.current
     val openUri = { url: String ->
         if (isSafeHttpUrl(url)) runCatching { uriHandler.openUri(url) }
@@ -1064,6 +1092,17 @@ private fun AboutOverview(padding: PaddingValues, onOpenAgreement: () -> Unit) {
             }
             items(OPEN_SOURCE_COMPONENTS, key = { it.name }) { component ->
                 OpenSourceComponentRow(component)
+            }
+            item {
+                ListItem(
+                    headlineContent = { Text(stringResource(R.string.third_party_notices), fontWeight = FontWeight.Medium) },
+                    leadingContent = { Icon(Icons.Outlined.Description, null) },
+                    trailingContent = { Icon(Icons.AutoMirrored.Outlined.ArrowForward, null, Modifier.size(20.dp)) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(UiTestTags.ABOUT_THIRD_PARTY_NOTICES)
+                        .clickable(onClick = onOpenThirdPartyNotices),
+                )
             }
             item { AboutSectionTitle(stringResource(R.string.user_agreement)) }
             item {
@@ -1144,10 +1183,10 @@ private fun OpenSourceComponentRow(component: OpenSourceComponent) {
 }
 
 @Composable
-private fun UserAgreementContent(padding: PaddingValues) {
+private fun BundledMarkdownContent(padding: PaddingValues, rawResource: Int, testTag: String) {
     val context = LocalContext.current
-    val agreement = remember(context) {
-        context.resources.openRawResource(R.raw.user_agreement).bufferedReader(Charsets.UTF_8).use { it.readText() }
+    val content = remember(context, rawResource) {
+        context.resources.openRawResource(rawResource).bufferedReader(Charsets.UTF_8).use { it.readText() }
     }
     Column(
         modifier = Modifier
@@ -1155,11 +1194,11 @@ private fun UserAgreementContent(padding: PaddingValues) {
             .fillMaxSize()
             .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
-            .testTag(UiTestTags.USER_AGREEMENT_SCREEN),
+            .testTag(testTag),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         MarkdownContent(
-            agreement,
+            content,
             Modifier.widthIn(max = 860.dp).fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
         )
     }

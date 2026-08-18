@@ -6,7 +6,7 @@ Release 签名决定 Android 是否允许覆盖升级。`xyz.mek030399.tokenflow
 
 - Release 应用 ID：`xyz.mek030399.tokenflow`
 - 旧应用 ID：`com.tokenflow.chat`（仅作迁移识别，不是新包的升级目标）
-- 当前版本：`2.4.3`，`versionCode 12`
+- 当前版本：`2.4.4`，`versionCode 13`
 - Release 开启 R8 代码压缩和资源收缩。
 - 仓库不包含 Release keystore 或密码。首个正式签名身份已于 2026-08-18 建立，证书 SHA-256 为 `FEC865BEDC77C742B0E1B3D93A05FCEEBFA6075F46E1C8242B8F2261F0767AFE`，有效期至 2054-01-03。
 - 维护者本机可将签名材料放在已被 Git 忽略并限制访问权限的 `.signing/` 目录；该目录不是源码的一部分，必须另做离线备份。GitHub 自动发布是否可用取决于 `release` Environment 是否已正确配置。
@@ -23,7 +23,9 @@ Release 签名决定 Android 是否允许覆盖升级。`xyz.mek030399.tokenflow
 | `TOKENFLOW_KEY_ALIAS` | key alias |
 | `TOKENFLOW_KEY_PASSWORD` | 私钥密码 |
 
-读取优先级为 Gradle property（`-P` 或外部 Gradle 配置）优先，其次是环境变量。任务名包含 `release`，或任务恰为 `build` / `assemble` 时，任一值缺失都会在 Gradle 配置阶段失败。
+读取优先级为 Gradle property（`-P` 或外部 Gradle 配置）优先，其次是环境变量。四个签名值必须全部提供且非空，或全部未定义；部分提供及空值都会在 Gradle 配置阶段失败。普通构建中，任务名包含 `release`，或任务恰为 `build` / `assemble` 时，四项任一缺失也会失败。
+
+`-PfdroidBuild=true` 是唯一允许在四个签名值全部缺失时构建 Release 的入口。该模式专供 F-Droid 从源码生成未签名产物；如果进程中出现任意一个 TokenFlow 签名值，配置会立即失败，防止私钥意外进入 F-Droid 构建环境。属性缺失或为 `false` 时仍执行普通 Release 签名规则，其他属性值无效。
 
 不要把这些值写入：
 
@@ -62,7 +64,7 @@ Release 签名决定 Android 是否允许覆盖升级。`xyz.mek030399.tokenflow
 
 仓库包含两条 GitHub Actions 工作流：
 
-- [`android-ci.yml`](../.github/workflows/android-ci.yml) 在 Pull Request 和 `main` 提交上运行完整 Debug 门禁，并把 Debug APK 作为保留 7 天的 Actions artifact。该工作流不引用签名 Secrets。
+- [`android-ci.yml`](../.github/workflows/android-ci.yml) 在 Pull Request 和 `main` 提交上运行完整 Debug 门禁、第三方许可证声明校验和 F-Droid 未签名 Release 构建，并把 Debug APK 作为保留 7 天的 Actions artifact。CI 使用 Build Tools 36 的 `aapt2` 确认产物有效，并要求 `apksigner` 确认它没有签名；未签名 Release 只作构建验证，不上传。该工作流不引用签名 Secrets。
 - [`android-release.yml`](../.github/workflows/android-release.yml) 只接受稳定格式的 `vX.Y.Z` 标签。标签提交必须已经包含在 `main` 中，且发布前远端标签仍须指向完成签名构建的同一提交；验证、签名和产物检查全部成功后，工作流才会公开 GitHub Release。
 
 Release 工作流仅构建和公开 APK，不构建或发布 AAB。公开附件固定为 `TokenFlow-X.Y.Z.apk` 和 `TokenFlow-X.Y.Z.apk.sha256`。R8 `mapping.txt` 单独作为保留 90 天的 Actions artifact，不会附到公开 Release；维护者必须在到期前下载并保存到受控的长期归档。
@@ -120,11 +122,11 @@ GitHub 单个 Actions Secret 上限为 [48 KB](https://docs.github.com/en/action
 1. 确认 `release` Environment、四个 Secrets、证书指纹变量和标签 Ruleset 已正确配置。
 2. 在 `app/build.gradle.kts` 中递增 `versionCode`、设置新的 `versionName`，并同步当前版本文档。
 3. 运行完整本地门禁，提交并推送 `main`，等待 Android CI 成功。
-4. 在已通过 CI 的提交上创建并推送与 `versionName` 一致的标签。以 `2.4.3` 为例：
+4. 在已通过 CI 的提交上创建并推送与 `versionName` 一致的标签。以 `2.4.4` 为例：
 
 ```powershell
-git tag -a v2.4.3 -m '一念通流 2.4.3'
-git push origin v2.4.3
+git tag -a v2.4.4 -m '一念通流 2.4.4'
+git push origin v2.4.4
 ```
 
 Release 工作流会重新运行完整 Debug 门禁，构建签名 APK，并依次核对：
@@ -174,6 +176,18 @@ cd C:\Users\Mek\Works\TokenFlowApp
 - R8 mapping：`app/build/outputs/mapping/release/mapping.txt`
 
 `mapping.txt` 对线上混淆堆栈的还原很重要。它位于被 Git 忽略的构建目录，每个版本都应与 APK 和可选 AAB 一起保存到受控的外部发布归档。GitHub Actions 中的 90 天 artifact 只是临时保留，不是长期归档。
+
+## F-Droid 构建与渠道签名
+
+F-Droid 构建服务器不接收本项目的 Release keystore。它使用下面的命令从已标记的源码构建未签名 Release，随后由 F-Droid 基础设施使用独立证书签名：
+
+```powershell
+.\gradlew.bat -PfdroidBuild=true assembleRelease --no-configuration-cache
+```
+
+不要为该命令设置 `TOKENFLOW_KEYSTORE_PATH`、`TOKENFLOW_KEYSTORE_PASSWORD`、`TOKENFLOW_KEY_ALIAS` 或 `TOKENFLOW_KEY_PASSWORD`，也不要在 F-Droid 元数据中配置本项目私钥。F-Droid APK 与 GitHub Release APK 的证书不同，两个渠道各自形成独立升级链；从一个渠道切换到另一个渠道时，Android 会拒绝直接覆盖安装。切换前应先导出可导出的配置，并明确当前版本不能完整导出全部工作区数据。
+
+`verifyThirdPartyNotices` 会解析 `releaseRuntimeClasspath` 的实际 artifact，并与 App 内 `third_party_notices.md` 中反引号包裹的 `group:artifact:version` 坐标双向比较。新增、删除或升级运行时依赖时，必须同步更新 notices，否则 CI 失败。
 
 ## 验证签名和产物
 

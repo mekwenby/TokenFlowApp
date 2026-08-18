@@ -4,6 +4,8 @@
 
 # 一念通流 Android App
 
+[![Android CI](https://github.com/mekwenby/TokenFlowApp/actions/workflows/android-ci.yml/badge.svg?branch=main)](https://github.com/mekwenby/TokenFlowApp/actions/workflows/android-ci.yml)
+
 一念通流是一款原生 Android AI 客户端，使用 Kotlin、Jetpack Compose、Room 和 OkHttp 构建。应用采用 BYOK（用户自备 API Key）模式，直接连接用户配置的模型与工具服务，不依赖 TokenFlow Go 服务、PWA、`/mobile/v1` 或 `TOKENFLOW_BASE_URL`。
 
 ## 主要功能
@@ -33,6 +35,13 @@
 
 版本和 SDK 值以 [`app/build.gradle.kts`](app/build.gradle.kts) 为准；数据库版本以 [`LocalDatabase.kt`](app/src/main/java/xyz/mek030399/tokenflow/data/LocalDatabase.kt) 为准。
 
+## 下载 APK
+
+- 正式版从 [GitHub Releases](https://github.com/mekwenby/TokenFlowApp/releases) 下载。本项目自动上传的 Release 附件只有使用项目正式证书签名的 APK 及其 SHA-256 校验文件；GitHub 还会自动提供对应源码归档。
+- 每次 `main` 提交和 Pull Request 都会运行 [Android CI](https://github.com/mekwenby/TokenFlowApp/actions/workflows/android-ci.yml)。成功构建的 Debug APK 可在对应运行记录的 Artifacts 区域下载，保留 7 天。Pull Request artifact 可能包含尚未合并的贡献者代码，只能在信任其来源时安装，并且不要录入真实 API Key 或私人数据。
+
+Debug APK 使用 `xyz.mek030399.tokenflow.debug` 包名和临时 Debug 证书，只适合测试，不能作为正式版升级包。本次引入自动化不会创建 `2.4.2` Release；首次自动正式发布计划在版本升级到 `2.4.3`（`versionCode 12`）后单独触发。
+
 ## 从源码构建
 
 ### 环境要求
@@ -49,7 +58,7 @@ Windows PowerShell 7：
 ```powershell
 # 在仓库根目录执行
 .\gradlew.bat --version
-.\gradlew.bat testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
+.\gradlew.bat testDebugUnitTest --rerun-tasks lintDebug assembleDebug assembleDebugAndroidTest
 ```
 
 macOS 或 Linux：
@@ -57,7 +66,7 @@ macOS 或 Linux：
 ```bash
 # 在仓库根目录执行
 ./gradlew --version
-./gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
+./gradlew testDebugUnitTest --rerun-tasks lintDebug assembleDebug assembleDebugAndroidTest
 ```
 
 Debug APK 输出到：
@@ -103,6 +112,7 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ```text
 TokenFlowApp/
+├── .github/workflows/               # GitHub CI 和正式 APK 自动发布
 ├── app/
 │   ├── build.gradle.kts             # App 版本、SDK、依赖、签名和构建变体
 │   ├── schemas/                     # Room schema 3/4/5 快照
@@ -128,7 +138,7 @@ TokenFlowApp/
 4. 运行完整检查：
 
 ```powershell
-.\gradlew.bat testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
+.\gradlew.bat testDebugUnitTest --rerun-tasks lintDebug assembleDebug assembleDebugAndroidTest
 ```
 
 Instrumentation 测试必须使用可丢弃的隔离 AVD，不要在保留用户数据的设备上运行。

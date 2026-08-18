@@ -1,0 +1,419 @@
+name: Android Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Verify and build signed APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      asset_name: ${{ steps.metadata.outputs.asset_name }}
+      release_commit: ${{ steps.tag.outputs.release_commit }}
+      version: ${{ steps.tag.outputs.version }}
+
+    steps:
+      - name: Check out tagged revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release tag and branch
+        id: tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tag must use the stable vX.Y.Z format." >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          release_commit="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          if ! git merge-base --is-ancestor "$release_commit" refs/remotes/origin/main; then
+            echo "Release tag must point to a commit already contained in main." >&2
+            exit 1
+          fi
+
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "release_commit=$release_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          android_sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          sdkmanager_path="$android_sdk/cmdline-tools/latest/bin/sdkmanager"
+          if [[ -z "$android_sdk" || ! -x "$sdkmanager_path" ]]; then
+            sdkmanager_path="$(command -v sdkmanager || true)"
+          fi
+          if [[ -z "$sdkmanager_path" || ! -x "$sdkmanager_path" ]]; then
+            echo "Android sdkmanager is unavailable." >&2
+            exit 1
+          fi
+          "$sdkmanager_path" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Run Android verification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          chmod +x ./gradlew
+          ./gradlew testDebugUnitTest --rerun-tasks lintDebug assembleDebug assembleDebugAndroidTest
+
+      - name: Prepare release keystore
+        id: keystore
+        shell: bash
+        env:
+          TOKENFLOW_KEYSTORE_BASE64: ${{ secrets.TOKENFLOW_KEYSTORE_BASE64 }}
+          TOKENFLOW_CERT_SHA256: ${{ vars.TOKENFLOW_CERT_SHA256 }}
+        run: |
+          set -Eeuo pipefail
+
+          required_values=(
+            TOKENFLOW_KEYSTORE_BASE64
+            TOKENFLOW_CERT_SHA256
+          )
+          for name in "${required_values[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing release Environment secret or variable: $name" >&2
+              exit 1
+            fi
+          done
+
+          if (( ${#TOKENFLOW_KEYSTORE_BASE64} > 49152 )); then
+            echo "TOKENFLOW_KEYSTORE_BASE64 exceeds GitHub's 48 KB secret limit." >&2
+            exit 1
+          fi
+
+          expected_cert="$(printf '%s' "$TOKENFLOW_CERT_SHA256" | tr '[:lower:]' '[:upper:]' | tr -d ':[:space:]')"
+          if [[ ! "$expected_cert" =~ ^[0-9A-F]{64}$ ]]; then
+            echo "TOKENFLOW_CERT_SHA256 must contain exactly 64 hexadecimal characters." >&2
+            exit 1
+          fi
+
+          keystore_path="$RUNNER_TEMP/tokenflow-release.keystore"
+          umask 077
+          printf '%s' "$TOKENFLOW_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          chmod 600 "$keystore_path"
+          unset TOKENFLOW_KEYSTORE_BASE64
+          if [[ ! -s "$keystore_path" ]]; then
+            echo "Decoded release keystore is empty." >&2
+            exit 1
+          fi
+
+          echo "path=$keystore_path" >> "$GITHUB_OUTPUT"
+          echo "expected_cert=$expected_cert" >> "$GITHUB_OUTPUT"
+
+      - name: Build signed Release APK
+        shell: bash
+        env:
+          TOKENFLOW_KEYSTORE_PATH: ${{ steps.keystore.outputs.path }}
+          TOKENFLOW_KEYSTORE_PASSWORD: ${{ secrets.TOKENFLOW_KEYSTORE_PASSWORD }}
+          TOKENFLOW_KEY_ALIAS: ${{ secrets.TOKENFLOW_KEY_ALIAS }}
+          TOKENFLOW_KEY_PASSWORD: ${{ secrets.TOKENFLOW_KEY_PASSWORD }}
+        run: |
+          set -Eeuo pipefail
+          required_values=(
+            TOKENFLOW_KEYSTORE_PATH
+            TOKENFLOW_KEYSTORE_PASSWORD
+            TOKENFLOW_KEY_ALIAS
+            TOKENFLOW_KEY_PASSWORD
+          )
+          for name in "${required_values[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing release Environment secret or generated value: $name" >&2
+              exit 1
+            fi
+          done
+
+          trap 'rm -f -- "$TOKENFLOW_KEYSTORE_PATH"' EXIT
+          ./gradlew --no-configuration-cache assembleRelease
+
+      - name: Remove release keystore
+        if: always()
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/tokenflow-release.keystore"
+
+      - name: Validate release metadata
+        id: metadata
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+
+          metadata="app/build/outputs/apk/release/output-metadata.json"
+          if [[ ! -s "$metadata" ]]; then
+            echo "Release output metadata was not generated." >&2
+            exit 1
+          fi
+
+          jq -e '
+            .applicationId == "xyz.mek030399.tokenflow" and
+            .variantName == "release" and
+            (.elements | length == 1)
+          ' "$metadata" > /dev/null
+
+          version_name="$(jq -er '.elements[0].versionName' "$metadata")"
+          version_code="$(jq -er '.elements[0].versionCode' "$metadata")"
+          output_file="$(jq -er '.elements[0].outputFile' "$metadata")"
+
+          if [[ "$version_name" != "$EXPECTED_VERSION" ]]; then
+            echo "Tag version $EXPECTED_VERSION does not match APK versionName $version_name." >&2
+            exit 1
+          fi
+          if [[ ! "$version_code" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Release versionCode must be a positive integer." >&2
+            exit 1
+          fi
+          if [[ "$output_file" != "app-release.apk" ]]; then
+            echo "Unexpected Release APK name: $output_file" >&2
+            exit 1
+          fi
+
+          apk_path="app/build/outputs/apk/release/$output_file"
+          if [[ ! -s "$apk_path" ]]; then
+            echo "Release APK was not generated at $apk_path." >&2
+            exit 1
+          fi
+
+          echo "apk_path=$apk_path" >> "$GITHUB_OUTPUT"
+          echo "asset_name=TokenFlow-$EXPECTED_VERSION.apk" >> "$GITHUB_OUTPUT"
+          echo "version_code=$version_code" >> "$GITHUB_OUTPUT"
+
+      - name: Verify signed APK
+        shell: bash
+        env:
+          APK_PATH: ${{ steps.metadata.outputs.apk_path }}
+          EXPECTED_CERT: ${{ steps.keystore.outputs.expected_cert }}
+          EXPECTED_VERSION: ${{ steps.tag.outputs.version }}
+          EXPECTED_VERSION_CODE: ${{ steps.metadata.outputs.version_code }}
+        run: |
+          set -Eeuo pipefail
+
+          android_sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [[ -z "$android_sdk" ]]; then
+            echo "ANDROID_SDK_ROOT and ANDROID_HOME are both unavailable." >&2
+            exit 1
+          fi
+          apksigner="$android_sdk/build-tools/36.0.0/apksigner"
+          aapt2="$android_sdk/build-tools/36.0.0/aapt2"
+          [[ -x "$apksigner" ]] || { echo "apksigner 36.0.0 is unavailable." >&2; exit 1; }
+          [[ -x "$aapt2" ]] || { echo "aapt2 36.0.0 is unavailable." >&2; exit 1; }
+
+          cert_output="$("$apksigner" verify --verbose --print-certs "$APK_PATH")"
+          actual_cert="$(
+            printf '%s\n' "$cert_output" |
+              sed -n 's/^Signer #1 certificate SHA-256 digest: //p' |
+              sed -n '1p' |
+              tr '[:lower:]' '[:upper:]' |
+              tr -d ':[:space:]'
+          )"
+          if [[ "$actual_cert" != "$EXPECTED_CERT" ]]; then
+            echo "Release certificate SHA-256 does not match TOKENFLOW_CERT_SHA256." >&2
+            exit 1
+          fi
+          echo "Release certificate SHA-256 matches TOKENFLOW_CERT_SHA256."
+
+          badging="$("$aapt2" dump badging "$APK_PATH")"
+          package_line="$(printf '%s\n' "$badging" | sed -n '1p')"
+          [[ "$package_line" == *"name='xyz.mek030399.tokenflow'"* ]] || {
+            echo "Release APK has an unexpected application ID." >&2
+            exit 1
+          }
+          [[ "$package_line" == *"versionCode='$EXPECTED_VERSION_CODE'"* ]] || {
+            echo "Release APK has an unexpected versionCode." >&2
+            exit 1
+          }
+          [[ "$package_line" == *"versionName='$EXPECTED_VERSION'"* ]] || {
+            echo "Release APK has an unexpected versionName." >&2
+            exit 1
+          }
+
+      - name: Package release assets
+        shell: bash
+        env:
+          APK_PATH: ${{ steps.metadata.outputs.apk_path }}
+          ASSET_NAME: ${{ steps.metadata.outputs.asset_name }}
+        run: |
+          set -Eeuo pipefail
+
+          mapping="app/build/outputs/mapping/release/mapping.txt"
+          if [[ ! -s "$mapping" ]]; then
+            echo "R8 mapping.txt was not generated." >&2
+            exit 1
+          fi
+
+          mkdir -p dist
+          cp -- "$APK_PATH" "dist/$ASSET_NAME"
+          (
+            cd dist
+            sha256sum "$ASSET_NAME" > "$ASSET_NAME.sha256"
+            sha256sum --check "$ASSET_NAME.sha256"
+          )
+
+      - name: Upload release assets for publishing
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: |
+            dist/${{ steps.metadata.outputs.asset_name }}
+            dist/${{ steps.metadata.outputs.asset_name }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Retain R8 mapping
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: TokenFlow-mapping-${{ steps.tag.outputs.version }}
+          path: app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Publish verified GitHub Release
+        shell: bash
+        env:
+          ASSET_NAME: ${{ needs.build.outputs.asset_name }}
+          EXPECTED_COMMIT: ${{ needs.build.outputs.release_commit }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v${{ needs.build.outputs.version }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+
+          (
+            cd dist
+            sha256sum --check "$ASSET_NAME.sha256"
+          )
+
+          verify_remote_tag_commit() {
+            local remote_commit
+            remote_commit="$(
+              gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq '.sha'
+            )"
+            if [[ "$remote_commit" != "$EXPECTED_COMMIT" ]]; then
+              echo "Release tag moved after the signed APK was built; refusing to publish." >&2
+              exit 1
+            fi
+          }
+
+          verify_remote_tag_commit
+
+          expected_title="一念通流 $RELEASE_VERSION"
+          if release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets,isDraft,isPrerelease,name,tagName 2>/dev/null)"; then
+            jq -e --arg tag "$RELEASE_TAG" --arg title "$expected_title" '
+              .tagName == $tag and
+              .name == $title and
+              .isPrerelease == false
+            ' <<< "$release_json" > /dev/null || {
+              echo "Existing Release $RELEASE_TAG has an unexpected title or prerelease state." >&2
+              exit 1
+            }
+
+            if [[ "$(jq -r '.isDraft' <<< "$release_json")" != "true" ]]; then
+              jq -e --arg apk "$ASSET_NAME" --arg checksum "$ASSET_NAME.sha256" '
+                ([.assets[].name] | sort) == ([$apk, $checksum] | sort) and
+                ([.assets[].size] | all(. > 0))
+              ' <<< "$release_json" > /dev/null || {
+                echo "Published Release $RELEASE_TAG has unexpected assets; refusing to overwrite it." >&2
+                exit 1
+              }
+
+              existing_dir="$RUNNER_TEMP/existing-release"
+              mkdir -p "$existing_dir"
+              gh release download "$RELEASE_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --pattern "$ASSET_NAME" \
+                --pattern "$ASSET_NAME.sha256" \
+                --dir "$existing_dir"
+              (
+                cd "$existing_dir"
+                sha256sum --check "$ASSET_NAME.sha256"
+              )
+              if cmp -s "dist/$ASSET_NAME" "$existing_dir/$ASSET_NAME"; then
+                echo "Published Release $RELEASE_TAG already contains the verified APK."
+                exit 0
+              fi
+
+              echo "Published Release $RELEASE_TAG differs from this build; refusing to overwrite it." >&2
+              exit 1
+            fi
+
+            jq -e --arg apk "$ASSET_NAME" --arg checksum "$ASSET_NAME.sha256" '
+              [.assets[].name | select(. != $apk and . != $checksum)] | length == 0
+            ' <<< "$release_json" > /dev/null || {
+              echo "Draft Release $RELEASE_TAG contains unexpected assets; refusing to publish it." >&2
+              exit 1
+            }
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft \
+              --generate-notes \
+              --title "$expected_title"
+          fi
+
+          gh release upload "$RELEASE_TAG" \
+            "dist/$ASSET_NAME" \
+            "dist/$ASSET_NAME.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets,isDraft,isPrerelease,name,tagName)"
+          jq -e --arg tag "$RELEASE_TAG" --arg title "$expected_title" --arg apk "$ASSET_NAME" --arg checksum "$ASSET_NAME.sha256" '
+            .tagName == $tag and
+            .name == $title and
+            .isDraft == true and
+            .isPrerelease == false and
+            ([.assets[].name] | sort) == ([$apk, $checksum] | sort) and
+            ([.assets[].size] | all(. > 0))
+          ' <<< "$release_json" > /dev/null
+
+          verify_remote_tag_commit
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --latest

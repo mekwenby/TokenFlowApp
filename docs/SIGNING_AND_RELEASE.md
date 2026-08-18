@@ -6,7 +6,7 @@ Release 签名决定 Android 是否允许覆盖升级。`xyz.mek030399.tokenflow
 
 - Release 应用 ID：`xyz.mek030399.tokenflow`
 - 旧应用 ID：`com.tokenflow.chat`（仅作迁移识别，不是新包的升级目标）
-- 当前版本：`2.4.2`，`versionCode 11`
+- 当前版本：`2.4.3`，`versionCode 12`
 - Release 开启 R8 代码压缩和资源收缩。
 - 仓库不包含 Release keystore，也无法仅从源码确认正式证书指纹、有效期或 Play App Signing 状态。
 - 截至 2026-08-17，本机环境变量和用户级 Gradle 配置均未提供 Release 签名值，因此本机不能直接产出已签名 Release。GitHub 自动发布是否可用取决于 `release` Environment 是否已正确配置。
@@ -113,14 +113,14 @@ GitHub 单个 Actions Secret 上限为 [48 KB](https://docs.github.com/en/action
 
 不要移动、删除后复用或强制更新已经发布的版本标签。修复发布内容时应递增 `versionCode` 和版本号后创建新标签。
 
-### 首次自动发布
+### 发布新版本
 
-本次接入工作流只推送 `main`，不创建 `v2.4.2` 标签。首次自动正式发布按以下顺序执行：
+每次自动正式发布都按以下顺序执行：
 
-1. 完成 `release` Environment、四个 Secrets、证书指纹变量和标签 Ruleset 配置。
-2. 在 `app/build.gradle.kts` 中把版本升级到 `2.4.3`、`versionCode 12`，并同步版本文档。
+1. 确认 `release` Environment、四个 Secrets、证书指纹变量和标签 Ruleset 已正确配置。
+2. 在 `app/build.gradle.kts` 中递增 `versionCode`、设置新的 `versionName`，并同步当前版本文档。
 3. 运行完整本地门禁，提交并推送 `main`，等待 Android CI 成功。
-4. 在已通过 CI 的提交上创建并推送标签：
+4. 在已通过 CI 的提交上创建并推送与 `versionName` 一致的标签。以 `2.4.3` 为例：
 
 ```powershell
 git tag -a v2.4.3 -m '一念通流 2.4.3'

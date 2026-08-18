@@ -24,7 +24,7 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 版本 | `2.4.2`（`versionCode 11`） |
+| 版本 | `2.4.3`（`versionCode 12`） |
 | 正式包名 | `xyz.mek030399.tokenflow` |
 | Debug 包名 | `xyz.mek030399.tokenflow.debug` |
 | Android | `minSdk 26`，`targetSdk 36`，`compileSdk 36` |
@@ -40,7 +40,7 @@
 - 正式版从 [GitHub Releases](https://github.com/mekwenby/TokenFlowApp/releases) 下载。本项目自动上传的 Release 附件只有使用项目正式证书签名的 APK 及其 SHA-256 校验文件；GitHub 还会自动提供对应源码归档。
 - 每次 `main` 提交和 Pull Request 都会运行 [Android CI](https://github.com/mekwenby/TokenFlowApp/actions/workflows/android-ci.yml)。成功构建的 Debug APK 可在对应运行记录的 Artifacts 区域下载，保留 7 天。Pull Request artifact 可能包含尚未合并的贡献者代码，只能在信任其来源时安装，并且不要录入真实 API Key 或私人数据。
 
-Debug APK 使用 `xyz.mek030399.tokenflow.debug` 包名和临时 Debug 证书，只适合测试，不能作为正式版升级包。本次引入自动化不会创建 `2.4.2` Release；首次自动正式发布计划在版本升级到 `2.4.3`（`versionCode 12`）后单独触发。
+Debug APK 使用 `xyz.mek030399.tokenflow.debug` 包名和临时 Debug 证书，只适合测试，不能作为正式版升级包。正式发布必须先把版本提交合入 `main`，再推送与 `versionName` 完全一致的 `vX.Y.Z` 标签。
 
 ## 从源码构建
 

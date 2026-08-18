@@ -8,8 +8,8 @@ Release 签名决定 Android 是否允许覆盖升级。`xyz.mek030399.tokenflow
 - 旧应用 ID：`com.tokenflow.chat`（仅作迁移识别，不是新包的升级目标）
 - 当前版本：`2.4.3`，`versionCode 12`
 - Release 开启 R8 代码压缩和资源收缩。
-- 仓库不包含 Release keystore，也无法仅从源码确认正式证书指纹、有效期或 Play App Signing 状态。
-- 截至 2026-08-17，本机环境变量和用户级 Gradle 配置均未提供 Release 签名值，因此本机不能直接产出已签名 Release。GitHub 自动发布是否可用取决于 `release` Environment 是否已正确配置。
+- 仓库不包含 Release keystore 或密码。首个正式签名身份已于 2026-08-18 建立，证书 SHA-256 为 `FEC865BEDC77C742B0E1B3D93A05FCEEBFA6075F46E1C8242B8F2261F0767AFE`，有效期至 2054-01-03。
+- 维护者本机可将签名材料放在已被 Git 忽略并限制访问权限的 `.signing/` 目录；该目录不是源码的一部分，必须另做离线备份。GitHub 自动发布是否可用取决于 `release` Environment 是否已正确配置。
 - Debug 使用 Android 默认 Debug 签名；不同开发机生成的 Debug APK 可能无法互相覆盖。
 
 ## 签名参数
@@ -18,7 +18,7 @@ Release 签名决定 Android 是否允许覆盖升级。`xyz.mek030399.tokenflow
 
 | 参数 | 含义 |
 | --- | --- |
-| `TOKENFLOW_KEYSTORE_PATH` | keystore 的仓库外绝对路径 |
+| `TOKENFLOW_KEYSTORE_PATH` | keystore 的绝对路径；推荐放在仓库外，维护者本机也可使用受保护且被忽略的 `.signing/` 目录 |
 | `TOKENFLOW_KEYSTORE_PASSWORD` | keystore 密码 |
 | `TOKENFLOW_KEY_ALIAS` | key alias |
 | `TOKENFLOW_KEY_PASSWORD` | 私钥密码 |
@@ -56,7 +56,7 @@ Release 签名决定 Android 是否允许覆盖升级。`xyz.mek030399.tokenflow
   -storetype PKCS12
 ```
 
-让 `keytool` 交互式询问密码，不要把密码作为命令行参数。`TOKENFLOW_KEYSTORE_PATH` 应使用仓库外绝对路径；相对路径会以 `app/` 模块目录为基准，容易误指向其他文件。
+让 `keytool` 交互式询问密码，不要把密码作为命令行参数。若因本机维护需要把 keystore 放在项目目录内，只能使用被 `.gitignore` 明确排除并限制访问权限的 `.signing/`，同时在项目目录外保存独立备份。`TOKENFLOW_KEYSTORE_PATH` 始终使用绝对路径；相对路径会以 `app/` 模块目录为基准，容易误指向其他文件。
 
 ## GitHub 自动构建与发布
 
@@ -80,7 +80,7 @@ Release 工作流仅构建和公开 APK，不构建或发布 AAB。公开附件�
 
 再添加 Environment variable `TOKENFLOW_CERT_SHA256`，值为原正式证书的 SHA-256：删除冒号和空白后必须正好是 64 位十六进制字符。证书指纹是公开信息，不是密码。
 
-在 PowerShell 7 中读取仓库外 keystore 并复制 Base64 文本：
+在 PowerShell 7 中读取受保护的本地 keystore 并复制 Base64 文本：
 
 ```powershell
 $TokenFlowKeystorePath = Read-Host -Prompt 'Release keystore path'

@@ -27,6 +27,7 @@
 | 版本 | `2.4.3`（`versionCode 12`） |
 | 正式包名 | `xyz.mek030399.tokenflow` |
 | Debug 包名 | `xyz.mek030399.tokenflow.debug` |
+| 正式证书 SHA-256 | `FEC865BEDC77C742B0E1B3D93A05FCEEBFA6075F46E1C8242B8F2261F0767AFE` |
 | Android | `minSdk 26`，`targetSdk 36`，`compileSdk 36` |
 | 构建工具 | Gradle `9.4.1`，AGP `9.2.1`，Build Tools `36.0.0` |
 | 语言与 UI | Kotlin `2.3.10`，Java 目标 `17`，Compose BOM `2026.06.01` |

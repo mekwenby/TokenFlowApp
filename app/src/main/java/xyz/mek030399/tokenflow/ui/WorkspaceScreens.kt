@@ -27,8 +27,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -101,16 +103,21 @@ import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import xyz.mek030399.tokenflow.BuildConfig
 import xyz.mek030399.tokenflow.R
 import xyz.mek030399.tokenflow.ui.theme.LocalTokenFlowDarkTheme
 import xyz.mek030399.tokenflow.data.AgentProfile
+import xyz.mek030399.tokenflow.data.KnowledgeDocumentPreview
 import xyz.mek030399.tokenflow.data.KnowledgeImportSource
 import xyz.mek030399.tokenflow.data.Note
+import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
 
@@ -201,12 +208,32 @@ private fun WorkspaceRail(selected: AppScreen, viewModel: AppViewModel, modifier
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun WorkspaceScaffold(title: String, showBack: Boolean, onBack: () -> Unit, action: (@Composable () -> Unit)? = null, content: @Composable (PaddingValues) -> Unit) {
+private fun WorkspaceScaffold(
+    title: String,
+    showBack: Boolean,
+    onBack: () -> Unit,
+    action: (@Composable () -> Unit)? = null,
+    compactTitle: Boolean = false,
+    content: @Composable (PaddingValues) -> Unit,
+) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text(title, fontWeight = FontWeight.SemiBold) },
+                title = {
+                    Text(
+                        text = title,
+                        style = if (compactTitle) {
+                            MaterialTheme.typography.titleLarge.copy(fontSize = 11.sp, lineHeight = 14.sp)
+                        } else {
+                            MaterialTheme.typography.titleLarge
+                        },
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = if (compactTitle) 1 else Int.MAX_VALUE,
+                        overflow = if (compactTitle) TextOverflow.Ellipsis else TextOverflow.Clip,
+                        modifier = if (compactTitle) Modifier.testTag(UiTestTags.NOTE_READER_TITLE) else Modifier,
+                    )
+                },
                 navigationIcon = { if (showBack) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.back)) } },
                 actions = { action?.invoke() },
             )
@@ -383,6 +410,7 @@ private fun NotesScreen(state: AppUiState, viewModel: AppViewModel, showBack: Bo
         showBack = showBack || editing != null || currentReading != null,
         onBack = navigateBack,
         action = toolbarAction,
+        compactTitle = currentReading != null && editing == null,
     ) { padding ->
         when {
             editing != null -> NoteEditor(
@@ -396,7 +424,7 @@ private fun NotesScreen(state: AppUiState, viewModel: AppViewModel, showBack: Bo
             )
             currentReading != null -> NoteReader(currentReading, Modifier.padding(padding))
             else -> Column(Modifier.padding(padding).fillMaxSize().padding(horizontal = 16.dp)) {
-            OutlinedTextField(search, { search = it }, placeholder = { Text(stringResource(R.string.search_notes)) }, leadingIcon = { Icon(Icons.Outlined.Search, null) }, singleLine = true, modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp).align(Alignment.CenterHorizontally))
+            OutlinedTextField(search, { search = it }, placeholder = { Text(stringResource(R.string.search_notes)) }, leadingIcon = { Icon(Icons.Outlined.Search, null) }, singleLine = true, modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp).align(Alignment.CenterHorizontally).testTag(UiTestTags.NOTES_SEARCH))
             val notes = state.notes.filter { search.isBlank() || it.title.contains(search, true) || it.body.contains(search, true) }
             if (selected.isNotEmpty()) SelectionToolbar(
                 selectedCount = selected.size,
@@ -424,12 +452,15 @@ private fun NotesScreen(state: AppUiState, viewModel: AppViewModel, showBack: Bo
                             )
                             .padding(vertical = 12.dp)
                             .testTag(UiTestTags.noteItem(note.id)),
-                        verticalAlignment = Alignment.Top,
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(note.title, fontWeight = FontWeight.SemiBold)
-                            Text(note.body, maxLines = 3, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
-                        }
+                        Text(
+                            note.title,
+                            modifier = Modifier.weight(1f),
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                         if (selected.isNotEmpty()) Checkbox(isSelected, { checked -> selected = if (checked) selected + note.id else selected - note.id })
                         else Row {
                             IconButton(onClick = { viewModel.deleteNote(note.id) }) { Icon(Icons.Outlined.DeleteOutline, stringResource(R.string.delete)) }
@@ -487,13 +518,24 @@ private fun NotesScreen(state: AppUiState, viewModel: AppViewModel, showBack: Bo
             },
             text = {
                 Column(Modifier.fillMaxWidth()) {
+                    val rewritePromptDescription = stringResource(R.string.note_rewrite_prompt)
                     OutlinedTextField(
                         value = rewritePrompt,
                         onValueChange = { rewritePrompt = it },
-                        label = { Text(stringResource(R.string.note_rewrite_prompt)) },
+                        placeholder = {
+                            Text(
+                                text = rewritePromptDescription,
+                                modifier = Modifier.fillMaxWidth().testTag(UiTestTags.NOTE_REWRITE_PLACEHOLDER),
+                                textAlign = TextAlign.Center,
+                            )
+                        },
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(textAlign = TextAlign.Center),
                         minLines = 2,
                         maxLines = 4,
-                        modifier = Modifier.fillMaxWidth().testTag("note_rewrite_prompt"),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics { contentDescription = rewritePromptDescription }
+                            .testTag("note_rewrite_prompt"),
                     )
                     Spacer(Modifier.height(8.dp))
                     LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp)) {
@@ -693,13 +735,31 @@ private fun KnowledgeScreen(state: AppUiState, viewModel: AppViewModel, showBack
             } else if (state.knowledgeDocuments.isEmpty()) EmptyWorkspace(Icons.Outlined.FolderOpen, stringResource(R.string.empty_knowledge), Modifier.weight(1f))
             else LazyColumn(Modifier.weight(1f).fillMaxWidth().widthIn(max = 820.dp).align(Alignment.CenterHorizontally), contentPadding = PaddingValues(vertical = 12.dp)) {
                 items(state.knowledgeDocuments, key = { it.id }) { document ->
-                    Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(if (document.status == "error") Icons.Outlined.ErrorOutline else if (document.status == "ready") Icons.Outlined.CheckCircle else Icons.Outlined.Description, null, tint = if (document.status == "error") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
-                        Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
-                            Text(document.name, fontWeight = FontWeight.Medium)
-                            Text(if (document.status == "error") document.error else "${document.chunkCount} chunks · ${document.sizeBytes / 1024} KiB", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        val previewModifier = if (document.status == "ready") {
+                            Modifier.clickable { viewModel.openKnowledgePreview(document.id) }
+                        } else {
+                            Modifier
                         }
-                        IconButton(onClick = { viewModel.deleteKnowledge(document.id) }) { Icon(Icons.Outlined.DeleteOutline, stringResource(R.string.delete)) }
+                        Row(
+                            previewModifier
+                                .weight(1f)
+                                .padding(vertical = 12.dp)
+                                .testTag(UiTestTags.knowledgeDocument(document.id)),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(if (document.status == "error") Icons.Outlined.ErrorOutline else if (document.status == "ready") Icons.Outlined.CheckCircle else Icons.Outlined.Description, null, tint = if (document.status == "error") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+                            Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
+                                Text(document.name, fontWeight = FontWeight.Medium)
+                                Text(if (document.status == "error") document.error else "${document.chunkCount} chunks · ${document.sizeBytes / 1024} KiB", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        IconButton(
+                            onClick = { viewModel.deleteKnowledge(document.id) },
+                            modifier = Modifier.testTag(UiTestTags.knowledgeDelete(document.id)),
+                        ) {
+                            Icon(Icons.Outlined.DeleteOutline, stringResource(R.string.delete))
+                        }
                     }
                     HorizontalDivider()
                 }
@@ -707,6 +767,214 @@ private fun KnowledgeScreen(state: AppUiState, viewModel: AppViewModel, showBack
         }
     }
 }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun KnowledgeDocumentPreviewScreen(
+    state: KnowledgePreviewState,
+    onBack: () -> Unit,
+    onRetry: () -> Unit,
+) {
+    BackHandler(onBack = onBack)
+    val title = when (state) {
+        KnowledgePreviewState.Closed -> stringResource(R.string.knowledge)
+        is KnowledgePreviewState.Loading -> state.document.name
+        is KnowledgePreviewState.Ready -> state.preview.documentName
+        is KnowledgePreviewState.Error -> state.document.name
+    }
+    Scaffold(
+        modifier = Modifier.fillMaxSize().testTag(UiTestTags.KNOWLEDGE_PREVIEW),
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        text = title,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.back))
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        when (state) {
+            KnowledgePreviewState.Closed -> Box(Modifier.padding(padding).fillMaxSize())
+            is KnowledgePreviewState.Loading -> Box(
+                Modifier.padding(padding).fillMaxSize().testTag(UiTestTags.KNOWLEDGE_PREVIEW_LOADING),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator()
+            }
+            is KnowledgePreviewState.Ready -> KnowledgePreviewContent(
+                preview = state.preview,
+                modifier = Modifier.padding(padding),
+            )
+            is KnowledgePreviewState.Error -> Column(
+                Modifier
+                    .padding(padding)
+                    .fillMaxSize()
+                    .padding(24.dp)
+                    .testTag(UiTestTags.KNOWLEDGE_PREVIEW_ERROR),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Icon(
+                    Icons.Outlined.ErrorOutline,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(32.dp),
+                )
+                Text(
+                    text = state.message.resolve(),
+                    modifier = Modifier.padding(top = 12.dp),
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center,
+                )
+                Button(onClick = onRetry, modifier = Modifier.padding(top = 16.dp)) {
+                    Text(stringResource(R.string.retry))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun KnowledgePreviewContent(preview: KnowledgeDocumentPreview, modifier: Modifier = Modifier) {
+    Column(modifier.fillMaxSize()) {
+        if (preview.truncated) {
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                modifier = Modifier.fillMaxWidth().testTag(UiTestTags.KNOWLEDGE_PREVIEW_TRUNCATED),
+            ) {
+                Text(
+                    text = stringResource(R.string.knowledge_preview_truncated),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            }
+        }
+        if (remember(preview.extension, preview.text) {
+                shouldRenderKnowledgePreviewAsMarkdown(preview.extension, preview.text)
+            }
+        ) {
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .testTag(UiTestTags.KNOWLEDGE_PREVIEW_MARKDOWN),
+            ) {
+                MarkdownContent(
+                    markdown = preview.text,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 860.dp)
+                        .align(Alignment.TopCenter)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                )
+            }
+        } else {
+            val blocks = remember(preview.text) { knowledgePreviewPlainTextBlocks(preview.text) }
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth().testTag(UiTestTags.KNOWLEDGE_PREVIEW_PLAIN),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            ) {
+                itemsIndexed(blocks) { _, block ->
+                    SelectionContainer {
+                        Text(
+                            text = block,
+                            modifier = Modifier.fillMaxWidth(),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+internal fun shouldRenderKnowledgePreviewAsMarkdown(extension: String, text: String): Boolean {
+    val normalizedExtension = extension.trim().removePrefix(".").lowercase(Locale.ROOT)
+    return normalizedExtension in setOf("md", "markdown") &&
+        text.length <= KNOWLEDGE_MARKDOWN_MAX_CHARS &&
+        text.lineSequence().take(KNOWLEDGE_MARKDOWN_MAX_LINES + 1).count() <= KNOWLEDGE_MARKDOWN_MAX_LINES
+}
+
+internal fun knowledgePreviewPlainTextBlocks(
+    text: String,
+    maxCodePoints: Int = KNOWLEDGE_PLAIN_BLOCK_CODE_POINTS,
+): List<String> {
+    require(maxCodePoints > 0) { "maxCodePoints must be positive" }
+    if (text.isEmpty()) return emptyList()
+
+    val blocks = mutableListOf<String>()
+    val current = StringBuilder()
+    var currentCodePoints = 0
+
+    fun flush() {
+        if (current.isNotEmpty()) {
+            blocks += current.toString()
+            current.clear()
+            currentCodePoints = 0
+        }
+    }
+
+    fun appendAtom(start: Int, end: Int) {
+        if (start >= end) return
+        val codePoints = text.codePointCount(start, end)
+        if (currentCodePoints > 0 && currentCodePoints + codePoints > maxCodePoints) flush()
+        current.append(text, start, end)
+        currentCodePoints += codePoints
+        if (currentCodePoints == maxCodePoints) flush()
+    }
+
+    fun appendLongLine(start: Int, end: Int) {
+        flush()
+        var offset = start
+        var remaining = text.codePointCount(start, end)
+        while (offset < end) {
+            val count = minOf(maxCodePoints, remaining)
+            val next = text.offsetByCodePoints(offset, count)
+            current.append(text, offset, next)
+            currentCodePoints = count
+            offset = next
+            remaining -= count
+            if (currentCodePoints == maxCodePoints) flush()
+        }
+    }
+
+    var lineStart = 0
+    while (lineStart < text.length) {
+        var contentEnd = lineStart
+        while (contentEnd < text.length && text[contentEnd] != '\n' && text[contentEnd] != '\r') contentEnd++
+        val lineEnd = when {
+            contentEnd >= text.length -> contentEnd
+            text[contentEnd] == '\r' && contentEnd + 1 < text.length && text[contentEnd + 1] == '\n' -> contentEnd + 2
+            else -> contentEnd + 1
+        }
+        val segmentCodePoints = text.codePointCount(lineStart, lineEnd)
+        if (segmentCodePoints <= maxCodePoints) {
+            appendAtom(lineStart, lineEnd)
+        } else {
+            appendLongLine(lineStart, contentEnd)
+            appendAtom(contentEnd, lineEnd)
+        }
+        lineStart = lineEnd
+    }
+    flush()
+    return blocks
+}
+
+private const val KNOWLEDGE_MARKDOWN_MAX_CHARS = 32_000
+private const val KNOWLEDGE_MARKDOWN_MAX_LINES = 1_000
+private const val KNOWLEDGE_PLAIN_BLOCK_CODE_POINTS = 8_192
 
 @Composable
 private fun AboutScreen(viewModel: AppViewModel, showBack: Boolean) {

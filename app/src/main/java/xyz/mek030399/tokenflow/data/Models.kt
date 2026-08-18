@@ -303,6 +303,14 @@ data class KnowledgeDocument(
     @SerialName("source_note_id") val sourceNoteId: String? = null,
 )
 
+data class KnowledgeDocumentPreview(
+    val documentId: String,
+    val documentName: String,
+    val extension: String,
+    val text: String,
+    val truncated: Boolean,
+)
+
 @Serializable
 data class KnowledgeSnippet(
     val chunkId: Long,

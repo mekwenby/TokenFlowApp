@@ -9,6 +9,7 @@ import java.io.File
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -94,6 +95,110 @@ class LocalDatabaseTest {
             store.delete(document.id)
         }
         assertTrue(!storedFile.exists())
+    }
+
+    @Test
+    fun knowledgePreviewReadsCanonicalizedPrivateSourceAndReportsTruncation() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val id = "knowledge-preview-${System.nanoTime()}"
+        val directory = File(context.filesDir, "knowledge").also(File::mkdirs)
+        val file = File(directory, "$id.txt")
+        val now = System.currentTimeMillis()
+        dao.putKnowledgeDocument(
+            KnowledgeDocumentEntity(
+                id = id,
+                name = "Preview.txt",
+                mimeType = "text/plain",
+                storedPath = file.absolutePath,
+                sizeBytes = 0,
+                status = "ready",
+                error = "",
+                chunkCount = 0,
+                createdAt = now,
+                updatedAt = now,
+            ),
+        )
+        val store = KnowledgeStore(context, dao)
+
+        try {
+            file.writeText("  first\r\nsecond\rthird  ", Charsets.UTF_8)
+            val canonical = requireNotNull(store.preview(id))
+            assertEquals(id, canonical.documentId)
+            assertEquals("Preview.txt", canonical.documentName)
+            assertEquals("txt", canonical.extension)
+            assertEquals("first\nsecond\nthird", canonical.text)
+            assertFalse(canonical.truncated)
+
+            file.writeText("x".repeat(KnowledgeStore.MAX_TEXT_CHARS), Charsets.UTF_8)
+            val exactLimit = requireNotNull(store.preview(id))
+            assertEquals(KnowledgeStore.MAX_TEXT_CHARS, exactLimit.text.length)
+            assertFalse(exactLimit.truncated)
+
+            file.appendText("y", Charsets.UTF_8)
+            val truncated = requireNotNull(store.preview(id))
+            assertEquals(KnowledgeStore.MAX_TEXT_CHARS, truncated.text.length)
+            assertTrue(truncated.text.all { it == 'x' })
+            assertTrue(truncated.truncated)
+        } finally {
+            dao.deleteKnowledgeDocument(id)
+            file.delete()
+        }
+    }
+
+    @Test
+    fun knowledgePreviewRejectsMissingAndNonPrivateFiles() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val store = KnowledgeStore(context, dao)
+        val now = System.currentTimeMillis()
+        val missingId = "knowledge-preview-missing-${System.nanoTime()}"
+        val outsideId = "knowledge-preview-outside-${System.nanoTime()}"
+        val missing = File(context.filesDir, "knowledge/$missingId.txt")
+        val outside = File(context.cacheDir, "$outsideId.txt").apply { writeText("outside") }
+        dao.putKnowledgeDocument(
+            KnowledgeDocumentEntity(
+                missingId, "Missing.txt", "text/plain", missing.absolutePath, 0, "ready", "", 0, now, now,
+            ),
+        )
+        dao.putKnowledgeDocument(
+            KnowledgeDocumentEntity(
+                outsideId, "Outside.txt", "text/plain", outside.absolutePath, outside.length(), "ready", "", 0, now, now,
+            ),
+        )
+
+        try {
+            assertNull(store.preview(missingId))
+            assertNull(store.preview(outsideId))
+        } finally {
+            dao.deleteKnowledgeDocument(missingId)
+            dao.deleteKnowledgeDocument(outsideId)
+            outside.delete()
+        }
+    }
+
+    @Test
+    fun knowledgePreviewParseFailureDoesNotChangeDocumentState() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val id = "knowledge-preview-corrupt-${System.nanoTime()}"
+        val file = File(context.filesDir, "knowledge/$id.pdf")
+        file.parentFile?.mkdirs()
+        file.writeText("not a PDF", Charsets.UTF_8)
+        val now = System.currentTimeMillis()
+        dao.putKnowledgeDocument(
+            KnowledgeDocumentEntity(
+                id, "Corrupt.pdf", "application/pdf", file.absolutePath, file.length(), "ready", "", 0, now, now,
+            ),
+        )
+        val store = KnowledgeStore(context, dao)
+
+        try {
+            assertTrue(runCatching { store.preview(id) }.isFailure)
+            val unchanged = requireNotNull(dao.knowledgeDocument(id))
+            assertEquals("ready", unchanged.status)
+            assertEquals("", unchanged.error)
+        } finally {
+            dao.deleteKnowledgeDocument(id)
+            file.delete()
+        }
     }
 
     @Test

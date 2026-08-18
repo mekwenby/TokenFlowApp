@@ -176,6 +176,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import xyz.mek030399.tokenflow.R
@@ -235,6 +236,21 @@ object UiTestTags {
     const val PROCESS_TOKEN_ROW = "process_token_row"
     const val TOKEN_USAGE = "token_usage"
     const val KNOWLEDGE_SOURCE_PREVIEW = "knowledge_source_preview"
+    const val KNOWLEDGE_PREVIEW = "knowledge_preview"
+    const val KNOWLEDGE_PREVIEW_LOADING = "knowledge_preview_loading"
+    const val KNOWLEDGE_PREVIEW_ERROR = "knowledge_preview_error"
+    const val KNOWLEDGE_PREVIEW_TRUNCATED = "knowledge_preview_truncated"
+    const val KNOWLEDGE_PREVIEW_MARKDOWN = "knowledge_preview_markdown"
+    const val KNOWLEDGE_PREVIEW_PLAIN = "knowledge_preview_plain"
+    const val NOTE_READER_TITLE = "note_reader_title"
+    const val NOTE_REWRITE_PLACEHOLDER = "note_rewrite_placeholder"
+    const val NOTES_SEARCH = "notes_search"
+    const val CHAT_TOP_BAR = "chat_top_bar"
+    const val CHAT_TITLE_BLOCK = "chat_title_block"
+    const val CHAT_CONVERSATION_TITLE = "chat_conversation_title"
+    const val CHAT_MODEL_NAME = "chat_model_name"
+    const val CHAT_TOOLS = "chat_tools"
+    const val CHAT_MORE_ACTIONS = "chat_more_actions"
     const val CHAT_FONT_SIZE = "chat_font_size"
     const val CHAT_LETTER_SPACING = "chat_letter_spacing"
     const val CHAT_LINE_SPACING = "chat_line_spacing"
@@ -271,6 +287,8 @@ object UiTestTags {
     fun conversationItem(id: String) = "conversation_item_$id"
     fun bookmarkItem(id: String) = "bookmark_item_$id"
     fun noteItem(id: String) = "note_item_$id"
+    fun knowledgeDocument(id: String) = "knowledge_document_$id"
+    fun knowledgeDelete(id: String) = "knowledge_delete_$id"
     fun sidebarDestination(screen: AppScreen) = "sidebar_destination_${screen.name}"
     fun workspaceDestination(screen: AppScreen) = "workspace_destination_${screen.name}"
     fun themeOption(theme: AppTheme) = "theme_option_${theme.storageValue}"
@@ -382,6 +400,12 @@ private fun TokenFlowAppContent(
     Box(Modifier.fillMaxSize()) {
         if (state.phase == AppPhase.LOADING) {
             LoadingScreen()
+        } else if (state.screen == AppScreen.KNOWLEDGE && state.knowledgePreview !is KnowledgePreviewState.Closed) {
+            KnowledgeDocumentPreviewScreen(
+                state = state.knowledgePreview,
+                onBack = viewModel::closeKnowledgePreview,
+                onRetry = viewModel::retryKnowledgePreview,
+            )
         } else {
             when (state.screen) {
                 AppScreen.CHAT -> ChatWorkspace(
@@ -1472,21 +1496,46 @@ private fun ChatPane(
     val effectiveModelId = if (state.config.modelMode == SettingMode.INHERIT) state.globalSettings.defaultModelId else state.config.model
     val effectiveUserAvatar = if (state.config.userAvatarMode == SettingMode.INHERIT) state.globalSettings.userAvatar else state.config.userAvatar
     val effectiveAssistantAvatar = if (state.config.assistantAvatarMode == SettingMode.INHERIT) state.globalSettings.assistantAvatar else state.config.assistantAvatar
+    val compactTopBarHeight = with(LocalDensity.current) {
+        maxOf(48.dp, 20.sp.toDp() + 14.sp.toDp() + 2.dp)
+    }
     Column(Modifier.fillMaxSize()) {
         TopAppBar(
+            modifier = Modifier.testTag(UiTestTags.CHAT_TOP_BAR),
+            expandedHeight = compactTopBarHeight,
             title = {
-                Column {
-                    Text(state.activeConversation?.let { displayTitle(it, stringResource(R.string.new_chat)) } ?: stringResource(R.string.new_chat), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Column(Modifier.testTag(UiTestTags.CHAT_TITLE_BLOCK)) {
+                    Text(
+                        text = state.activeConversation?.let {
+                            displayTitle(it, stringResource(R.string.new_chat))
+                        } ?: stringResource(R.string.new_chat),
+                        modifier = Modifier.testTag(UiTestTags.CHAT_CONVERSATION_TITLE),
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontSize = 16.sp,
+                            lineHeight = 20.sp,
+                            letterSpacing = 0.sp,
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                     val model = state.models.firstOrNull { it.id == effectiveModelId }
-                    if (model != null) Text(model.displayName, style = MaterialTheme.typography.labelSmall)
+                    if (model != null) {
+                        Text(
+                            text = model.displayName,
+                            modifier = Modifier.testTag(UiTestTags.CHAT_MODEL_NAME),
+                            style = MaterialTheme.typography.labelSmall.copy(lineHeight = 14.sp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             },
             navigationIcon = { if (showMenu) IconButton(onClick = onMenu, modifier = Modifier.testTag(UiTestTags.OPEN_CONVERSATIONS)) { Icon(Icons.Outlined.Menu, stringResource(R.string.open_conversations)) } },
             actions = {
-                IconButton(onClick = { tools = true }) { Icon(Icons.Outlined.Tune, stringResource(R.string.tools)) }
+                IconButton(onClick = { tools = true }, modifier = Modifier.testTag(UiTestTags.CHAT_TOOLS)) { Icon(Icons.Outlined.Tune, stringResource(R.string.tools)) }
                 IconButton(onClick = { settings = true }, modifier = Modifier.testTag(UiTestTags.SETTINGS)) { Icon(Icons.Outlined.Settings, stringResource(R.string.settings)) }
                 if (state.activeConversationId != null) Box {
-                    IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.more_actions)) }
+                    IconButton(onClick = { menu = true }, modifier = Modifier.testTag(UiTestTags.CHAT_MORE_ACTIONS)) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.more_actions)) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(text = { Text(stringResource(R.string.generate_title)) }, onClick = { menu = false; viewModel.generateTitle() }, leadingIcon = { Icon(Icons.Outlined.AutoAwesome, null) })
                         DropdownMenuItem(text = { Text(stringResource(R.string.regenerate)) }, onClick = { menu = false; viewModel.regenerateLatest() }, leadingIcon = { Icon(Icons.Outlined.Refresh, null) })
@@ -2013,7 +2062,12 @@ private fun Avatar(value: String, image: ImageBitmap?, modifier: Modifier = Modi
 
 @Composable
 internal fun AppLogo(size: Dp) {
-    Image(painterResource(R.drawable.tokenflow_logo), null, Modifier.size(size), contentScale = ContentScale.Fit)
+    val logoResource = if (LocalTokenFlowDarkTheme.current) {
+        R.drawable.tokenflow_logo
+    } else {
+        R.drawable.tokenflow_logo_on_light
+    }
+    Image(painterResource(logoResource), null, Modifier.size(size), contentScale = ContentScale.Fit)
 }
 
 @Composable
@@ -2677,7 +2731,7 @@ private fun TextInputDialog(title: String, initial: String, onDismiss: () -> Uni
 }
 
 @Composable
-private fun UiText.resolve(): String = when (this) {
+internal fun UiText.resolve(): String = when (this) {
     is UiText.Dynamic -> value
     is UiText.Resource -> stringResource(id, *args.toTypedArray())
 }

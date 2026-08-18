@@ -37,7 +37,7 @@
     <string name="loading">Loading…</string>
     <string name="retry">Retry</string>
     <string name="empty_title">Start a conversation</string>
-    <string name="empty_detail">Choose a model, ask a question, or use web tools for research.</string>
+    <string name="empty_detail">One thought connects. Inspiration flows.</string>
     <string name="no_models">No models are configured. Add a provider and at least one model.</string>
     <string name="rename">Rename</string>
     <string name="generate_title">Generate title</string>
@@ -318,5 +318,7 @@
     <string name="knowledge_source_preview">Local knowledge source</string>
     <string name="knowledge_source_chunk">Passage %1$d</string>
     <string name="knowledge_source_unavailable">This local knowledge source no longer exists.</string>
+    <string name="knowledge_preview_unavailable">This knowledge file could not be read.</string>
+    <string name="knowledge_preview_truncated">Showing the first 2,000,000 characters used for indexing.</string>
     <string name="speech_playback_failed">Unable to play the generated speech</string>
 </resources>

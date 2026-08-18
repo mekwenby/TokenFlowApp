@@ -6,9 +6,16 @@ import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import java.io.File
+import java.io.IOException
+import java.io.Reader
+import java.io.Writer
 import java.util.Locale
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 
 class KnowledgeStore(
@@ -23,6 +30,7 @@ class KnowledgeStore(
 
     private val appContext = context.applicationContext
     private val directory = File(appContext.filesDir, "knowledge").also(File::mkdirs)
+    private val pdfExtractionMutex = Mutex()
 
     init {
         PDFBoxResourceLoader.init(appContext)
@@ -94,7 +102,7 @@ class KnowledgeStore(
         var entity = reservation.entity
         return try {
             val copied = copyTo(destination)
-            val text = extract(destination, extension).take(MAX_TEXT_CHARS)
+            val text = extractBounded(destination, extension, MAX_TEXT_CHARS).text
             require(text.isNotBlank()) { "No readable text was found" }
             val pieces = chunk(text)
             dao.replaceKnowledgeChunks(
@@ -177,6 +185,36 @@ class KnowledgeStore(
         File(entity.storedPath).takeIf(File::exists)?.delete()
     }
 
+    suspend fun preview(id: String): KnowledgeDocumentPreview? = withContext(Dispatchers.IO) {
+        val entity = dao.knowledgeDocument(id)?.takeIf { it.status == "ready" } ?: return@withContext null
+        val root = try {
+            directory.canonicalFile
+        } catch (_: IOException) {
+            return@withContext null
+        } catch (_: SecurityException) {
+            return@withContext null
+        }
+        val file = try {
+            File(entity.storedPath).canonicalFile
+        } catch (_: IOException) {
+            return@withContext null
+        } catch (_: SecurityException) {
+            return@withContext null
+        }
+        if (!file.toPath().startsWith(root.toPath()) || !file.isFile) return@withContext null
+
+        val extension = file.extension.lowercase(Locale.ROOT)
+        if (extension !in SUPPORTED_EXTENSIONS) return@withContext null
+        val extracted = extractBounded(file, extension, MAX_TEXT_CHARS)
+        KnowledgeDocumentPreview(
+            documentId = entity.id,
+            documentName = entity.name,
+            extension = extension,
+            text = canonicalize(extracted.text),
+            truncated = extracted.truncated,
+        )
+    }
+
     suspend fun snippets(ids: List<Long>): List<KnowledgeSnippet> {
         if (ids.isEmpty()) return emptyList()
         return dao.knowledgeChunks(ids.distinct()).mapNotNull { chunk ->
@@ -205,13 +243,28 @@ class KnowledgeStore(
             .take(limit.coerceIn(1, 5))
     }
 
-    private fun extract(file: File, extension: String): String = if (extension == "pdf") {
-        PDDocument.load(file).use { document ->
-            require(document.numberOfPages <= MAX_PDF_PAGES) { "PDF exceeds the 500 page limit" }
-            PDFTextStripper().getText(document)
+    private suspend fun extractBounded(file: File, extension: String, maxChars: Int): BoundedText {
+        if (extension != "pdf") {
+            return file.bufferedReader(Charsets.UTF_8).use { reader -> readBounded(reader, maxChars) }
         }
-    } else {
-        file.inputStream().bufferedReader(Charsets.UTF_8).use { it.readText() }
+
+        pdfExtractionMutex.lock()
+        return try {
+            val job = currentCoroutineContext()[Job]
+            PDDocument.load(file).use { document ->
+                require(document.numberOfPages <= MAX_PDF_PAGES) { "PDF exceeds the 500 page limit" }
+                writeBoundedText(
+                    maxChars = maxChars,
+                    checkActive = {
+                        if (job?.isActive == false) throw CancellationException("PDF extraction cancelled")
+                    },
+                ) { writer ->
+                    PDFTextStripper().writeText(document, writer)
+                }
+            }
+        } finally {
+            pdfExtractionMutex.unlock()
+        }
     }
 
     companion object {
@@ -224,8 +277,83 @@ class KnowledgeStore(
         private val MARKDOWN_EXTENSIONS = setOf("md", "markdown")
         private val SUPPORTED_EXTENSIONS = setOf("txt", "md", "markdown", "json", "csv", "pdf")
 
+        internal data class BoundedText(val text: String, val truncated: Boolean)
+
+        private class TextLimitReachedException : IOException()
+
+        private class BoundedTextWriter(
+            private val maxChars: Int,
+            private val checkActive: () -> Unit,
+        ) : Writer() {
+            private val target = maxChars + 1
+            private val value = StringBuilder(minOf(target, DEFAULT_BUFFER_SIZE))
+
+            override fun write(buffer: CharArray, offset: Int, length: Int) {
+                checkActive()
+                if (length == 0) return
+                val count = minOf(length, target - value.length)
+                if (count > 0) value.append(buffer, offset, count)
+                if (value.length >= target) throw TextLimitReachedException()
+            }
+
+            override fun flush() = Unit
+
+            override fun close() = Unit
+
+            fun result(): BoundedText = boundedResult(value, maxChars)
+        }
+
+        internal fun writeBoundedText(
+            maxChars: Int,
+            checkActive: () -> Unit = {},
+            writeText: (Writer) -> Unit,
+        ): BoundedText {
+            require(maxChars >= 0 && maxChars < Int.MAX_VALUE)
+            val writer = BoundedTextWriter(maxChars, checkActive)
+            try {
+                writeText(writer)
+            } catch (_: TextLimitReachedException) {
+                // Reaching maxChars + 1 proves truncation and stops PDFBox early.
+            }
+            return writer.result()
+        }
+
+        internal fun readBounded(reader: Reader, maxChars: Int): BoundedText {
+            require(maxChars >= 0 && maxChars < Int.MAX_VALUE)
+            val target = maxChars + 1
+            val buffer = CharArray(minOf(DEFAULT_BUFFER_SIZE, target.coerceAtLeast(1)))
+            val value = StringBuilder(minOf(target, DEFAULT_BUFFER_SIZE))
+            while (value.length < target) {
+                val count = reader.read(buffer, 0, minOf(buffer.size, target - value.length))
+                if (count < 0) break
+                if (count == 0) {
+                    val next = reader.read()
+                    if (next < 0) break
+                    value.append(next.toChar())
+                    continue
+                }
+                value.append(buffer, 0, count)
+            }
+            return boundedResult(value, maxChars)
+        }
+
+        private fun boundedResult(value: CharSequence, maxChars: Int): BoundedText {
+            val truncated = value.length > maxChars
+            var end = minOf(value.length, maxChars)
+            if (
+                truncated && end > 0 && end < value.length &&
+                Character.isHighSurrogate(value[end - 1]) && Character.isLowSurrogate(value[end])
+            ) {
+                end -= 1
+            }
+            return BoundedText(value.subSequence(0, end).toString(), truncated)
+        }
+
+        internal fun canonicalize(raw: String): String =
+            raw.replace("\r\n", "\n").replace('\r', '\n').trim()
+
         internal fun chunk(raw: String): List<String> {
-            val normalized = raw.replace("\r\n", "\n").replace('\r', '\n').trim()
+            val normalized = canonicalize(raw)
             if (normalized.isEmpty()) return emptyList()
             val result = mutableListOf<String>()
             var start = 0

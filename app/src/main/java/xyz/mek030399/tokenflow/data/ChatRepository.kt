@@ -261,6 +261,7 @@ interface ChatDataSource {
     suspend fun importKnowledge(source: KnowledgeImportSource): KnowledgeDocument = throw UnsupportedOperationException()
     suspend fun deleteKnowledge(id: String) = Unit
     suspend fun searchKnowledge(query: String): List<KnowledgeSnippet> = emptyList()
+    suspend fun knowledgeDocumentPreview(documentId: String): KnowledgeDocumentPreview? = null
     suspend fun knowledgeSnippets(ids: List<Long>): List<KnowledgeSnippet> = emptyList()
     suspend fun knowledgeSnippet(chunkId: Long): KnowledgeSnippet? =
         knowledgeSnippets(listOf(chunkId)).firstOrNull()
@@ -852,6 +853,9 @@ class ChatRepository(
 
     override suspend fun searchKnowledge(query: String): List<KnowledgeSnippet> =
         requireNotNull(knowledgeStore) { "Knowledge storage is unavailable" }.search(query)
+
+    override suspend fun knowledgeDocumentPreview(documentId: String): KnowledgeDocumentPreview? =
+        requireNotNull(knowledgeStore) { "Knowledge storage is unavailable" }.preview(documentId)
 
     override suspend fun knowledgeSnippets(ids: List<Long>): List<KnowledgeSnippet> =
         requireNotNull(knowledgeStore) { "Knowledge storage is unavailable" }.snippets(ids)

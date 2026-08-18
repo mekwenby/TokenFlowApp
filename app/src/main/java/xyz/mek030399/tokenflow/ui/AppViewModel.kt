@@ -13,6 +13,7 @@ import xyz.mek030399.tokenflow.data.BookmarkedMessage
 import xyz.mek030399.tokenflow.data.Note
 import xyz.mek030399.tokenflow.data.AgentProfile
 import xyz.mek030399.tokenflow.data.KnowledgeDocument
+import xyz.mek030399.tokenflow.data.KnowledgeDocumentPreview
 import xyz.mek030399.tokenflow.data.KnowledgeImportSource
 import xyz.mek030399.tokenflow.data.KnowledgeSnippet
 import xyz.mek030399.tokenflow.data.ConfigurationException
@@ -40,6 +41,7 @@ import java.io.IOException
 import java.util.TimeZone
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -47,6 +49,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -121,6 +124,13 @@ data class SpeechAutoPlayRequest(
     val target: SpeechAutoPlayTarget,
 )
 
+sealed interface KnowledgePreviewState {
+    data object Closed : KnowledgePreviewState
+    data class Loading(val document: KnowledgeDocument) : KnowledgePreviewState
+    data class Ready(val preview: KnowledgeDocumentPreview) : KnowledgePreviewState
+    data class Error(val document: KnowledgeDocument, val message: UiText) : KnowledgePreviewState
+}
+
 internal fun shouldAutoPlaySpeech(
     request: SpeechAutoPlayRequest,
     conversationId: String?,
@@ -159,6 +169,7 @@ data class AppUiState(
     val noteImportingId: String? = null,
     val agents: List<AgentProfile> = emptyList(),
     val knowledgeDocuments: List<KnowledgeDocument> = emptyList(),
+    val knowledgePreview: KnowledgePreviewState = KnowledgePreviewState.Closed,
     val knowledgeResults: List<KnowledgeSnippet> = emptyList(),
     val pendingKnowledgeChunkIds: List<Long> = emptyList(),
     val knowledgeSourcePreview: KnowledgeSnippet? = null,
@@ -185,10 +196,13 @@ class AppViewModel(
     val speechAutoPlay: SharedFlow<SpeechAutoPlayRequest> = mutableSpeechAutoPlay.asSharedFlow()
     private val generationJobs = mutableMapOf<String, Job>()
     private var ttsJob: Job? = null
+    private var knowledgePreviewJob: Job? = null
+    private var knowledgePreviewGeneration = 0L
     private val noteSavingMessageIds = mutableSetOf<String>()
     private var workspaceLoadVersion = 0L
 
     init {
+        observeKnowledgePreviewScreen()
         bootstrap()
     }
 
@@ -196,7 +210,15 @@ class AppViewModel(
 
     fun openScreen(screen: AppScreen) {
         if (screen == AppScreen.CHAT && mutableState.value.models.isEmpty()) return
-        mutableState.update { it.copy(screen = screen, providerEditor = null) }
+        val leavingKnowledge = mutableState.value.screen == AppScreen.KNOWLEDGE && screen != AppScreen.KNOWLEDGE
+        if (leavingKnowledge) invalidateKnowledgePreviewRequest()
+        mutableState.update {
+            it.copy(
+                screen = screen,
+                providerEditor = null,
+                knowledgePreview = if (leavingKnowledge) KnowledgePreviewState.Closed else it.knowledgePreview,
+            )
+        }
     }
 
     fun clearNotice() = mutableState.update { it.copy(notice = null) }
@@ -575,6 +597,28 @@ class AppViewModel(
     }
 
     fun closeKnowledgeSourcePreview() = mutableState.update { it.copy(knowledgeSourcePreview = null) }
+
+    fun openKnowledgePreview(documentId: String) {
+        val current = mutableState.value
+        if (current.screen != AppScreen.KNOWLEDGE) return
+        val document = current.knowledgeDocuments.firstOrNull {
+            it.id == documentId && it.status == "ready"
+        } ?: return
+        loadKnowledgePreview(document)
+    }
+
+    fun retryKnowledgePreview() {
+        val failed = mutableState.value.knowledgePreview as? KnowledgePreviewState.Error ?: return
+        val document = mutableState.value.knowledgeDocuments.firstOrNull {
+            it.id == failed.document.id && it.status == "ready"
+        } ?: return
+        loadKnowledgePreview(document)
+    }
+
+    fun closeKnowledgePreview() {
+        invalidateKnowledgePreviewRequest()
+        mutableState.update { it.copy(knowledgePreview = KnowledgePreviewState.Closed) }
+    }
 
     fun addAttachments(items: List<PendingAttachment>) {
         val combined = (mutableState.value.pendingAttachments + items).distinctBy { it.uri }
@@ -1063,6 +1107,58 @@ class AppViewModel(
 
     private fun handleError(error: Throwable) {
         mutableState.update { it.copy(notice = readableError(error)) }
+    }
+
+    private fun loadKnowledgePreview(document: KnowledgeDocument) {
+        val requestGeneration = invalidateKnowledgePreviewRequest()
+        mutableState.update { it.copy(knowledgePreview = KnowledgePreviewState.Loading(document)) }
+        knowledgePreviewJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                val preview = repository.knowledgeDocumentPreview(document.id)
+                if (requestGeneration != knowledgePreviewGeneration) return@launch
+                mutableState.update { state ->
+                    if (requestGeneration != knowledgePreviewGeneration) state
+                    else state.copy(
+                        knowledgePreview = preview?.let { KnowledgePreviewState.Ready(it) }
+                            ?: unavailableKnowledgePreview(document),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (requestGeneration == knowledgePreviewGeneration) {
+                    mutableState.update { state ->
+                        if (requestGeneration != knowledgePreviewGeneration) state
+                        else state.copy(knowledgePreview = unavailableKnowledgePreview(document))
+                    }
+                }
+            } finally {
+                if (requestGeneration == knowledgePreviewGeneration) knowledgePreviewJob = null
+            }
+        }
+        knowledgePreviewJob?.start()
+    }
+
+    private fun invalidateKnowledgePreviewRequest(): Long {
+        knowledgePreviewGeneration += 1
+        knowledgePreviewJob?.cancel()
+        knowledgePreviewJob = null
+        return knowledgePreviewGeneration
+    }
+
+    private fun unavailableKnowledgePreview(document: KnowledgeDocument) = KnowledgePreviewState.Error(
+        document = document,
+        message = uiText(R.string.knowledge_preview_unavailable),
+    )
+
+    private fun observeKnowledgePreviewScreen() {
+        viewModelScope.launch {
+            state.collect { current ->
+                if (current.screen != AppScreen.KNOWLEDGE && current.knowledgePreview !is KnowledgePreviewState.Closed) {
+                    closeKnowledgePreview()
+                }
+            }
+        }
     }
 
     private fun discardPendingAttachments(attachments: List<PendingAttachment>) {

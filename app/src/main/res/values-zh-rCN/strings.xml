@@ -36,7 +36,7 @@
     <string name="loading">正在加载…</string>
     <string name="retry">重试</string>
     <string name="empty_title">开始一段对话</string>
-    <string name="empty_detail">选择模型并输入问题，也可以启用联网工具进行检索。</string>
+    <string name="empty_detail">一念即通，灵感长流</string>
     <string name="no_models">尚未配置模型，请先添加供应商和至少一个模型。</string>
     <string name="rename">重命名</string>
     <string name="generate_title">生成标题</string>
@@ -316,5 +316,7 @@
     <string name="knowledge_source_preview">本地知识来源</string>
     <string name="knowledge_source_chunk">片段 %1$d</string>
     <string name="knowledge_source_unavailable">该本地知识来源已不存在。</string>
+    <string name="knowledge_preview_unavailable">无法读取该知识文件。</string>
+    <string name="knowledge_preview_truncated">仅显示用于索引的前 2,000,000 个字符。</string>
     <string name="speech_playback_failed">生成的语音无法播放</string>
 </resources>

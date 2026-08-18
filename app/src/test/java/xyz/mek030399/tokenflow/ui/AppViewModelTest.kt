@@ -13,6 +13,7 @@ import xyz.mek030399.tokenflow.data.ConversationWriteRequest
 import xyz.mek030399.tokenflow.data.GlobalChatSettings
 import xyz.mek030399.tokenflow.data.ImportPreview
 import xyz.mek030399.tokenflow.data.KnowledgeDocument
+import xyz.mek030399.tokenflow.data.KnowledgeDocumentPreview
 import xyz.mek030399.tokenflow.data.KnowledgeSnippet
 import xyz.mek030399.tokenflow.data.MAX_NOTE_SUMMARY_INPUT_CHARACTERS
 import xyz.mek030399.tokenflow.data.ModelProfile
@@ -36,6 +37,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
@@ -47,6 +49,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import java.io.File
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -549,6 +552,180 @@ class AppViewModelTest {
     }
 
     @Test
+    fun readyKnowledgePreviewCanCloseAndLeavingKnowledgeCancelsIt() = runTest(dispatcher) {
+        val document = knowledgeDocument("preview-ready", "note-preview", "ready")
+        val preview = knowledgePreview(document, "Ready preview body")
+        val pending = CompletableDeferred<KnowledgeDocumentPreview?>()
+        val fake = FakeChatDataSource(withModel = true).apply {
+            knowledgeDocuments += document
+            knowledgePreviewHandler = { pending.await() }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.KNOWLEDGE)
+
+        viewModel.openKnowledgePreview(document.id)
+        assertEquals(KnowledgePreviewState.Loading(document), viewModel.state.value.knowledgePreview)
+        pending.complete(preview)
+        advanceUntilIdle()
+        assertEquals(KnowledgePreviewState.Ready(preview), viewModel.state.value.knowledgePreview)
+
+        viewModel.closeKnowledgePreview()
+        assertEquals(KnowledgePreviewState.Closed, viewModel.state.value.knowledgePreview)
+
+        fake.knowledgePreviewHandler = { preview }
+        viewModel.openKnowledgePreview(document.id)
+        advanceUntilIdle()
+        assertEquals(KnowledgePreviewState.Ready(preview), viewModel.state.value.knowledgePreview)
+        viewModel.openScreen(AppScreen.NOTES)
+        assertEquals(KnowledgePreviewState.Closed, viewModel.state.value.knowledgePreview)
+    }
+
+    @Test
+    fun missingAndFailedKnowledgePreviewsShowRetryableLocalizedError() = runTest(dispatcher) {
+        val document = knowledgeDocument("preview-error", "note-error", "ready")
+        val fake = FakeChatDataSource(withModel = true).apply {
+            knowledgeDocuments += document
+            knowledgePreviewHandler = { null }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.KNOWLEDGE)
+
+        viewModel.openKnowledgePreview(document.id)
+        advanceUntilIdle()
+        assertEquals(
+            KnowledgePreviewState.Error(
+                document,
+                UiText.Resource(xyz.mek030399.tokenflow.R.string.knowledge_preview_unavailable),
+            ),
+            viewModel.state.value.knowledgePreview,
+        )
+
+        fake.knowledgePreviewHandler = { throw IllegalStateException("Unreadable preview") }
+        viewModel.retryKnowledgePreview()
+        advanceUntilIdle()
+        assertEquals(
+            KnowledgePreviewState.Error(
+                document,
+                UiText.Resource(xyz.mek030399.tokenflow.R.string.knowledge_preview_unavailable),
+            ),
+            viewModel.state.value.knowledgePreview,
+        )
+
+        val preview = knowledgePreview(document, "Recovered preview")
+        fake.knowledgePreviewHandler = { preview }
+        viewModel.retryKnowledgePreview()
+        assertEquals(KnowledgePreviewState.Loading(document), viewModel.state.value.knowledgePreview)
+        advanceUntilIdle()
+        assertEquals(KnowledgePreviewState.Ready(preview), viewModel.state.value.knowledgePreview)
+        assertEquals(listOf(document.id, document.id, document.id), fake.knowledgePreviewCalls)
+    }
+
+    @Test
+    fun closedKnowledgePreviewCannotBeRestoredByStaleLoad() = runTest(dispatcher) {
+        val document = knowledgeDocument("preview-close-race", "note-close-race", "ready")
+        val preview = knowledgePreview(document, "Late preview")
+        val pending = CompletableDeferred<KnowledgeDocumentPreview?>()
+        val fake = FakeChatDataSource(withModel = true).apply {
+            knowledgeDocuments += document
+            knowledgePreviewHandler = { withContext(NonCancellable) { pending.await() } }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.KNOWLEDGE)
+
+        viewModel.openKnowledgePreview(document.id)
+        runCurrent()
+        assertEquals(KnowledgePreviewState.Loading(document), viewModel.state.value.knowledgePreview)
+        viewModel.closeKnowledgePreview()
+        pending.complete(preview)
+        advanceUntilIdle()
+
+        assertEquals(KnowledgePreviewState.Closed, viewModel.state.value.knowledgePreview)
+    }
+
+    @Test
+    fun newerKnowledgePreviewWinsWhenLoadsFinishOutOfOrder() = runTest(dispatcher) {
+        val documentA = knowledgeDocument("preview-a", "note-a", "ready")
+        val documentB = knowledgeDocument("preview-b", "note-b", "ready")
+        val previewA = knowledgePreview(documentA, "Preview A")
+        val previewB = knowledgePreview(documentB, "Preview B")
+        val pendingA = CompletableDeferred<KnowledgeDocumentPreview?>()
+        val pendingB = CompletableDeferred<KnowledgeDocumentPreview?>()
+        val fake = FakeChatDataSource(withModel = true).apply {
+            knowledgeDocuments += listOf(documentA, documentB)
+            knowledgePreviewHandler = { documentId ->
+                withContext(NonCancellable) {
+                    if (documentId == documentA.id) pendingA.await() else pendingB.await()
+                }
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.KNOWLEDGE)
+
+        viewModel.openKnowledgePreview(documentA.id)
+        runCurrent()
+        viewModel.openKnowledgePreview(documentB.id)
+        runCurrent()
+        assertEquals(KnowledgePreviewState.Loading(documentB), viewModel.state.value.knowledgePreview)
+
+        pendingB.complete(previewB)
+        runCurrent()
+        assertEquals(KnowledgePreviewState.Ready(previewB), viewModel.state.value.knowledgePreview)
+        pendingA.complete(previewA)
+        advanceUntilIdle()
+
+        assertEquals(KnowledgePreviewState.Ready(previewB), viewModel.state.value.knowledgePreview)
+    }
+
+    @Test
+    fun nonReadyKnowledgeDocumentsCannotOpenPreview() = runTest(dispatcher) {
+        val fake = FakeChatDataSource(withModel = true).apply {
+            knowledgeDocuments += knowledgeDocument("preview-indexing", "note-indexing", "indexing")
+            knowledgeDocuments += knowledgeDocument("preview-failed", "note-failed", "error")
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.KNOWLEDGE)
+
+        viewModel.openKnowledgePreview("preview-indexing")
+        viewModel.openKnowledgePreview("preview-failed")
+        viewModel.openKnowledgePreview("preview-missing")
+        advanceUntilIdle()
+
+        assertEquals(KnowledgePreviewState.Closed, viewModel.state.value.knowledgePreview)
+        assertTrue(fake.knowledgePreviewCalls.isEmpty())
+    }
+
+    @Test
+    fun directScreenChangeClosesPreviewAndInvalidatesItsPendingLoad() = runTest(dispatcher) {
+        val document = knowledgeDocument("preview-navigation-race", "note-navigation-race", "ready")
+        val preview = knowledgePreview(document, "Late navigation preview")
+        val pending = CompletableDeferred<KnowledgeDocumentPreview?>()
+        val fake = FakeChatDataSource(withModel = true).apply {
+            knowledgeDocuments += document
+            knowledgePreviewHandler = { withContext(NonCancellable) { pending.await() } }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.KNOWLEDGE)
+        viewModel.openKnowledgePreview(document.id)
+        runCurrent()
+        assertEquals(KnowledgePreviewState.Loading(document), viewModel.state.value.knowledgePreview)
+
+        viewModel.newConversation()
+        runCurrent()
+        assertEquals(AppScreen.CHAT, viewModel.state.value.screen)
+        assertEquals(KnowledgePreviewState.Closed, viewModel.state.value.knowledgePreview)
+
+        pending.complete(preview)
+        advanceUntilIdle()
+        assertEquals(KnowledgePreviewState.Closed, viewModel.state.value.knowledgePreview)
+    }
+
+    @Test
     fun urlTestCancellationClearsBusyStateWithoutShowingAnError() = runTest(dispatcher) {
         val fake = FakeChatDataSource(withModel = true)
         val viewModel = AppViewModel(fake)
@@ -606,6 +783,8 @@ private class FakeChatDataSource(withModel: Boolean) : ChatDataSource {
     val notes = mutableListOf<Note>()
     val knowledgeDocuments = mutableListOf<KnowledgeDocument>()
     val knowledgeSnippets = mutableListOf<KnowledgeSnippet>()
+    val knowledgePreviewCalls = mutableListOf<String>()
+    var knowledgePreviewHandler: suspend (String) -> KnowledgeDocumentPreview? = { null }
     var initialized = false
     var sentRequest: SendMessageRequest? = null
     var noteSummaryFailure: Throwable? = null
@@ -674,6 +853,11 @@ private class FakeChatDataSource(withModel: Boolean) : ChatDataSource {
     override suspend fun conversations() = conversations.toList()
     override suspend fun knowledgeSnippets(ids: List<Long>) =
         knowledgeSnippets.filter { it.chunkId in ids }
+
+    override suspend fun knowledgeDocumentPreview(documentId: String): KnowledgeDocumentPreview? {
+        knowledgePreviewCalls += documentId
+        return knowledgePreviewHandler(documentId)
+    }
 
     override suspend fun conversation(id: String): ConversationDetail {
         val conversation = conversations.first { it.id == id }
@@ -786,4 +970,12 @@ private fun knowledgeDocument(id: String, sourceNoteId: String, status: String) 
     sizeBytes = 4,
     status = status,
     sourceNoteId = sourceNoteId,
+)
+
+private fun knowledgePreview(document: KnowledgeDocument, text: String) = KnowledgeDocumentPreview(
+    documentId = document.id,
+    documentName = document.name,
+    extension = document.name.substringAfterLast('.'),
+    text = text,
+    truncated = false,
 )

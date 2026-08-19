@@ -12,7 +12,7 @@ import xyz.mek030399.tokenflow.ui.TokenFlowApp
 class MainActivity : ComponentActivity() {
     private val viewModel: AppViewModel by viewModels {
         val container = (application as TokenFlowApplication).container
-        AppViewModelFactory(container.repository)
+        AppViewModelFactory(container.repository, container.noteMarkdownFiles)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

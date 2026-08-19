@@ -47,11 +47,13 @@ import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.ImportExport
 import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.NoteAlt
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Search
@@ -117,6 +119,7 @@ import xyz.mek030399.tokenflow.data.AgentProfile
 import xyz.mek030399.tokenflow.data.KnowledgeDocumentPreview
 import xyz.mek030399.tokenflow.data.KnowledgeImportSource
 import xyz.mek030399.tokenflow.data.Note
+import xyz.mek030399.tokenflow.data.markdownNoteFileName
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -322,6 +325,14 @@ private fun NotesScreen(state: AppUiState, viewModel: AppViewModel, showBack: Bo
     var knowledgeImportTarget by remember { mutableStateOf<Note?>(null) }
     var summaryTarget by remember { mutableStateOf<Note?>(null) }
     var rewritePrompt by rememberSaveable { mutableStateOf("") }
+    val importMarkdownLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { viewModel.importMarkdownNote(it.toString()) }
+    }
+    val exportMarkdownLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/markdown"),
+    ) { uri ->
+        viewModel.exportMarkdownNote(uri?.toString())
+    }
     val currentReading = reading?.let { selectedNote ->
         state.notes.firstOrNull { it.id == selectedNote.id } ?: selectedNote
     }
@@ -357,6 +368,9 @@ private fun NotesScreen(state: AppUiState, viewModel: AppViewModel, showBack: Bo
                 },
             )
             val summaryDescription = stringResource(if (summarizing) R.string.summarizing_note else R.string.summarize_note)
+            val exportDescription = stringResource(
+                if (state.noteFileExporting) R.string.exporting_markdown_note else R.string.export_markdown_note,
+            )
             Row {
                 IconButton(
                     onClick = { knowledgeImportTarget = currentReading },
@@ -388,6 +402,22 @@ private fun NotesScreen(state: AppUiState, viewModel: AppViewModel, showBack: Bo
                     }
                 }
                 IconButton(
+                    onClick = {
+                        viewModel.prepareMarkdownNoteExport(currentReading)
+                        exportMarkdownLauncher.launch(markdownNoteFileName(currentReading.title))
+                    },
+                    enabled = !summarizing && !state.noteFileExporting,
+                    modifier = Modifier
+                        .testTag(UiTestTags.NOTE_EXPORT_MARKDOWN)
+                        .semantics { contentDescription = exportDescription },
+                ) {
+                    if (state.noteFileExporting) {
+                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Outlined.FileDownload, null)
+                    }
+                }
+                IconButton(
                     onClick = { editing = currentReading },
                     enabled = !summarizing,
                     modifier = Modifier.testTag("note_reader_edit"),
@@ -397,11 +427,40 @@ private fun NotesScreen(state: AppUiState, viewModel: AppViewModel, showBack: Bo
             }
         }}
         else -> {{
-            IconButton(
-                onClick = { editing = Note() },
-                modifier = Modifier.testTag("note_create"),
-            ) {
-                Icon(Icons.Outlined.Add, stringResource(R.string.new_note))
+            val importingMarkdown = state.noteFileImporting
+            val importDescription = stringResource(
+                if (importingMarkdown) R.string.importing_markdown_note else R.string.import_markdown_note,
+            )
+            Row {
+                IconButton(
+                    onClick = {
+                        importMarkdownLauncher.launch(
+                            arrayOf(
+                                "text/markdown",
+                                "text/x-markdown",
+                                "application/x-markdown",
+                                "text/plain",
+                                "application/octet-stream",
+                            ),
+                        )
+                    },
+                    enabled = !importingMarkdown,
+                    modifier = Modifier
+                        .testTag(UiTestTags.NOTE_IMPORT_MARKDOWN)
+                        .semantics { contentDescription = importDescription },
+                ) {
+                    if (importingMarkdown) {
+                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Outlined.UploadFile, null)
+                    }
+                }
+                IconButton(
+                    onClick = { editing = Note() },
+                    modifier = Modifier.testTag("note_create"),
+                ) {
+                    Icon(Icons.Outlined.Add, stringResource(R.string.new_note))
+                }
             }
         }}
     }
@@ -1056,6 +1115,8 @@ private fun AboutOverview(
                 )
             }
             items(ABOUT_FEATURES, key = { it.title }) { feature -> AboutFeatureRow(feature) }
+            item { AboutSectionTitle(stringResource(R.string.about_model_tools)) }
+            items(ABOUT_MODEL_TOOLS, key = AboutModelTool::id) { tool -> AboutModelToolRow(tool) }
             item { AboutSectionTitle(stringResource(R.string.about_service_keys)) }
             item {
                 AboutExternalLinkRow(
@@ -1141,6 +1202,26 @@ private fun AboutFeatureRow(feature: AboutFeature) {
 }
 
 @Composable
+private fun AboutModelToolRow(tool: AboutModelTool) {
+    ListItem(
+        headlineContent = { Text(stringResource(tool.title), fontWeight = FontWeight.Medium) },
+        supportingContent = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = tool.id,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                Text(stringResource(tool.description))
+            }
+        },
+        leadingContent = { Icon(tool.icon, null, tint = MaterialTheme.colorScheme.primary) },
+        modifier = Modifier.fillMaxWidth().testTag(tool.testTag),
+    )
+}
+
+@Composable
 private fun AboutExternalLinkRow(title: String, description: String, testTag: String, onClick: () -> Unit) {
     val linkColor = if (LocalTokenFlowDarkTheme.current) Color(0xFF90CAF9) else Color(0xFF1565C0)
     Column {
@@ -1205,6 +1286,13 @@ private fun BundledMarkdownContent(padding: PaddingValues, rawResource: Int, tes
 }
 
 private data class AboutFeature(val icon: ImageVector, val title: Int, val description: Int)
+private data class AboutModelTool(
+    val id: String,
+    val icon: ImageVector,
+    val title: Int,
+    val description: Int,
+    val testTag: String,
+)
 private data class OpenSourceLink(val label: String, val url: String)
 private data class OpenSourceComponent(
     val name: String,
@@ -1221,6 +1309,30 @@ private val ABOUT_FEATURES = listOf(
     AboutFeature(Icons.Outlined.ChatBubbleOutline, R.string.about_feature_chat_title, R.string.about_feature_chat_body),
     AboutFeature(Icons.Outlined.FolderOpen, R.string.about_feature_workspace_title, R.string.about_feature_workspace_body),
     AboutFeature(Icons.Outlined.AutoAwesome, R.string.about_feature_extensions_title, R.string.about_feature_extensions_body),
+)
+
+private val ABOUT_MODEL_TOOLS = listOf(
+    AboutModelTool(
+        id = "web_search",
+        icon = Icons.Outlined.Search,
+        title = R.string.about_model_tool_web_search_title,
+        description = R.string.about_model_tool_web_search_body,
+        testTag = UiTestTags.ABOUT_MODEL_TOOL_WEB_SEARCH,
+    ),
+    AboutModelTool(
+        id = "read_url",
+        icon = Icons.Outlined.Link,
+        title = R.string.about_model_tool_read_url_title,
+        description = R.string.about_model_tool_read_url_body,
+        testTag = UiTestTags.ABOUT_MODEL_TOOL_READ_URL,
+    ),
+    AboutModelTool(
+        id = "search_knowledge",
+        icon = Icons.Outlined.FolderOpen,
+        title = R.string.about_model_tool_search_knowledge_title,
+        description = R.string.about_model_tool_search_knowledge_body,
+        testTag = UiTestTags.ABOUT_MODEL_TOOL_SEARCH_KNOWLEDGE,
+    ),
 )
 
 private val OPEN_SOURCE_COMPONENTS = listOf(

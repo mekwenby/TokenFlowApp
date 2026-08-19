@@ -28,15 +28,17 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
 import androidx.compose.ui.test.SemanticsNodeInteraction
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
-import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.click
@@ -82,6 +84,7 @@ import xyz.mek030399.tokenflow.data.KnowledgeDocumentPreview
 import xyz.mek030399.tokenflow.data.KnowledgeSnippet
 import xyz.mek030399.tokenflow.data.GlobalChatSettings
 import xyz.mek030399.tokenflow.data.ModelProfile
+import xyz.mek030399.tokenflow.data.ImportedMarkdownNote
 import xyz.mek030399.tokenflow.data.Note
 import xyz.mek030399.tokenflow.data.PendingAttachment
 import xyz.mek030399.tokenflow.data.ProcessEvent
@@ -265,6 +268,222 @@ class TokenFlowAppTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val clipboard = context.getSystemService(ClipboardManager::class.java)
         assertEquals("Answer from provider", clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString())
+    }
+
+    @Test
+    fun emptyStreamingResponseShowsToolStatusThenReturnsToCallingModel() {
+        val toolTerminalGate = CompletableDeferred<Unit>()
+        val finishGate = CompletableDeferred<Unit>()
+        val fake = UiFakeDataSource(withModel = true).apply {
+            sendMessageFlow = { conversationId, request ->
+                controlledToolFlow(
+                    conversationId = conversationId,
+                    request = request,
+                    toolName = "web_search",
+                    partialContent = null,
+                    toolTerminalGate = toolTerminalGate,
+                    finishGate = finishGate,
+                )
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        composeRule.setContent { TokenFlowTheme { TokenFlowApp(viewModel) } }
+        composeRule.waitUntil(5_000) { fake.initialized }
+
+        composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).performTextInput("Search for this")
+        composeRule.onNodeWithTag(UiTestTags.MESSAGE_ACTION).performClick()
+        composeRule.waitUntil(5_000) {
+            viewModel.state.value.activeGeneration?.events?.any {
+                it.type == "tool_started" && it.name == "web_search"
+            } == true
+        }
+        val status = composeRule.onNodeWithTag(UiTestTags.GENERATION_STATUS)
+            .assertIsDisplayed()
+            .assertTextEquals(context.getString(xyz.mek030399.tokenflow.R.string.searching_web))
+        val searchingIconTag = UiTestTags.GENERATION_STATUS_ICON_PREFIX +
+            GenerationActivity.SEARCHING_WEB.name.lowercase()
+        composeRule.onNodeWithTag(searchingIconTag, useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithTag(
+            UiTestTags.GENERATION_STATUS_ANIMATION,
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        assertEquals(
+            LiveRegionMode.Polite,
+            status.fetchSemanticsNode().config[SemanticsProperties.LiveRegion],
+        )
+        composeRule.mainClock.autoAdvance = false
+        try {
+            val boundsBeforeAnimation = status.fetchSemanticsNode().boundsInRoot
+            composeRule.mainClock.advanceTimeBy(600)
+            composeRule.waitForIdle()
+            val boundsAfterAnimation = composeRule.onNodeWithTag(UiTestTags.GENERATION_STATUS)
+                .fetchSemanticsNode().boundsInRoot
+            assertEquals(boundsBeforeAnimation.left, boundsAfterAnimation.left, 0.5f)
+            assertEquals(boundsBeforeAnimation.top, boundsAfterAnimation.top, 0.5f)
+            assertEquals(boundsBeforeAnimation.right, boundsAfterAnimation.right, 0.5f)
+            assertEquals(boundsBeforeAnimation.bottom, boundsAfterAnimation.bottom, 0.5f)
+        } finally {
+            composeRule.mainClock.autoAdvance = true
+        }
+
+        toolTerminalGate.complete(Unit)
+        composeRule.waitUntil(5_000) {
+            viewModel.state.value.activeGeneration?.events?.any {
+                it.type == "tool_completed" && it.id == "tool-call"
+            } == true
+        }
+        composeRule.onNodeWithTag(UiTestTags.GENERATION_STATUS)
+            .assertIsDisplayed()
+            .assertTextEquals(context.getString(xyz.mek030399.tokenflow.R.string.calling_model))
+        composeRule.onAllNodesWithTag(searchingIconTag, useUnmergedTree = true).assertCountEquals(0)
+        composeRule.onNodeWithTag(
+            UiTestTags.GENERATION_STATUS_ICON_PREFIX + GenerationActivity.CALLING_MODEL.name.lowercase(),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        composeRule.onNodeWithTag(
+            UiTestTags.GENERATION_STATUS_ANIMATION,
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+
+        finishGate.complete(Unit)
+        composeRule.waitUntil(5_000) { viewModel.state.value.activeGeneration?.active == false }
+        composeRule.onAllNodesWithTag(
+            UiTestTags.GENERATION_STATUS_ANIMATION,
+            useUnmergedTree = true,
+        ).assertCountEquals(0)
+    }
+
+    @Test
+    fun streamingResponseShowsToolStatusBelowContentOnlyWhileToolIsActive() {
+        val toolStartGate = CompletableDeferred<Unit>()
+        val toolTerminalGate = CompletableDeferred<Unit>()
+        val finishGate = CompletableDeferred<Unit>()
+        val partialContent = "Long partial answer ".repeat(160) + "Tail marker"
+        val fake = UiFakeDataSource(withModel = true).apply {
+            sendMessageFlow = { conversationId, request ->
+                controlledToolFlow(
+                    conversationId = conversationId,
+                    request = request,
+                    toolName = "read_url",
+                    partialContent = partialContent,
+                    toolStartGate = toolStartGate,
+                    toolTerminalGate = toolTerminalGate,
+                    finishGate = finishGate,
+                )
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        setAppAt(viewModel, PHONE_SIZE)
+        composeRule.waitUntil(5_000) { fake.initialized }
+
+        composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).performTextInput("Read this URL")
+        composeRule.onNodeWithTag(UiTestTags.MESSAGE_ACTION).performClick()
+        composeRule.waitUntil(5_000) {
+            viewModel.state.value.activeMessages.any { it.content == partialContent }
+        }
+        composeRule.waitForIdle()
+        composeRule.onAllNodesWithTag(UiTestTags.GENERATION_STATUS).assertCountEquals(0)
+
+        toolStartGate.complete(Unit)
+        composeRule.waitUntil(5_000) {
+            viewModel.state.value.activeGeneration?.events?.any {
+                it.type == "tool_started" && it.name == "read_url"
+            } == true
+        }
+        val content = composeRule.onNodeWithText("Tail marker", substring = true).assertIsDisplayed()
+        val status = composeRule.onNodeWithTag(UiTestTags.GENERATION_STATUS)
+            .assertIsDisplayed()
+            .assertTextEquals(context.getString(xyz.mek030399.tokenflow.R.string.reading_url))
+        val readingIconTag = UiTestTags.GENERATION_STATUS_ICON_PREFIX +
+            GenerationActivity.READING_URL.name.lowercase()
+        composeRule.onNodeWithTag(readingIconTag, useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithTag(
+            UiTestTags.GENERATION_STATUS_ANIMATION,
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        assertTrue(
+            content.fetchSemanticsNode().boundsInRoot.bottom <=
+                status.fetchSemanticsNode().boundsInRoot.top,
+        )
+
+        toolTerminalGate.complete(Unit)
+        composeRule.waitUntil(5_000) {
+            viewModel.state.value.activeGeneration?.events?.any {
+                it.type == "tool_completed" && it.id == "tool-call"
+            } == true
+        }
+        composeRule.onAllNodesWithTag(UiTestTags.GENERATION_STATUS).assertCountEquals(0)
+        composeRule.onAllNodesWithTag(readingIconTag, useUnmergedTree = true).assertCountEquals(0)
+        composeRule.onAllNodesWithTag(
+            UiTestTags.GENERATION_STATUS_ANIMATION,
+            useUnmergedTree = true,
+        ).assertCountEquals(0)
+
+        finishGate.complete(Unit)
+        composeRule.waitUntil(5_000) { viewModel.state.value.activeGeneration?.active == false }
+    }
+
+    @Test
+    fun generationStatusUsesActivitySpecificIcons() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val labels = mapOf(
+            GenerationActivity.CALLING_MODEL to xyz.mek030399.tokenflow.R.string.calling_model,
+            GenerationActivity.SEARCHING_WEB to xyz.mek030399.tokenflow.R.string.searching_web,
+            GenerationActivity.READING_URL to xyz.mek030399.tokenflow.R.string.reading_url,
+            GenerationActivity.SEARCHING_LOCAL_KNOWLEDGE to
+                xyz.mek030399.tokenflow.R.string.searching_local_knowledge,
+            GenerationActivity.CALLING_TOOL to xyz.mek030399.tokenflow.R.string.calling_tool,
+        )
+        composeRule.setContent {
+            TokenFlowTheme {
+                Column {
+                    labels.keys.forEach { activity ->
+                        GenerationStatus(activity = activity, letterSpacing = 0f, animated = false)
+                    }
+                }
+            }
+        }
+
+        labels.forEach { (activity, labelResource) ->
+            composeRule.onNodeWithTag(
+                UiTestTags.GENERATION_STATUS_ICON_PREFIX + activity.name.lowercase(),
+                useUnmergedTree = true,
+            ).assertIsDisplayed()
+            composeRule.onNodeWithText(context.getString(labelResource)).assertIsDisplayed()
+        }
+        composeRule.onAllNodesWithTag(
+            UiTestTags.GENERATION_STATUS_ANIMATION,
+            useUnmergedTree = true,
+        ).assertCountEquals(0)
+    }
+
+    @Test
+    fun generationStatusKeepsAnimationVisibleOnNarrowLargeTextLayout() {
+        val density = InstrumentationRegistry.getInstrumentation()
+            .targetContext.resources.displayMetrics.density
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.ForcedSize(DpSize(360.dp, 640.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.FontScale(2f)) {
+                    TokenFlowTheme {
+                        Box(Modifier.size(width = 260.dp, height = 120.dp)) {
+                            GenerationStatus(
+                                activity = GenerationActivity.SEARCHING_LOCAL_KNOWLEDGE,
+                                letterSpacing = 0f,
+                                animated = true,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        val animation = composeRule.onNodeWithTag(
+            UiTestTags.GENERATION_STATUS_ANIMATION,
+            useUnmergedTree = true,
+        ).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        assertEquals(18.dp.value * density, animation.width, 0.5f)
     }
 
     @Test
@@ -694,6 +913,39 @@ class TokenFlowAppTest {
             context.getString(xyz.mek030399.tokenflow.R.string.version_label, versionName),
         ).assertCountEquals(1)
 
+        val modelToolsTitle = context.getString(xyz.mek030399.tokenflow.R.string.about_model_tools)
+        about.performScrollToNode(hasText(modelToolsTitle))
+        composeRule.onNodeWithText(modelToolsTitle).assertIsDisplayed()
+        listOf(
+            UiTestTags.ABOUT_MODEL_TOOL_WEB_SEARCH to Triple(
+                xyz.mek030399.tokenflow.R.string.about_model_tool_web_search_title,
+                xyz.mek030399.tokenflow.R.string.about_model_tool_web_search_body,
+                "web_search",
+            ),
+            UiTestTags.ABOUT_MODEL_TOOL_READ_URL to Triple(
+                xyz.mek030399.tokenflow.R.string.about_model_tool_read_url_title,
+                xyz.mek030399.tokenflow.R.string.about_model_tool_read_url_body,
+                "read_url",
+            ),
+            UiTestTags.ABOUT_MODEL_TOOL_SEARCH_KNOWLEDGE to Triple(
+                xyz.mek030399.tokenflow.R.string.about_model_tool_search_knowledge_title,
+                xyz.mek030399.tokenflow.R.string.about_model_tool_search_knowledge_body,
+                "search_knowledge",
+            ),
+        ).forEach { (tag, resourcesAndId) ->
+            val (titleResource, descriptionResource, rawId) = resourcesAndId
+            about.performScrollToNode(hasTestTag(tag))
+            composeRule.onNodeWithTag(tag).assertIsDisplayed()
+            val localizedTitle = context.getString(titleResource)
+            about.performScrollToNode(hasText(localizedTitle))
+            composeRule.onNodeWithText(localizedTitle).assertIsDisplayed()
+            about.performScrollToNode(hasText(rawId))
+            composeRule.onNodeWithText(rawId).assertIsDisplayed()
+            val localizedDescription = context.getString(descriptionResource)
+            about.performScrollToNode(hasText(localizedDescription))
+            composeRule.onNodeWithText(localizedDescription).assertIsDisplayed()
+        }
+
         about.performScrollToNode(hasText("Jetpack Compose / Material 3"))
         composeRule.onNodeWithText("Jetpack Compose / Material 3").assertIsDisplayed()
         about.performScrollToNode(hasText("commonmark-java"))
@@ -849,10 +1101,15 @@ class TokenFlowAppTest {
             )
         }
         val viewModel = AppViewModel(fake)
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
         composeRule.setContent { TokenFlowTheme { TokenFlowApp(viewModel) } }
         composeRule.waitUntil(5_000) { fake.initialized }
 
         viewModel.openScreen(AppScreen.NOTES)
+        composeRule.onNodeWithTag(UiTestTags.NOTE_IMPORT_MARKDOWN).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription(
+            context.getString(xyz.mek030399.tokenflow.R.string.import_markdown_note),
+        ).assertIsDisplayed()
         composeRule.onNodeWithTag(UiTestTags.noteItem("note-rich")).performClick()
 
         composeRule.onNodeWithTag("note_reader").assertIsDisplayed()
@@ -872,9 +1129,13 @@ class TokenFlowAppTest {
         }
 
         val summarize = composeRule.onNodeWithTag("note_reader_summarize").fetchSemanticsNode().boundsInRoot
+        val export = composeRule.onNodeWithTag(UiTestTags.NOTE_EXPORT_MARKDOWN).fetchSemanticsNode().boundsInRoot
         val edit = composeRule.onNodeWithTag("note_reader_edit").fetchSemanticsNode().boundsInRoot
-        assertTrue(summarize.center.x < edit.center.x)
+        assertTrue(summarize.center.x < export.center.x && export.center.x < edit.center.x)
         composeRule.onNodeWithTag("note_reader_import_knowledge").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription(
+            context.getString(xyz.mek030399.tokenflow.R.string.export_markdown_note),
+        ).assertIsDisplayed()
         composeRule.onNodeWithTag("note_reader_summarize").performClick()
         composeRule.onNodeWithText("Model A").assertIsDisplayed()
         pressBack()
@@ -882,6 +1143,46 @@ class TokenFlowAppTest {
         composeRule.onNodeWithTag("note_reader_edit").performClick()
         composeRule.onNodeWithTag("note_editor").assertIsDisplayed()
         composeRule.onAllNodesWithTag("note_reader").assertCountEquals(0)
+    }
+
+    @Test
+    fun markdownNoteActionsFitPhoneToolbarAndImportBusyDisablesPicker() {
+        val gate = CompletableDeferred<Unit>()
+        val fake = UiFakeDataSource(withModel = true).apply {
+            saveNoteGate = gate
+            notes += Note(
+                id = "note-toolbar",
+                title = "A deliberately long Markdown note title for a narrow phone",
+                body = "Toolbar body",
+            )
+        }
+        val viewModel = AppViewModel(fake)
+        setAppAt(viewModel, PHONE_SIZE)
+        composeRule.waitUntil(5_000) { fake.initialized }
+
+        viewModel.openScreen(AppScreen.NOTES)
+        viewModel.importMarkdownNote(ImportedMarkdownNote("Imported", "Imported body"))
+        composeRule.waitUntil(5_000) { viewModel.state.value.noteFileImporting }
+        composeRule.onNodeWithTag(UiTestTags.NOTE_IMPORT_MARKDOWN)
+            .assertIsDisplayed()
+            .assertIsNotEnabled()
+
+        gate.complete(Unit)
+        composeRule.waitUntil(5_000) {
+            !viewModel.state.value.noteFileImporting && fake.notes.any { it.title == "Imported" }
+        }
+        composeRule.onNodeWithTag(UiTestTags.noteItem("note-toolbar")).performClick()
+
+        val title = composeRule.onNodeWithTag(UiTestTags.NOTE_READER_TITLE)
+            .assertIsDisplayed()
+            .fetchSemanticsNode().boundsInRoot
+        val knowledge = composeRule.onNodeWithTag("note_reader_import_knowledge")
+            .assertIsDisplayed()
+            .fetchSemanticsNode().boundsInRoot
+        composeRule.onNodeWithTag("note_reader_summarize").assertIsDisplayed()
+        composeRule.onNodeWithTag(UiTestTags.NOTE_EXPORT_MARKDOWN).assertIsDisplayed()
+        composeRule.onNodeWithTag("note_reader_edit").assertIsDisplayed()
+        assertTrue(title.right <= knowledge.left)
     }
 
     @Test
@@ -1519,6 +1820,46 @@ private fun SemanticsNodeInteraction.performClickOnText(text: String): Semantics
     return performTouchInput { click(layoutResult.getBoundingBox(offset).center) }
 }
 
+private fun controlledToolFlow(
+    conversationId: String,
+    request: SendMessageRequest,
+    toolName: String,
+    partialContent: String?,
+    toolStartGate: CompletableDeferred<Unit>? = null,
+    toolTerminalGate: CompletableDeferred<Unit>,
+    finishGate: CompletableDeferred<Unit>,
+): Flow<ChatEvent> = flow {
+    emit(ChatEvent.UserMessage(ChatMessage(
+        id = "user",
+        conversationId = conversationId,
+        requestId = request.requestId,
+        role = "user",
+        content = request.content,
+    )))
+    emit(ChatEvent.AssistantMessage(ChatMessage(
+        id = "assistant",
+        conversationId = conversationId,
+        requestId = request.requestId,
+        role = "assistant",
+        status = "generating",
+    )))
+    partialContent?.let { emit(ChatEvent.Delta(it)) }
+    toolStartGate?.await()
+    emit(ChatEvent.Process(ProcessEvent(
+        type = "tool_started",
+        id = "tool-call",
+        name = toolName,
+    )))
+    toolTerminalGate.await()
+    emit(ChatEvent.Process(ProcessEvent(
+        type = "tool_completed",
+        id = "tool-call",
+        name = toolName,
+    )))
+    finishGate.await()
+    emit(ChatEvent.Done(Usage(), false))
+}
+
 private class UiFakeDataSource(
     withModel: Boolean,
     private val withProvider: Boolean = withModel,
@@ -1546,6 +1887,9 @@ private class UiFakeDataSource(
     var importPreviewError: Throwable? = null
     var applyImportGate: CompletableDeferred<Unit>? = null
     var applyImportError: Throwable? = null
+    var saveNoteGate: CompletableDeferred<Unit>? = null
+    var saveNoteError: Throwable? = null
+    var sendMessageFlow: ((String, SendMessageRequest) -> Flow<ChatEvent>)? = null
 
     fun seedMessages(conversationId: String, items: List<ChatMessage>) {
         messages[conversationId] = items
@@ -1607,6 +1951,13 @@ private class UiFakeDataSource(
         return existing == null
     }
     override suspend fun deleteBookmarks(messageIds: Set<String>) { bookmarks.removeAll { it.messageId in messageIds } }
+    override suspend fun saveNote(note: Note): Note {
+        saveNoteGate?.await()
+        saveNoteError?.let { throw it }
+        notes.removeAll { it.id == note.id }
+        notes.add(0, note)
+        return note
+    }
     override suspend fun deleteNotes(ids: Set<String>) { notes.removeAll { it.id in ids } }
     override suspend fun deleteKnowledge(id: String) {
         deletedKnowledgeIds += id
@@ -1636,16 +1987,18 @@ private class UiFakeDataSource(
     }
     override suspend fun generateTitle(id: String, force: Boolean) = updateConversation(id, ConversationWriteRequest(title = "Title"))
 
-    override fun sendMessage(id: String, request: SendMessageRequest): Flow<ChatEvent> = flow {
+    override fun sendMessage(id: String, request: SendMessageRequest): Flow<ChatEvent> {
         sentRequest = request
-        val user = ChatMessage("user", id, requestId = request.requestId, role = "user", content = request.content)
-        val assistant = ChatMessage("assistant", id, requestId = request.requestId, role = "assistant", status = "generating")
-        emit(ChatEvent.UserMessage(user))
-        emit(ChatEvent.AssistantMessage(assistant))
-        emit(ChatEvent.Process(ProcessEvent(type = "thinking", id = "thinking", content = "summary")))
-        emit(ChatEvent.Delta("Answer from provider"))
-        messages[id] = listOf(user, assistant.copy(content = "Answer from provider", status = "completed"))
-        emit(ChatEvent.Done(completionUsage, false))
+        return sendMessageFlow?.invoke(id, request) ?: flow {
+            val user = ChatMessage("user", id, requestId = request.requestId, role = "user", content = request.content)
+            val assistant = ChatMessage("assistant", id, requestId = request.requestId, role = "assistant", status = "generating")
+            emit(ChatEvent.UserMessage(user))
+            emit(ChatEvent.AssistantMessage(assistant))
+            emit(ChatEvent.Process(ProcessEvent(type = "thinking", id = "thinking", content = "summary")))
+            emit(ChatEvent.Delta("Answer from provider"))
+            messages[id] = listOf(user, assistant.copy(content = "Answer from provider", status = "completed"))
+            emit(ChatEvent.Done(completionUsage, false))
+        }
     }
 
     override fun regenerate(id: String, request: SendMessageRequest): Flow<ChatEvent> = flow { }

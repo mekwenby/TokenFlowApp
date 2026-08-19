@@ -20,10 +20,14 @@ import xyz.mek030399.tokenflow.data.ConfigurationException
 import xyz.mek030399.tokenflow.data.Conversation
 import xyz.mek030399.tokenflow.data.ConversationWriteRequest
 import xyz.mek030399.tokenflow.data.ImportPreview
+import xyz.mek030399.tokenflow.data.ImportedMarkdownNote
 import xyz.mek030399.tokenflow.data.GlobalChatSettings
 import xyz.mek030399.tokenflow.data.ModelProfile
 import xyz.mek030399.tokenflow.data.MAX_MODEL_OUTPUT_TOKENS
 import xyz.mek030399.tokenflow.data.NoteChangedDuringSummaryException
+import xyz.mek030399.tokenflow.data.NoteMarkdownFileError
+import xyz.mek030399.tokenflow.data.NoteMarkdownFileAccess
+import xyz.mek030399.tokenflow.data.NoteMarkdownFileException
 import xyz.mek030399.tokenflow.data.NoteSummaryTooLongException
 import xyz.mek030399.tokenflow.data.ProcessEvent
 import xyz.mek030399.tokenflow.data.ProviderConfig
@@ -165,6 +169,8 @@ data class AppUiState(
     val transfer: TransferState = TransferState(),
     val bookmarks: List<BookmarkedMessage> = emptyList(),
     val notes: List<Note> = emptyList(),
+    val noteFileImporting: Boolean = false,
+    val noteFileExporting: Boolean = false,
     val noteSummarizingId: String? = null,
     val noteImportingId: String? = null,
     val agents: List<AgentProfile> = emptyList(),
@@ -187,8 +193,9 @@ data class AppUiState(
     val hasModels: Boolean get() = models.isNotEmpty()
 }
 
-class AppViewModel(
+class AppViewModel internal constructor(
     private val repository: ChatDataSource,
+    private val noteMarkdownFiles: NoteMarkdownFileAccess? = null,
 ) : ViewModel() {
     private val mutableState = MutableStateFlow(AppUiState())
     val state: StateFlow<AppUiState> = mutableState.asStateFlow()
@@ -199,6 +206,7 @@ class AppViewModel(
     private var knowledgePreviewJob: Job? = null
     private var knowledgePreviewGeneration = 0L
     private val noteSavingMessageIds = mutableSetOf<String>()
+    private var pendingMarkdownExport: Note? = null
     private var workspaceLoadVersion = 0L
 
     init {
@@ -225,6 +233,23 @@ class AppViewModel(
 
     fun reportCameraCaptureFailure() = mutableState.update {
         it.copy(notice = uiText(R.string.camera_capture_failed))
+    }
+
+    fun reportNoteMarkdownFileError(error: Throwable) {
+        val message = when ((error as? NoteMarkdownFileException)?.reason) {
+            NoteMarkdownFileError.UNSUPPORTED_EXTENSION -> R.string.note_markdown_invalid_extension
+            NoteMarkdownFileError.TOO_LARGE -> R.string.note_markdown_too_large
+            NoteMarkdownFileError.EMPTY -> R.string.note_markdown_empty
+            NoteMarkdownFileError.INVALID_UTF8 -> R.string.note_markdown_invalid_utf8
+            NoteMarkdownFileError.READ_FAILED -> R.string.note_markdown_read_failed
+            NoteMarkdownFileError.WRITE_FAILED -> R.string.note_markdown_write_failed
+            null -> R.string.file_operation_failed
+        }
+        mutableState.update { it.copy(notice = uiText(message)) }
+    }
+
+    fun reportNoteMarkdownExported() = mutableState.update {
+        it.copy(notice = uiText(R.string.note_markdown_exported))
     }
 
     fun setConversationSearch(value: String) = mutableState.update { it.copy(conversationSearch = value) }
@@ -436,6 +461,72 @@ class AppViewModel(
     fun consumeScrollTarget() = mutableState.update { it.copy(scrollToMessageId = null) }
 
     fun saveNote(note: Note) = refreshAfter { repository.saveNote(note) }
+
+    fun importMarkdownNote(uri: String) {
+        startMarkdownNoteImport {
+            requireNotNull(noteMarkdownFiles) { "Markdown note files are unavailable" }.read(uri)
+        }
+    }
+
+    internal fun importMarkdownNote(imported: ImportedMarkdownNote) {
+        startMarkdownNoteImport { imported }
+    }
+
+    private fun startMarkdownNoteImport(load: suspend () -> ImportedMarkdownNote) {
+        if (mutableState.value.noteFileImporting) return
+        mutableState.update { it.copy(noteFileImporting = true) }
+        viewModelScope.launch {
+            try {
+                val imported = load()
+                val note = repository.saveNote(Note(title = imported.title, body = imported.body))
+                mutableState.update {
+                    it.copy(
+                        notes = upsertNote(it.notes, note),
+                        notice = uiText(R.string.note_markdown_imported),
+                    )
+                }
+                loadWorkspace()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: NoteMarkdownFileException) {
+                reportNoteMarkdownFileError(error)
+            } catch (_: Exception) {
+                mutableState.update { it.copy(notice = uiText(R.string.note_markdown_import_failed)) }
+            } finally {
+                mutableState.update { it.copy(noteFileImporting = false) }
+            }
+        }
+    }
+
+    internal fun prepareMarkdownNoteExport(note: Note) {
+        pendingMarkdownExport = note
+    }
+
+    fun exportMarkdownNote(uri: String?) {
+        val note = pendingMarkdownExport
+        pendingMarkdownExport = null
+        if (uri == null || note == null || mutableState.value.noteFileExporting) return
+        val files = noteMarkdownFiles
+        if (files == null) {
+            mutableState.update { it.copy(notice = uiText(R.string.note_markdown_write_failed)) }
+            return
+        }
+        mutableState.update { it.copy(noteFileExporting = true) }
+        viewModelScope.launch {
+            try {
+                files.write(uri, note.body)
+                reportNoteMarkdownExported()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: NoteMarkdownFileException) {
+                reportNoteMarkdownFileError(error)
+            } catch (_: Exception) {
+                mutableState.update { it.copy(notice = uiText(R.string.note_markdown_write_failed)) }
+            } finally {
+                mutableState.update { it.copy(noteFileExporting = false) }
+            }
+        }
+    }
 
     fun saveMessageAsNote(message: ChatMessage) {
         if (mutableState.value.notes.any { it.sourceMessageId == message.id } || !noteSavingMessageIds.add(message.id)) return
@@ -1258,9 +1349,11 @@ private fun mergeProcess(events: List<ProcessEvent>, incoming: ProcessEvent): Li
     }
 }
 
-class AppViewModelFactory(
+class AppViewModelFactory internal constructor(
     private val repository: ChatDataSource,
+    private val noteMarkdownFiles: NoteMarkdownFileAccess,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
-    override fun <T : ViewModel> create(modelClass: Class<T>): T = AppViewModel(repository) as T
+    override fun <T : ViewModel> create(modelClass: Class<T>): T =
+        AppViewModel(repository, noteMarkdownFiles) as T
 }

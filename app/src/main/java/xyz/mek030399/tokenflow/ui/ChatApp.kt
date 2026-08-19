@@ -7,6 +7,14 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.StartOffset
+import androidx.compose.animation.core.StartOffsetType
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
@@ -59,6 +67,7 @@ import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Bookmarks
+import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
@@ -80,6 +89,7 @@ import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.NoteAlt
 import androidx.compose.material.icons.outlined.PushPin
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Pause
@@ -147,6 +157,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -157,8 +168,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -209,6 +222,7 @@ import xyz.mek030399.tokenflow.data.UrlReaderBackend
 import xyz.mek030399.tokenflow.data.VisionStatus
 import xyz.mek030399.tokenflow.data.assistantMetadata
 import xyz.mek030399.tokenflow.data.afterLatestContextBoundary
+import xyz.mek030399.tokenflow.data.markdownNoteFileName
 import xyz.mek030399.tokenflow.ui.theme.AppTheme
 import xyz.mek030399.tokenflow.ui.theme.LocalTokenFlowDarkTheme
 import xyz.mek030399.tokenflow.ui.theme.TokenFlowTheme
@@ -235,6 +249,9 @@ object UiTestTags {
     const val SPEECH_CONTROLS = "speech_controls"
     const val PROCESS_TOKEN_ROW = "process_token_row"
     const val TOKEN_USAGE = "token_usage"
+    const val GENERATION_STATUS = "generation_status"
+    const val GENERATION_STATUS_ICON_PREFIX = "generation_status_icon_"
+    const val GENERATION_STATUS_ANIMATION = "generation_status_animation"
     const val KNOWLEDGE_SOURCE_PREVIEW = "knowledge_source_preview"
     const val KNOWLEDGE_PREVIEW = "knowledge_preview"
     const val KNOWLEDGE_PREVIEW_LOADING = "knowledge_preview_loading"
@@ -243,6 +260,8 @@ object UiTestTags {
     const val KNOWLEDGE_PREVIEW_MARKDOWN = "knowledge_preview_markdown"
     const val KNOWLEDGE_PREVIEW_PLAIN = "knowledge_preview_plain"
     const val NOTE_READER_TITLE = "note_reader_title"
+    const val NOTE_IMPORT_MARKDOWN = "note_import_markdown"
+    const val NOTE_EXPORT_MARKDOWN = "note_export_markdown"
     const val NOTE_REWRITE_PLACEHOLDER = "note_rewrite_placeholder"
     const val NOTES_SEARCH = "notes_search"
     const val CHAT_TOP_BAR = "chat_top_bar"
@@ -279,6 +298,9 @@ object UiTestTags {
     const val WORKSPACE_SELECT_ALL = "workspace_select_all"
     const val WORKSPACE_DELETE_SELECTED = "workspace_delete_selected"
     const val ABOUT_SCREEN = "about_screen"
+    const val ABOUT_MODEL_TOOL_WEB_SEARCH = "about_model_tool_web_search"
+    const val ABOUT_MODEL_TOOL_READ_URL = "about_model_tool_read_url"
+    const val ABOUT_MODEL_TOOL_SEARCH_KNOWLEDGE = "about_model_tool_search_knowledge"
     const val ABOUT_EXA_KEY_LINK = "about_exa_key_link"
     const val ABOUT_MIMO_KEY_LINK = "about_mimo_key_link"
     const val ABOUT_THIRD_PARTY_NOTICES = "about_third_party_notices"
@@ -1702,6 +1724,8 @@ private fun MessageList(
 ) {
     val listState = rememberLazyListState()
     val latestAssistantId = messages.afterLatestContextBoundary().lastOrNull { it.role == "assistant" }?.id
+    val generationActive = generation?.active == true
+    val generationActivity = currentGenerationActivity(generation?.events.orEmpty(), generationActive)
     val atBottom by remember { derivedStateOf {
         val info = listState.layoutInfo
         info.totalItemsCount == 0 || info.visibleItemsInfo.lastOrNull()?.let { item ->
@@ -1716,7 +1740,13 @@ private fun MessageList(
                 if (bottom) followStreaming = true
             }
     }
-    LaunchedEffect(messages.size, messages.lastOrNull()?.content?.length, followStreaming) {
+    LaunchedEffect(
+        messages.size,
+        messages.lastOrNull()?.content?.length,
+        generationActive,
+        generationActivity,
+        followStreaming,
+    ) {
         if (messages.isNotEmpty() && followStreaming) listState.scrollToItem(messages.lastIndex, Int.MAX_VALUE)
     }
     LaunchedEffect(scrollToMessageId) {
@@ -1819,7 +1849,9 @@ private fun MessageItem(
         liveEvents = generation?.events.orEmpty(),
     )
     val usage = generation?.usage?.takeIf { it.totalTokens > 0 } ?: metadata.usage.toUsage()
-    val streaming = !isUser && (message.status == "generating" || generation?.active == true)
+    val generationActive = generation?.active == true
+    val generationActivity = currentGenerationActivity(generation?.events.orEmpty(), generationActive)
+    val streaming = !isUser && (message.status == "generating" || generationActive)
     var expanded by rememberSaveable(message.id) { mutableStateOf(processExpandedByDefault) }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start, verticalAlignment = Alignment.Top) {
         if (!isUser) {
@@ -1853,16 +1885,26 @@ private fun MessageItem(
                             )
                         }
                     }
-                    else if (message.content.isNotBlank()) MarkdownContent(
-                        markdown = message.content,
-                        knowledgeCitations = knowledgeCitations,
-                        onKnowledgeCitationClick = onKnowledgeCitation,
-                    )
-                    else if (message.status == "generating") Text(
-                        stringResource(R.string.calling_model),
-                        style = MaterialTheme.typography.bodySmall,
-                        letterSpacing = letterSpacing.em,
-                    )
+                    else if (message.content.isBlank()) {
+                        if (streaming) GenerationStatus(
+                            activity = generationActivity,
+                            letterSpacing = letterSpacing,
+                            animated = generationActive,
+                        )
+                    } else {
+                        MarkdownContent(
+                            markdown = message.content,
+                            knowledgeCitations = knowledgeCitations,
+                            onKnowledgeCitationClick = onKnowledgeCitation,
+                        )
+                        if (generationActive && generationActivity != GenerationActivity.CALLING_MODEL) {
+                            GenerationStatus(
+                                activity = generationActivity,
+                                letterSpacing = letterSpacing,
+                                animated = true,
+                            )
+                        }
+                    }
                 }
                 if (attachments.isNotEmpty()) AttachmentPreview(attachments)
                 if (!isUser && !streaming) {
@@ -1969,6 +2011,124 @@ private fun MessageItem(
             }
         }
         if (isUser) { Spacer(Modifier.width(10.dp)); Avatar(avatar, avatarImage, Modifier.testTag(UiTestTags.USER_MESSAGE_AVATAR)) }
+    }
+}
+
+internal enum class GenerationActivity {
+    CALLING_MODEL,
+    SEARCHING_WEB,
+    READING_URL,
+    SEARCHING_LOCAL_KNOWLEDGE,
+    CALLING_TOOL,
+}
+
+internal fun currentGenerationActivity(
+    events: List<ProcessEvent>,
+    generationActive: Boolean,
+): GenerationActivity {
+    if (!generationActive) return GenerationActivity.CALLING_MODEL
+
+    val activeCalls = linkedMapOf<String, ProcessEvent>()
+    events.forEach { event ->
+        when (event.type) {
+            "tool_started" -> {
+                activeCalls.remove(event.id)
+                activeCalls[event.id] = event
+            }
+            "tool_completed", "tool_failed" -> activeCalls.remove(event.id)
+        }
+    }
+    return when (activeCalls.values.lastOrNull()?.name) {
+        null -> GenerationActivity.CALLING_MODEL
+        "web_search" -> GenerationActivity.SEARCHING_WEB
+        "read_url" -> GenerationActivity.READING_URL
+        "search_knowledge" -> GenerationActivity.SEARCHING_LOCAL_KNOWLEDGE
+        else -> GenerationActivity.CALLING_TOOL
+    }
+}
+
+@Composable
+internal fun GenerationStatus(
+    activity: GenerationActivity,
+    letterSpacing: Float,
+    animated: Boolean,
+) {
+    val label = when (activity) {
+        GenerationActivity.CALLING_MODEL -> stringResource(R.string.calling_model)
+        GenerationActivity.SEARCHING_WEB -> stringResource(R.string.searching_web)
+        GenerationActivity.READING_URL -> stringResource(R.string.reading_url)
+        GenerationActivity.SEARCHING_LOCAL_KNOWLEDGE -> stringResource(R.string.searching_local_knowledge)
+        GenerationActivity.CALLING_TOOL -> stringResource(R.string.calling_tool)
+    }
+    val icon = when (activity) {
+        GenerationActivity.CALLING_MODEL -> Icons.Outlined.SmartToy
+        GenerationActivity.SEARCHING_WEB -> Icons.Outlined.Public
+        GenerationActivity.READING_URL -> Icons.Outlined.Link
+        GenerationActivity.SEARCHING_LOCAL_KNOWLEDGE -> Icons.Outlined.FolderOpen
+        GenerationActivity.CALLING_TOOL -> Icons.Outlined.Build
+    }
+    val contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+    Row(
+        modifier = Modifier
+            .testTag(UiTestTags.GENERATION_STATUS)
+            .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = contentColor,
+            modifier = Modifier
+                .size(16.dp)
+                .testTag(UiTestTags.GENERATION_STATUS_ICON_PREFIX + activity.name.lowercase()),
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = contentColor,
+            letterSpacing = letterSpacing.em,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        if (animated) GenerationWaitingDots(contentColor)
+    }
+}
+
+@Composable
+private fun GenerationWaitingDots(color: Color) {
+    val transition = rememberInfiniteTransition(label = "generation_status_dots")
+    Row(
+        modifier = Modifier
+            .size(width = 18.dp, height = 12.dp)
+            .testTag(UiTestTags.GENERATION_STATUS_ANIMATION),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        repeat(3) { index ->
+            val pulse by transition.animateFloat(
+                initialValue = 0.35f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 600, easing = FastOutSlowInEasing),
+                    repeatMode = RepeatMode.Reverse,
+                    initialStartOffset = StartOffset(
+                        offsetMillis = index * 160,
+                        offsetType = StartOffsetType.FastForward,
+                    ),
+                ),
+                label = "generation_status_dot_$index",
+            )
+            Box(
+                Modifier
+                    .size(4.dp)
+                    .graphicsLayer {
+                        alpha = pulse
+                        scaleX = 0.8f + pulse * 0.2f
+                        scaleY = 0.8f + pulse * 0.2f
+                    }
+                    .background(color, CircleShape),
+            )
+        }
     }
 }
 
@@ -2428,12 +2588,7 @@ private fun Composer(
 }
 
 internal fun noteAttachmentName(title: String): String {
-    val base = title.trim().ifBlank { "note" }
-        .replace(Regex("[\\/:*?\"<>|]"), "_")
-        .take(80)
-        .trim()
-        .ifBlank { "note" }
-    return "$base.md"
+    return markdownNoteFileName(title)
 }
 
 @Composable

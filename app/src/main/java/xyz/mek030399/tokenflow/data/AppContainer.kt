@@ -10,6 +10,7 @@ class AppContainer(context: Context) {
     private val secrets = SecretStore(context)
     private val gateway = ModelGateway(DirectApiTransport(json), json)
     private val knowledgeStore = KnowledgeStore(context, database.localDao())
+    internal val noteMarkdownFiles: NoteMarkdownFileAccess = NoteMarkdownFileStore(context)
     private val exaClient = ExaClient(json)
     private val builtInUrlReader = UrlReader(context, json)
     private val webTools = WebToolExecutor(

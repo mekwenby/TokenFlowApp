@@ -12,12 +12,16 @@ import xyz.mek030399.tokenflow.data.ConversationDetail
 import xyz.mek030399.tokenflow.data.ConversationWriteRequest
 import xyz.mek030399.tokenflow.data.GlobalChatSettings
 import xyz.mek030399.tokenflow.data.ImportPreview
+import xyz.mek030399.tokenflow.data.ImportedMarkdownNote
 import xyz.mek030399.tokenflow.data.KnowledgeDocument
 import xyz.mek030399.tokenflow.data.KnowledgeDocumentPreview
 import xyz.mek030399.tokenflow.data.KnowledgeSnippet
 import xyz.mek030399.tokenflow.data.MAX_NOTE_SUMMARY_INPUT_CHARACTERS
 import xyz.mek030399.tokenflow.data.ModelProfile
 import xyz.mek030399.tokenflow.data.Note
+import xyz.mek030399.tokenflow.data.NoteMarkdownFileAccess
+import xyz.mek030399.tokenflow.data.NoteMarkdownFileError
+import xyz.mek030399.tokenflow.data.NoteMarkdownFileException
 import xyz.mek030399.tokenflow.data.NoteSummaryTooLongException
 import xyz.mek030399.tokenflow.data.PendingAttachment
 import xyz.mek030399.tokenflow.data.PendingAttachmentOrigin
@@ -494,6 +498,147 @@ class AppViewModelTest {
     }
 
     @Test
+    fun markdownImportUpsertsNewestNoteAndReportsSuccess() = runTest(dispatcher) {
+        val existing = Note(id = "existing-note", title = "Existing", body = "Old", updatedAt = 1L)
+        val fake = FakeChatDataSource(withModel = true).apply { notes += existing }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+
+        viewModel.importMarkdownNote(ImportedMarkdownNote(title = "Imported", body = "# Body\r\n"))
+
+        assertTrue(viewModel.state.value.noteFileImporting)
+        advanceUntilIdle()
+
+        assertFalse(viewModel.state.value.noteFileImporting)
+        assertEquals(listOf("Imported", "Existing"), viewModel.state.value.notes.map(Note::title))
+        val imported = viewModel.state.value.notes.first()
+        assertEquals("# Body\r\n", imported.body)
+        assertEquals(null, imported.sourceMessageId)
+        assertEquals(null, imported.sourceConversationId)
+        assertEquals(R.string.note_markdown_imported, (viewModel.state.value.notice as UiText.Resource).id)
+    }
+
+    @Test
+    fun failedMarkdownImportDoesNotInsertNoteAndClearsBusyState() = runTest(dispatcher) {
+        val existing = Note(id = "existing-note", title = "Existing", body = "Old")
+        val fake = FakeChatDataSource(withModel = true).apply {
+            notes += existing
+            noteSaveFailure = IllegalStateException("Save failed")
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+
+        viewModel.importMarkdownNote(ImportedMarkdownNote(title = "Imported", body = "Body"))
+        advanceUntilIdle()
+
+        assertFalse(viewModel.state.value.noteFileImporting)
+        assertEquals(listOf(existing), viewModel.state.value.notes)
+        assertEquals(
+            R.string.note_markdown_import_failed,
+            (viewModel.state.value.notice as UiText.Resource).id,
+        )
+    }
+
+    @Test
+    fun concurrentMarkdownImportIsIgnoredWhileSequentialDuplicatesUseNewIds() = runTest(dispatcher) {
+        val gate = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(withModel = true).apply { noteSaveGate = gate }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        val imported = ImportedMarkdownNote(title = "Repeated", body = "Same body")
+
+        viewModel.importMarkdownNote(imported)
+        viewModel.importMarkdownNote(ImportedMarkdownNote(title = "Ignored", body = "Ignored"))
+        runCurrent()
+
+        assertEquals(1, fake.noteSaveCalls)
+        gate.complete(Unit)
+        advanceUntilIdle()
+        fake.noteSaveGate = null
+
+        viewModel.importMarkdownNote(imported)
+        advanceUntilIdle()
+
+        assertEquals(2, fake.noteSaveCalls)
+        assertEquals(listOf("Repeated", "Repeated"), viewModel.state.value.notes.map(Note::title))
+        assertEquals(2, viewModel.state.value.notes.map(Note::id).distinct().size)
+    }
+
+    @Test
+    fun markdownFileErrorsAndExportSuccessUseLocalizedNotices() = runTest(dispatcher) {
+        val viewModel = AppViewModel(FakeChatDataSource(withModel = true))
+        advanceUntilIdle()
+        val mappings = listOf(
+            NoteMarkdownFileError.UNSUPPORTED_EXTENSION to R.string.note_markdown_invalid_extension,
+            NoteMarkdownFileError.TOO_LARGE to R.string.note_markdown_too_large,
+            NoteMarkdownFileError.EMPTY to R.string.note_markdown_empty,
+            NoteMarkdownFileError.INVALID_UTF8 to R.string.note_markdown_invalid_utf8,
+            NoteMarkdownFileError.READ_FAILED to R.string.note_markdown_read_failed,
+            NoteMarkdownFileError.WRITE_FAILED to R.string.note_markdown_write_failed,
+        )
+
+        mappings.forEach { (error, expectedResource) ->
+            viewModel.reportNoteMarkdownFileError(NoteMarkdownFileException(error))
+            assertEquals(expectedResource, (viewModel.state.value.notice as UiText.Resource).id)
+        }
+
+        viewModel.reportNoteMarkdownFileError(IllegalStateException("Unknown"))
+        assertEquals(R.string.file_operation_failed, (viewModel.state.value.notice as UiText.Resource).id)
+
+        viewModel.reportNoteMarkdownExported()
+        assertEquals(R.string.note_markdown_exported, (viewModel.state.value.notice as UiText.Resource).id)
+    }
+
+    @Test
+    fun markdownUriIoRunsInViewModelAndExportsPreparedSnapshot() = runTest(dispatcher) {
+        val files = FakeNoteMarkdownFileAccess()
+        val fake = FakeChatDataSource(withModel = true)
+        val viewModel = AppViewModel(fake, files)
+        advanceUntilIdle()
+        files.imported = ImportedMarkdownNote("From URI", "Original body")
+
+        viewModel.importMarkdownNote("content://notes/source.md")
+        advanceUntilIdle()
+
+        val imported = viewModel.state.value.notes.single()
+        assertEquals("From URI", imported.title)
+        viewModel.prepareMarkdownNoteExport(imported)
+        files.writeGate = CompletableDeferred()
+        viewModel.exportMarkdownNote("content://notes/export.md")
+        runCurrent()
+
+        assertTrue(viewModel.state.value.noteFileExporting)
+        assertEquals("content://notes/export.md", files.writtenUri)
+        assertEquals("Original body", files.writtenBody)
+
+        files.writeGate?.complete(Unit)
+        advanceUntilIdle()
+
+        assertFalse(viewModel.state.value.noteFileExporting)
+        assertEquals(R.string.note_markdown_exported, (viewModel.state.value.notice as UiText.Resource).id)
+    }
+
+    @Test
+    fun markdownImportRefreshSupersedesAnOlderWorkspaceSnapshot() = runTest(dispatcher) {
+        val fake = FakeChatDataSource(withModel = true)
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        val gate = CompletableDeferred<Unit>()
+        fake.workspaceGate = gate
+
+        viewModel.retryLoad()
+        runCurrent()
+        viewModel.importMarkdownNote(ImportedMarkdownNote("Fresh", "Fresh body"))
+        runCurrent()
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(listOf("Fresh"), viewModel.state.value.notes.map(Note::title))
+        assertFalse(viewModel.state.value.loading)
+    }
+
+    @Test
     fun oversizedNoteSummaryKeepsOriginalAndUsesLocalizedNotice() = runTest(dispatcher) {
         val original = Note(id = "note-oversized", title = "Original", body = "Original body")
         val fake = FakeChatDataSource(withModel = true).apply {
@@ -790,6 +935,9 @@ private class FakeChatDataSource(withModel: Boolean) : ChatDataSource {
     var noteSummaryFailure: Throwable? = null
     var noteSummaryModelId: String? = null
     var noteSummaryPrompt: String? = null
+    var noteSaveFailure: Throwable? = null
+    var noteSaveGate: CompletableDeferred<Unit>? = null
+    var noteSaveCalls = 0
     var noteKnowledgeImportCalls = 0
     var urlTestFailure: Throwable? = null
     var conversationGate: CompletableDeferred<Unit>? = null
@@ -914,6 +1062,15 @@ private class FakeChatDataSource(withModel: Boolean) : ChatDataSource {
         discardedAttachments += attachments
     }
 
+    override suspend fun saveNote(note: Note): Note {
+        noteSaveCalls += 1
+        noteSaveGate?.await()
+        noteSaveFailure?.let { throw it }
+        notes.removeAll { it.id == note.id }
+        notes.add(0, note)
+        return note
+    }
+
     override suspend fun summarizeNote(noteId: String, modelId: String, rewritePrompt: String): Note {
         noteSummaryModelId = modelId
         noteSummaryPrompt = rewritePrompt
@@ -959,6 +1116,21 @@ private class FakeChatDataSource(withModel: Boolean) : ChatDataSource {
         applyImportFailure?.let { throw it }
         appliedImport = preview
         models = preview.payload.models
+    }
+}
+
+private class FakeNoteMarkdownFileAccess : NoteMarkdownFileAccess {
+    var imported = ImportedMarkdownNote("Imported", "Body")
+    var writeGate: CompletableDeferred<Unit>? = null
+    var writtenUri: String? = null
+    var writtenBody: String? = null
+
+    override suspend fun read(uri: String): ImportedMarkdownNote = imported
+
+    override suspend fun write(uri: String, body: String) {
+        writtenUri = uri
+        writtenBody = body
+        writeGate?.await()
     }
 }
 

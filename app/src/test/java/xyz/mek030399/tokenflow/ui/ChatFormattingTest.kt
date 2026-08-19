@@ -1,5 +1,6 @@
 package xyz.mek030399.tokenflow.ui
 
+import xyz.mek030399.tokenflow.data.ProcessEvent
 import xyz.mek030399.tokenflow.data.Usage
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.em
@@ -8,6 +9,132 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class ChatFormattingTest {
+    @Test
+    fun generationActivityDefaultsToCallingModel() {
+        assertEquals(
+            GenerationActivity.CALLING_MODEL,
+            currentGenerationActivity(emptyList(), generationActive = true),
+        )
+    }
+
+    @Test
+    fun generationActivityMapsKnownAndUnknownTools() {
+        assertEquals(
+            GenerationActivity.SEARCHING_WEB,
+            currentGenerationActivity(
+                listOf(ProcessEvent(type = "tool_started", id = "web", name = "web_search")),
+                generationActive = true,
+            ),
+        )
+        assertEquals(
+            GenerationActivity.READING_URL,
+            currentGenerationActivity(
+                listOf(ProcessEvent(type = "tool_started", id = "url", name = "read_url")),
+                generationActive = true,
+            ),
+        )
+        assertEquals(
+            GenerationActivity.SEARCHING_LOCAL_KNOWLEDGE,
+            currentGenerationActivity(
+                listOf(ProcessEvent(type = "tool_started", id = "knowledge", name = "search_knowledge")),
+                generationActive = true,
+            ),
+        )
+        assertEquals(
+            GenerationActivity.CALLING_TOOL,
+            currentGenerationActivity(
+                listOf(ProcessEvent(type = "tool_started", id = "future", name = "future_tool")),
+                generationActive = true,
+            ),
+        )
+    }
+
+    @Test
+    fun completedAndFailedEventsCloseTheMatchingToolCall() {
+        listOf("tool_completed", "tool_failed").forEach { terminalType ->
+            assertEquals(
+                GenerationActivity.CALLING_MODEL,
+                currentGenerationActivity(
+                    listOf(
+                        ProcessEvent(type = "tool_started", id = "call", name = "web_search"),
+                        ProcessEvent(type = terminalType, id = "call", name = "web_search"),
+                    ),
+                    generationActive = true,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun mostRecentlyStartedOpenToolCallWins() {
+        assertEquals(
+            GenerationActivity.READING_URL,
+            currentGenerationActivity(
+                listOf(
+                    ProcessEvent(type = "tool_started", id = "web", name = "web_search"),
+                    ProcessEvent(type = "tool_started", id = "url", name = "read_url"),
+                ),
+                generationActive = true,
+            ),
+        )
+        assertEquals(
+            GenerationActivity.SEARCHING_WEB,
+            currentGenerationActivity(
+                listOf(
+                    ProcessEvent(type = "tool_started", id = "web", name = "web_search"),
+                    ProcessEvent(type = "tool_started", id = "url", name = "read_url"),
+                    ProcessEvent(type = "tool_completed", id = "url", name = "read_url"),
+                ),
+                generationActive = true,
+            ),
+        )
+    }
+
+    @Test
+    fun repeatedToolCallIdRefreshesItsPositionAndTerminalClosesIt() {
+        val events = listOf(
+            ProcessEvent(type = "tool_started", id = "shared", name = "read_url"),
+            ProcessEvent(type = "tool_started", id = "web", name = "web_search"),
+            ProcessEvent(type = "tool_started", id = "shared", name = "search_knowledge"),
+        )
+        assertEquals(
+            GenerationActivity.SEARCHING_LOCAL_KNOWLEDGE,
+            currentGenerationActivity(events, generationActive = true),
+        )
+        assertEquals(
+            GenerationActivity.SEARCHING_WEB,
+            currentGenerationActivity(
+                events + ProcessEvent(type = "tool_failed", id = "shared", name = "search_knowledge"),
+                generationActive = true,
+            ),
+        )
+    }
+
+    @Test
+    fun unrelatedTerminalEventDoesNotCloseAnActiveToolCall() {
+        assertEquals(
+            GenerationActivity.SEARCHING_WEB,
+            currentGenerationActivity(
+                listOf(
+                    ProcessEvent(type = "tool_started", id = "web", name = "web_search"),
+                    ProcessEvent(type = "tool_completed", id = "other", name = "read_url"),
+                ),
+                generationActive = true,
+            ),
+        )
+    }
+
+    @Test
+    fun inactiveGenerationIgnoresDanglingToolEvents() {
+        assertEquals(
+            GenerationActivity.CALLING_MODEL,
+            currentGenerationActivity(
+                listOf(ProcessEvent(type = "tool_started", id = "web", name = "web_search")),
+                generationActive = false,
+            ),
+        )
+    }
+
     @Test
     fun tokenCountUsesCompactKNotation() {
         assertEquals("0", formatTokenCount(-1))
@@ -56,6 +183,7 @@ class ChatFormattingTest {
     @Test
     fun noteAttachmentNamesAreSafeMarkdownNames() {
         assertEquals("Meeting notes.md", noteAttachmentName(" Meeting notes "))
+        assertEquals("Meeting notes.md", noteAttachmentName("Meeting notes.md"))
         assertEquals("roadmap_Q3.md", noteAttachmentName("roadmap/Q3"))
         assertEquals("note.md", noteAttachmentName("  "))
     }

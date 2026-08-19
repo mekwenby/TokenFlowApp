@@ -73,6 +73,13 @@ User/Assistant 扩展字段保存在消息行内 JSON，而不是独立 Room 列
 
 Room 数据库、附件正文、知识文件、头像和普通偏好没有额外 AES 全盘加密。设备解锁、root、调试备份漏洞或恶意系统组件仍可能扩大风险；文档和 UI 不应声称“所有本地数据均已加密”。
 
+### 笔记 Markdown 导入导出
+
+- 导入通过系统文档选择器逐次读取一个 `.md`，不申请广泛存储权限；文件必须是严格 UTF-8 且不超过 2 MiB。
+- 导入内容会复制为 App 私有 Room 中的新笔记，不保留对原文件 URI 的持续访问；正文仅移除可选的 UTF-8 BOM。
+- 导出通过系统文档选择器把单篇笔记正文原样写为 `.md`。导出文件位于用户选择的位置，不再受 App 私有存储和卸载保护，应由用户自行管理访问与备份。
+- `.tfcfg` 仍不包含笔记，逐篇导出 `.md` 也不是完整聊天或工作区备份。
+
 ## 凭据存储
 
 供应商 API Key、Exa Key 和 MiMo Key 由 [`SecretStore`](../app/src/main/java/xyz/mek030399/tokenflow/data/SecretStore.kt) 管理：
@@ -110,6 +117,7 @@ Android Keystore 只保护 App 内凭据，不是 APK 发布签名 keystore。�
 - `android:usesCleartextTraffic="false"` 禁止明文 HTTP。
 - `android:allowBackup="false"`，并通过 data extraction rules 排除 SharedPreferences、files 和 database 的云备份与设备迁移。
 - 不申请 CAMERA、广泛存储或位置权限。
+- 笔记 `.md` 导入导出使用系统 Storage Access Framework 的临时 URI 授权，无需存储权限。
 
 ## 网络安全边界
 

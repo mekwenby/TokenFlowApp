@@ -6,7 +6,7 @@ Release 签名决定 Android 是否允许覆盖升级。`xyz.mek030399.tokenflow
 
 - Release 应用 ID：`xyz.mek030399.tokenflow`
 - 旧应用 ID：`com.tokenflow.chat`（仅作迁移识别，不是新包的升级目标）
-- 当前版本：`2.4.4`，`versionCode 13`
+- 当前版本：`2.4.5`，`versionCode 14`
 - Release 开启 R8 代码压缩和资源收缩。
 - 仓库不包含 Release keystore 或密码。首个正式签名身份已于 2026-08-18 建立，证书 SHA-256 为 `FEC865BEDC77C742B0E1B3D93A05FCEEBFA6075F46E1C8242B8F2261F0767AFE`，有效期至 2054-01-03。
 - 维护者本机可将签名材料放在已被 Git 忽略并限制访问权限的 `.signing/` 目录；该目录不是源码的一部分，必须另做离线备份。GitHub 自动发布是否可用取决于 `release` Environment 是否已正确配置。
@@ -122,11 +122,11 @@ GitHub 单个 Actions Secret 上限为 [48 KB](https://docs.github.com/en/action
 1. 确认 `release` Environment、四个 Secrets、证书指纹变量和标签 Ruleset 已正确配置。
 2. 在 `app/build.gradle.kts` 中递增 `versionCode`、设置新的 `versionName`，并同步当前版本文档。
 3. 运行完整本地门禁，提交并推送 `main`，等待 Android CI 成功。
-4. 在已通过 CI 的提交上创建并推送与 `versionName` 一致的标签。以 `2.4.4` 为例：
+4. 在已通过 CI 的提交上创建并推送与 `versionName` 一致的标签。以 `2.4.5` 为例：
 
 ```powershell
-git tag -a v2.4.4 -m '一念通流 2.4.4'
-git push origin v2.4.4
+git tag -a v2.4.5 -m '一念通流 2.4.5'
+git push origin v2.4.5
 ```
 
 Release 工作流会重新运行完整 Debug 门禁，构建签名 APK，并依次核对：

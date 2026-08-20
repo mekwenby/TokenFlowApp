@@ -26,7 +26,7 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 版本 | `2.4.5`（`versionCode 14`） |
+| 版本 | `2.4.6`（`versionCode 15`） |
 | 正式包名 | `xyz.mek030399.tokenflow` |
 | Debug 包名 | `xyz.mek030399.tokenflow.debug` |
 | 正式证书 SHA-256 | `FEC865BEDC77C742B0E1B3D93A05FCEEBFA6075F46E1C8242B8F2261F0767AFE` |

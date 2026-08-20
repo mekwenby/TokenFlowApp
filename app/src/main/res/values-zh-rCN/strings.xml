@@ -35,8 +35,8 @@
     <string name="stop">停止</string>
     <string name="loading">正在加载…</string>
     <string name="retry">重试</string>
-    <string name="empty_title">开始一段对话</string>
-    <string name="empty_detail">一念即通，灵感长流</string>
+    <string name="empty_title">一念即无限</string>
+    <string name="empty_detail">提问、创作、推演，从这一念开始</string>
     <string name="no_models">尚未配置模型，请先添加供应商和至少一个模型。</string>
     <string name="rename">重命名</string>
     <string name="generate_title">生成标题</string>
@@ -112,6 +112,8 @@
     <string name="searching_web">正在联网搜索</string>
     <string name="reading_url">正在读取 URL</string>
     <string name="searching_local_knowledge">正在查询本地知识库</string>
+    <string name="calculating">正在计算</string>
+    <string name="converting_units">正在换算单位</string>
     <string name="calling_tool">正在调用工具</string>
     <string name="back">返回</string>
     <string name="edit">编辑</string>
@@ -142,6 +144,7 @@
     <string name="added_models">已添加模型</string>
     <string name="save_provider">保存供应商</string>
     <string name="default_model">默认模型</string>
+    <string name="assistant_nickname">助手昵称</string>
     <string name="model_alias">模型别名</string>
     <string name="max_output_tokens">最大输出 Token</string>
     <string name="model_count">%1$d 个模型</string>
@@ -208,6 +211,10 @@
     <string name="about_model_tool_read_url_body">当前会话启用 URL 读取且最大工具调用次数大于零时可用。应用会直接获取公开 HTTPS URL；选择 InfoFlow 读取器时则会将 URL 发送至 InfoFlow。提取的正文会发送至已配置的模型服务，请勿在 URL 中包含凭据或个人数据。</string>
     <string name="about_model_tool_search_knowledge_title">本地知识检索</string>
     <string name="about_model_tool_search_knowledge_body">当前会话启用本地知识库、本地知识存储可用且最大工具调用次数大于零时可用。应用在设备内索引中检索，不使用独立搜索服务；命中的片段、文档名称与引用标记会发送至已配置的模型服务。</string>
+    <string name="about_model_tool_calculate_title">离线计算器</string>
+    <string name="about_model_tool_calculate_body">最大工具调用次数大于零时可用。算术与科学表达式完全在设备内计算，不发起网络请求；表达式和结果仍会作为对话上下文发送至已配置的模型服务。</string>
+    <string name="about_model_tool_convert_units_title">离线单位换算</string>
+    <string name="about_model_tool_convert_units_body">最大工具调用次数大于零时可用。支持的单位换算完全在设备内完成，不发起网络请求；数值、单位和结果仍会作为对话上下文发送至已配置的模型服务。</string>
     <string name="about_service_keys">服务 Key 申请</string>
     <string name="about_exa_key">申请 Exa API Key</string>
     <string name="about_exa_key_purpose">用于联网搜索</string>

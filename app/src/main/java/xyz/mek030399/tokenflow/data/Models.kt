@@ -10,6 +10,7 @@ import kotlin.math.roundToInt
 
 const val DEFAULT_MODEL_MAX_OUTPUT_TOKENS = 16_384
 const val MAX_MODEL_OUTPUT_TOKENS = 500_000
+const val DEFAULT_ASSISTANT_NICKNAME = "一念无限"
 
 @Serializable
 enum class ProviderProtocol {
@@ -49,6 +50,7 @@ data class GlobalChatSettings(
     @SerialName("vision_fallback_model_id") val visionFallbackModelId: String? = null,
     @SerialName("mimo_tts_voice") val mimoTtsVoice: String = "mimo_default",
     @SerialName("mimo_tts_configured") val mimoTtsConfigured: Boolean = false,
+    @SerialName("assistant_nickname") val assistantNickname: String = DEFAULT_ASSISTANT_NICKNAME,
 )
 
 data class EffectiveChatSettings(
@@ -60,6 +62,7 @@ data class EffectiveChatSettings(
     val thinkingEffort: String,
     val nickname: String,
     val maxToolCalls: Int,
+    val assistantNickname: String,
 )
 
 @Serializable
@@ -400,6 +403,13 @@ data class ProcessEvent(
 )
 
 @Serializable
+data class AssistantIdentitySnapshot(
+    val modelId: String,
+    val remoteModelId: String,
+    val nickname: String,
+)
+
+@Serializable
 data class AssistantMetadata(
     val events: List<ProcessEvent> = emptyList(),
     val usage: SerializableUsage = SerializableUsage(),
@@ -408,6 +418,7 @@ data class AssistantMetadata(
     val error: String = "",
     @SerialName("error_code") val errorCode: String = "",
     @SerialName("knowledge_citations") val knowledgeCitations: List<KnowledgeCitation> = emptyList(),
+    @SerialName("assistant_identity") val assistantIdentity: AssistantIdentitySnapshot? = null,
 )
 
 @Serializable

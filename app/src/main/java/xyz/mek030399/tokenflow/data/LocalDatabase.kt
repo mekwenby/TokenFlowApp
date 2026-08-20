@@ -101,6 +101,7 @@ data class AppSettingsEntity(
     val urlReaderBackend: String = UrlReaderBackend.BUILT_IN.name,
     val visionFallbackModelId: String? = null,
     @ColumnInfo(defaultValue = "'mimo_default'") val mimoTtsVoice: String = "mimo_default",
+    @ColumnInfo(defaultValue = "'一念无限'") val assistantNickname: String = DEFAULT_ASSISTANT_NICKNAME,
 ) {
     companion object {
         const val SINGLETON_ID = 1
@@ -533,7 +534,7 @@ interface LocalDao {
         KnowledgeChunkEntity::class,
         KnowledgeChunkFts::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 abstract class TokenFlowDatabase : RoomDatabase() {
@@ -544,7 +545,7 @@ abstract class TokenFlowDatabase : RoomDatabase() {
             context.applicationContext,
             TokenFlowDatabase::class.java,
             "tokenflow-local.db",
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -642,6 +643,15 @@ abstract class TokenFlowDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE UNIQUE INDEX IF NOT EXISTS index_knowledge_documents_sourceNoteId " +
                         "ON knowledge_documents(sourceNoteId)",
+                )
+            }
+        }
+
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE app_settings ADD COLUMN assistantNickname " +
+                        "TEXT NOT NULL DEFAULT '一念无限'",
                 )
             }
         }

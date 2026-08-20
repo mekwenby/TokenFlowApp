@@ -1,7 +1,9 @@
 package xyz.mek030399.tokenflow.data
 
+import kotlinx.serialization.encodeToString
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -23,16 +25,19 @@ class ConfigArchiveTest {
         globalSystemPrompt = "global prompt",
         globalUrlReaderBackend = UrlReaderBackend.INFOFLOW,
         agents = listOf(AgentProfile(id = "agent-1", name = "Reviewer", modelId = "model-1", systemPrompt = "Review code")),
+        globalAssistantNickname = "Archive assistant",
     )
 
     @Test
     fun encryptedArchiveRoundTripsWithoutPlaintextSecrets() {
         val encoded = codec.encode(payload, "correct horse battery".toCharArray())
+        val serializedPayload = ConfigArchiveCodec.defaultJson.encodeToString(payload)
 
         assertFalse(encoded.contains("sk-secret"))
         assertFalse(encoded.contains("exa-secret"))
         assertFalse(encoded.contains("infoflow-secret"))
         assertTrue(encoded.contains("PBKDF2-HMAC-SHA256"))
+        assertTrue(serializedPayload.contains("\"global_assistant_nickname\":\"Archive assistant\""))
         assertEquals(payload, codec.decode(encoded, "correct horse battery".toCharArray()))
     }
 
@@ -54,5 +59,14 @@ class ConfigArchiveTest {
         assertThrows(IllegalArgumentException::class.java) {
             codec.encode(payload, "short".toCharArray())
         }
+    }
+
+    @Test
+    fun legacyPayloadWithoutAssistantNicknameDefaultsToNull() {
+        val decoded = ConfigArchiveCodec.defaultJson.decodeFromString<ConfigArchivePayload>(
+            """{"createdAt":1234,"providers":[],"models":[]}""",
+        )
+
+        assertNull(decoded.globalAssistantNickname)
     }
 }

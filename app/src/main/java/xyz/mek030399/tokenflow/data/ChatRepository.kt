@@ -412,6 +412,7 @@ class ChatRepository(
             visionFallbackModelId = stored.visionFallbackModelId,
             mimoTtsVoice = stored.mimoTtsVoice,
             mimoTtsConfigured = mimoTtsClient?.configured() == true,
+            assistantNickname = stored.assistantNickname.trim().ifBlank { DEFAULT_ASSISTANT_NICKNAME },
         )
     }
 
@@ -437,6 +438,7 @@ class ChatRepository(
                     urlReaderBackend = settings.urlReaderBackend.name,
                     visionFallbackModelId = settings.visionFallbackModelId,
                     mimoTtsVoice = settings.mimoTtsVoice,
+                    assistantNickname = settings.assistantNickname.trim().ifBlank { DEFAULT_ASSISTANT_NICKNAME },
                 ),
             )
         } catch (error: Throwable) {
@@ -1016,12 +1018,23 @@ class ChatRepository(
             )
         }
         val initialCitations = aggregateKnowledgeCitations(distinctInjectedCitations, process)
+        val assistantIdentity = AssistantIdentitySnapshot(
+            modelId = model.id,
+            remoteModelId = model.remoteId,
+            nickname = effective.assistantNickname,
+        )
         var usage = Usage()
         var assistant = ChatMessage(
             conversationId = conversationId,
             requestId = requestId,
             role = "assistant",
-            metadata = metadata(process, usage, "generating", knowledgeCitations = initialCitations),
+            metadata = metadata(
+                process,
+                usage,
+                "generating",
+                assistantIdentity,
+                knowledgeCitations = initialCitations,
+            ),
             status = "generating",
             createdAt = now + 1,
         )
@@ -1032,6 +1045,7 @@ class ChatRepository(
 
             conversation = conversation.copy(status = "generating", statusMessage = "", updatedAt = now, lastMessageAt = now)
             dao.putConversation(conversation.toEntity())
+            val callableToolsEnabled = effective.maxToolCalls > 0
             val call = ModelCallRequest(
                 model = model,
                 provider = provider,
@@ -1039,10 +1053,11 @@ class ChatRepository(
                 systemPrompt = SystemPrompts.compose(
                     customPrompt = effective.systemPrompt,
                     nickname = effective.nickname,
-                    enableSearch = request.enableSearch,
-                    enableRead = request.enableRead,
+                    enableSearch = request.enableSearch && callableToolsEnabled,
+                    enableRead = request.enableRead && callableToolsEnabled,
                     enableKnowledge = request.enableKnowledge || distinctInjectedCitations.isNotEmpty(),
-                    knowledgeToolAvailable = request.enableKnowledge && knowledgeStore != null && effective.maxToolCalls > 0,
+                    knowledgeToolAvailable = request.enableKnowledge && knowledgeStore != null && callableToolsEnabled,
+                    offlineToolsAvailable = callableToolsEnabled,
                     timeZone = request.timeZone,
                 ),
                 thinkingEffort = effective.thinkingEffort,
@@ -1073,6 +1088,7 @@ class ChatRepository(
                                 process,
                                 usage,
                                 "generating",
+                                assistantIdentity,
                                 knowledgeCitations = aggregateKnowledgeCitations(distinctInjectedCitations, process),
                             ),
                         )
@@ -1088,6 +1104,7 @@ class ChatRepository(
                                 process,
                                 usage,
                                 "completed",
+                                assistantIdentity,
                                 knowledgeCitations = aggregateKnowledgeCitations(distinctInjectedCitations, process),
                             ),
                             status = "completed",
@@ -1109,6 +1126,7 @@ class ChatRepository(
                         process,
                         usage,
                         "interrupted",
+                        assistantIdentity,
                         knowledgeCitations = aggregateKnowledgeCitations(distinctInjectedCitations, process),
                     ),
                     status = "interrupted",
@@ -1124,6 +1142,7 @@ class ChatRepository(
                     process,
                     usage,
                     "failed",
+                    assistantIdentity,
                     error = failureMessage,
                     knowledgeCitations = aggregateKnowledgeCitations(distinctInjectedCitations, process),
                 ),
@@ -1196,6 +1215,7 @@ class ChatRepository(
                 visionFallbackModelId = settings.visionFallbackModelId,
                 globalSystemPrompt = settings.systemPrompt,
                 globalUrlReaderBackend = settings.urlReaderBackend,
+                globalAssistantNickname = settings.assistantNickname,
                 agents = dao.agents().map(AgentEntity::toDomain),
             ),
             password,
@@ -1287,11 +1307,19 @@ class ChatRepository(
                 providers = payload.providers.map { it.provider.toEntity() },
                 models = payload.models.map(ModelProfile::toEntity),
                 defaultModelId = defaultModelId,
-                settings = if (payload.globalSystemPrompt != null || payload.globalUrlReaderBackend != null) {
+                settings = if (
+                    payload.globalSystemPrompt != null ||
+                    payload.globalUrlReaderBackend != null ||
+                    payload.globalAssistantNickname != null
+                ) {
                     val current = dao.appSettings() ?: AppSettingsEntity()
                     current.copy(
                         systemPrompt = payload.globalSystemPrompt ?: current.systemPrompt,
                         urlReaderBackend = (payload.globalUrlReaderBackend ?: UrlReaderBackend.valueOf(current.urlReaderBackend)).name,
+                        assistantNickname = payload.globalAssistantNickname
+                            ?.trim()
+                            ?.ifBlank { DEFAULT_ASSISTANT_NICKNAME }
+                            ?: current.assistantNickname,
                         visionFallbackModelId = payload.visionFallbackModelId
                             ?.takeIf { id -> payload.models.any { it.id == id && it.visionStatus == VisionStatus.SUPPORTED } ||
                                 dao.model(id)?.visionStatus == VisionStatus.SUPPORTED.name }
@@ -1374,6 +1402,7 @@ class ChatRepository(
             thinkingEffort = conversation.thinkingEffort,
             nickname = conversation.nickname,
             maxToolCalls = conversation.maxToolCalls,
+            assistantNickname = global.assistantNickname,
         )
     }
 
@@ -1381,6 +1410,7 @@ class ChatRepository(
         events: List<ProcessEvent>,
         usage: Usage,
         status: String,
+        assistantIdentity: AssistantIdentitySnapshot,
         error: String = "",
         knowledgeCitations: List<KnowledgeCitation> = emptyList(),
     ): String =
@@ -1391,6 +1421,7 @@ class ChatRepository(
                 completionStatus = status,
                 error = error,
                 knowledgeCitations = knowledgeCitations,
+                assistantIdentity = assistantIdentity,
             ),
         )
 

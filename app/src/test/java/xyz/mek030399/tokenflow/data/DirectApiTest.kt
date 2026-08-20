@@ -75,6 +75,7 @@ class DirectApiTest {
             timeZone = "UTC",
             enableKnowledge = true,
             knowledgeToolAvailable = true,
+            offlineToolsAvailable = false,
         )
         val parameters = JSON.parseToJsonElement(
             """{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}""",
@@ -114,6 +115,103 @@ class DirectApiTest {
 
             assertEquals(prompt, serializedPrompt)
             assertEquals("search_knowledge", serializedName)
+        }
+    }
+
+    @Test
+    fun allProtocolsCarryOfflineToolSchemasWithoutChangingThem() = runTest {
+        val definitions = OfflineCalculationTools().definitions()
+        assertEquals(listOf("calculate", "convert_units"), definitions.map(ToolDefinition::name))
+
+        ProviderProtocol.entries.forEach { protocol ->
+            server.enqueue(sse(when (protocol) {
+                ProviderProtocol.OPENAI_CHAT_COMPLETIONS -> "data: [DONE]\n\n"
+                ProviderProtocol.OPENAI_RESPONSES ->
+                    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+                ProviderProtocol.ANTHROPIC_MESSAGES ->
+                    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+            }))
+
+            gateway.stream(
+                request(protocol).copy(
+                    thinkingEffort = "off",
+                    tools = definitions,
+                ),
+            ).toList()
+
+            val serializedTools = requestBody().getValue("tools").jsonArray.map { it.jsonObject }
+            val serializedDefinitions = serializedTools.map { tool ->
+                when (protocol) {
+                    ProviderProtocol.OPENAI_CHAT_COMPLETIONS -> tool.getValue("function").jsonObject
+                    ProviderProtocol.OPENAI_RESPONSES,
+                    ProviderProtocol.ANTHROPIC_MESSAGES -> tool
+                }
+            }
+            val schemaKey = if (protocol == ProviderProtocol.ANTHROPIC_MESSAGES) "input_schema" else "parameters"
+
+            assertEquals(definitions.map(ToolDefinition::name), serializedDefinitions.map {
+                it.getValue("name").jsonPrimitive.content
+            })
+            assertEquals(definitions.map(ToolDefinition::parameters), serializedDefinitions.map {
+                it.getValue(schemaKey).jsonObject
+            })
+        }
+    }
+
+    @Test
+    fun allProtocolsExecuteOfflineCalculationAndReturnExactToolResult() = runTest {
+        ProviderProtocol.entries.forEach { protocol ->
+            server.enqueue(sse(when (protocol) {
+                ProviderProtocol.OPENAI_CHAT_COMPLETIONS ->
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"calc-1\",\"function\":{\"name\":\"calculate\",\"arguments\":\"{\\\"expression\\\":\\\"2+2\\\"}\"}}]}}]}\n\n" +
+                        "data: [DONE]\n\n"
+                ProviderProtocol.OPENAI_RESPONSES ->
+                    "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc-1\",\"type\":\"function_call\",\"call_id\":\"calc-1\",\"name\":\"calculate\",\"arguments\":\"{\\\"expression\\\":\\\"2+2\\\"}\"}}\n\n" +
+                        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+                ProviderProtocol.ANTHROPIC_MESSAGES ->
+                    "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"calc-1\",\"name\":\"calculate\",\"input\":{\"expression\":\"2+2\"}}}\n\n" +
+                        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+                        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+            }))
+            server.enqueue(sse(when (protocol) {
+                ProviderProtocol.OPENAI_CHAT_COMPLETIONS ->
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"final\"}}]}\n\ndata: [DONE]\n\n"
+                ProviderProtocol.OPENAI_RESPONSES ->
+                    "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"final\"}\n\n" +
+                        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+                ProviderProtocol.ANTHROPIC_MESSAGES ->
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"final\"}}\n\n" +
+                        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+            }))
+            val engine = DirectChatEngine(gateway, OfflineTools)
+
+            val events = engine.run(request(protocol).copy(thinkingEffort = "off"), false, false, 1).toList()
+            server.takeRequest()
+            val followUp = requestBody()
+            val toolResult = when (protocol) {
+                ProviderProtocol.OPENAI_CHAT_COMPLETIONS -> followUp.getValue("messages").jsonArray
+                    .map { it.jsonObject }
+                    .last { role(it) == "tool" }
+                    .getValue("content").jsonPrimitive.content
+                ProviderProtocol.OPENAI_RESPONSES -> followUp.getValue("input").jsonArray
+                    .map { it.jsonObject }
+                    .last { type(it) == "function_call_output" }
+                    .getValue("output").jsonPrimitive.content
+                ProviderProtocol.ANTHROPIC_MESSAGES -> followUp.getValue("messages").jsonArray
+                    .map { it.jsonObject }
+                    .last { role(it) == "user" }
+                    .getValue("content").jsonArray
+                    .map { it.jsonObject }
+                    .last { type(it) == "tool_result" }
+                    .getValue("content").jsonPrimitive.content
+            }
+            val completed = events.filterIsInstance<EngineEvent.Process>()
+                .single { it.event.type == "tool_completed" }.event
+
+            assertEquals("{\"result\":\"4\"}", toolResult)
+            assertEquals(toolResult, completed.result)
+            assertEquals("calculate", completed.name)
+            assertEquals("final", (events.last() as EngineEvent.Done).content)
         }
     }
 
@@ -621,6 +719,15 @@ class DirectApiTest {
 
         override suspend fun execute(call: CanonicalToolCall, enableSearch: Boolean, enableRead: Boolean) =
             ToolExecutionResult("page contents", true)
+    }
+
+    private object OfflineTools : ToolRunner {
+        private val delegate = OfflineCalculationTools()
+
+        override fun definitions(enableSearch: Boolean, enableRead: Boolean) = delegate.definitions()
+
+        override suspend fun execute(call: CanonicalToolCall, enableSearch: Boolean, enableRead: Boolean) =
+            delegate.execute(call)
     }
 
     companion object {

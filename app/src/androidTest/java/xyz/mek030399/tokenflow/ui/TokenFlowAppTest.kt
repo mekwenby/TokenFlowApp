@@ -19,12 +19,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -33,6 +36,7 @@ import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
@@ -43,6 +47,7 @@ import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -56,6 +61,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.longClick
@@ -70,6 +76,7 @@ import xyz.mek030399.tokenflow.data.ChatDataSource
 import xyz.mek030399.tokenflow.data.ChatDisplayPreferences
 import xyz.mek030399.tokenflow.data.ChatEvent
 import xyz.mek030399.tokenflow.data.ChatMessage
+import xyz.mek030399.tokenflow.data.AssistantIdentitySnapshot
 import xyz.mek030399.tokenflow.data.AssistantMetadata
 import xyz.mek030399.tokenflow.data.CONTEXT_BOUNDARY_ROLE
 import xyz.mek030399.tokenflow.data.BookmarkedMessage
@@ -77,6 +84,7 @@ import xyz.mek030399.tokenflow.data.ConfigArchivePayload
 import xyz.mek030399.tokenflow.data.Conversation
 import xyz.mek030399.tokenflow.data.ConversationDetail
 import xyz.mek030399.tokenflow.data.ConversationWriteRequest
+import xyz.mek030399.tokenflow.data.DEFAULT_ASSISTANT_NICKNAME
 import xyz.mek030399.tokenflow.data.ImportPreview
 import xyz.mek030399.tokenflow.data.KnowledgeCitation
 import xyz.mek030399.tokenflow.data.KnowledgeDocument
@@ -93,7 +101,10 @@ import xyz.mek030399.tokenflow.data.ProviderDraft
 import xyz.mek030399.tokenflow.data.ProviderEditorData
 import xyz.mek030399.tokenflow.data.ProviderProtocol
 import xyz.mek030399.tokenflow.data.RemoteModel
+import xyz.mek030399.tokenflow.data.SerializableUsage
 import xyz.mek030399.tokenflow.data.SendMessageRequest
+import xyz.mek030399.tokenflow.data.SettingMode
+import xyz.mek030399.tokenflow.data.TtsAudio
 import xyz.mek030399.tokenflow.data.Usage
 import xyz.mek030399.tokenflow.data.WorkspaceSnapshot
 import xyz.mek030399.tokenflow.data.DirectApiTransport
@@ -110,6 +121,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import java.io.File
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -154,28 +166,229 @@ class TokenFlowAppTest {
     }
 
     @Test
-    fun emptyConversationShowsBrandSlogan() {
+    fun globalSettingsShowsDefaultAssistantNicknameAndNormalizesSavedInput() {
+        val fake = UiFakeDataSource(withModel = true)
+        val viewModel = AppViewModel(fake)
+        composeRule.setContent { TokenFlowTheme { TokenFlowApp(viewModel) } }
+        composeRule.waitUntil(5_000) { fake.initialized }
+        composeRule.runOnIdle { viewModel.openScreen(AppScreen.GLOBAL_SETTINGS) }
+        composeRule.waitUntil(5_000) { viewModel.state.value.screen == AppScreen.GLOBAL_SETTINGS }
+
+        val nickname = composeRule.onNodeWithTag(UiTestTags.ASSISTANT_NICKNAME)
+            .performScrollTo()
+            .assertIsDisplayed()
+            .assertTextEquals(DEFAULT_ASSISTANT_NICKNAME)
+        nickname.performTextClearance()
+        nickname.performTextInput("  Flow Guide  ")
+        composeRule.onNodeWithText(
+            InstrumentationRegistry.getInstrumentation().targetContext.getString(
+                xyz.mek030399.tokenflow.R.string.save,
+            ),
+        ).performScrollTo().performClick()
+        composeRule.waitUntil(5_000) {
+            viewModel.state.value.globalSettings.assistantNickname == "Flow Guide"
+        }
+        composeRule.onNodeWithTag(UiTestTags.ASSISTANT_NICKNAME)
+            .performScrollTo()
+            .assertTextEquals("Flow Guide")
+
+        composeRule.onNodeWithTag(UiTestTags.ASSISTANT_NICKNAME).performTextClearance()
+        composeRule.onNodeWithTag(UiTestTags.ASSISTANT_NICKNAME).performTextInput("   ")
+        composeRule.onNodeWithText(
+            InstrumentationRegistry.getInstrumentation().targetContext.getString(
+                xyz.mek030399.tokenflow.R.string.save,
+            ),
+        ).performScrollTo().performClick()
+        composeRule.waitUntil(5_000) {
+            viewModel.state.value.globalSettings.assistantNickname == DEFAULT_ASSISTANT_NICKNAME
+        }
+        composeRule.onNodeWithTag(UiTestTags.ASSISTANT_NICKNAME)
+            .performScrollTo()
+            .assertTextEquals(DEFAULT_ASSISTANT_NICKNAME)
+    }
+
+    @Test
+    fun emptyConversationUsesBilingualCopyAndCenteredPhoneLayout() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val chineseConfiguration = Configuration(context.resources.configuration).apply {
             setLocale(Locale.SIMPLIFIED_CHINESE)
         }
         val chineseContext = context.createConfigurationContext(chineseConfiguration)
         assertEquals(
-            "一念即通，灵感长流",
+            "一念即无限",
+            chineseContext.getString(xyz.mek030399.tokenflow.R.string.empty_title),
+        )
+        assertEquals(
+            "提问、创作、推演，从这一念开始",
             chineseContext.getString(xyz.mek030399.tokenflow.R.string.empty_detail),
         )
+        val englishConfiguration = Configuration(context.resources.configuration).apply {
+            setLocale(Locale.ENGLISH)
+        }
+        val englishContext = context.createConfigurationContext(englishConfiguration)
+        assertEquals(
+            "One thought, infinite possibilities",
+            englishContext.getString(xyz.mek030399.tokenflow.R.string.empty_title),
+        )
+        assertEquals(
+            "Ask, create, and reason. Start with one thought.",
+            englishContext.getString(xyz.mek030399.tokenflow.R.string.empty_detail),
+        )
+        val preferences = ChatDisplayPreferences(context)
+        val originalTheme = preferences.readTheme()
+        preferences.writeTheme(AppTheme.DAWN_WHITE)
 
-        val fake = UiFakeDataSource(withModel = true)
-        val viewModel = AppViewModel(fake)
-        composeRule.setContent { TokenFlowTheme { TokenFlowApp(viewModel) } }
-        composeRule.waitUntil(5_000) { fake.initialized }
+        try {
+            val fake = UiFakeDataSource(withModel = true)
+            val viewModel = AppViewModel(fake)
+            lateinit var density: Density
+            setLocalizedAppAt(
+                viewModel = viewModel,
+                size = PHONE_SIZE,
+                fontScale = 1f,
+                locale = Locale.SIMPLIFIED_CHINESE,
+                nightMode = Configuration.UI_MODE_NIGHT_NO,
+            ) { currentDensity, _ -> density = currentDensity }
+            composeRule.waitUntil(5_000) { fake.initialized }
 
-        composeRule.onNodeWithText(
-            context.getString(xyz.mek030399.tokenflow.R.string.empty_title),
-        ).assertIsDisplayed()
-        composeRule.onNodeWithText(
-            context.getString(xyz.mek030399.tokenflow.R.string.empty_detail),
-        ).assertIsDisplayed()
+            val emptyState = composeRule.onNodeWithTag(UiTestTags.EMPTY_STATE).assertIsDisplayed()
+            val logo = composeRule.onNodeWithTag(UiTestTags.EMPTY_LOGO).assertIsDisplayed()
+            val title = composeRule.onNodeWithTag(UiTestTags.EMPTY_TITLE)
+                .assertIsDisplayed()
+                .assertTextEquals("一念即无限")
+            val detail = composeRule.onNodeWithTag(UiTestTags.EMPTY_DETAIL)
+                .assertIsDisplayed()
+                .assertTextEquals("提问、创作、推演，从这一念开始")
+            val rootBounds = composeRule.onRoot().fetchSemanticsNode().boundsInRoot
+            val stateBounds = emptyState.fetchSemanticsNode().boundsInRoot
+            val logoBounds = logo.fetchSemanticsNode().boundsInRoot
+            val titleBounds = title.fetchSemanticsNode().boundsInRoot
+            val detailBounds = detail.fetchSemanticsNode().boundsInRoot
+            val horizontalSafety = with(density) { 24.dp.toPx() }
+            val widthLimit = with(density) { 320.dp.toPx() }
+            val expectedWidth = minOf(rootBounds.width - horizontalSafety * 2, widthLimit)
+            val titleLayouts = mutableListOf<TextLayoutResult>()
+            val detailLayouts = mutableListOf<TextLayoutResult>()
+            title.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { action -> action(titleLayouts) }
+            detail.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { action -> action(detailLayouts) }
+            val titleLayout = titleLayouts.single()
+            val detailLayout = detailLayouts.single()
+            val lightColors = colorSchemeFor(AppTheme.DAWN_WHITE, dark = false)
+
+            assertEquals(expectedWidth, stateBounds.width, 1f)
+            assertEquals(rootBounds.center.x, stateBounds.center.x, 1f)
+            assertTrue(stateBounds.left >= rootBounds.left + horizontalSafety - 1f)
+            assertTrue(stateBounds.right <= rootBounds.right - horizontalSafety + 1f)
+            assertNodeWithin(logo, emptyState)
+            assertNodeWithin(title, emptyState)
+            assertNodeWithin(detail, emptyState)
+            assertNodesDoNotOverlap(logo, title)
+            assertNodesDoNotOverlap(title, detail)
+            assertEquals(with(density) { 56.dp.toPx() }, logoBounds.width, 1f)
+            assertEquals(with(density) { 56.dp.toPx() }, logoBounds.height, 1f)
+            assertEquals(with(density) { 18.dp.toPx() }, titleBounds.top - logoBounds.bottom, 1f)
+            assertEquals(with(density) { 6.dp.toPx() }, detailBounds.top - titleBounds.bottom, 1f)
+            assertEquals(stateBounds.center.x, logoBounds.center.x, 1f)
+            assertEquals(stateBounds.center.x, titleBounds.center.x, 1f)
+            assertEquals(stateBounds.center.x, detailBounds.center.x, 1f)
+            assertEquals(1, titleLayout.lineCount)
+            assertEquals(1, detailLayout.lineCount)
+            assertEquals(FontWeight.Medium, titleLayout.layoutInput.style.fontWeight)
+            assertEquals(TextAlign.Center, titleLayout.layoutInput.style.textAlign)
+            assertEquals(TextAlign.Center, detailLayout.layoutInput.style.textAlign)
+            assertEquals(lightColors.onSurface, titleLayout.layoutInput.style.color)
+            assertEquals(lightColors.onSurfaceVariant, detailLayout.layoutInput.style.color)
+        } finally {
+            preferences.writeTheme(originalTheme)
+        }
+    }
+
+    @Test
+    fun emptyConversationWrapsWithoutClippingAtNarrowWidthAndLargeFont() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val preferences = ChatDisplayPreferences(context)
+        val originalTheme = preferences.readTheme()
+        preferences.writeTheme(AppTheme.DAWN_WHITE)
+        val narrowSize = DpSize(320.dp, 640.dp)
+
+        try {
+            val fake = UiFakeDataSource(withModel = true)
+            val viewModel = AppViewModel(fake)
+            lateinit var density: Density
+            setLocalizedAppAt(
+                viewModel = viewModel,
+                size = narrowSize,
+                fontScale = 1.5f,
+                locale = Locale.ENGLISH,
+                nightMode = Configuration.UI_MODE_NIGHT_NO,
+            ) { currentDensity, _ -> density = currentDensity }
+            composeRule.waitUntil(5_000) { fake.initialized }
+
+            val emptyState = composeRule.onNodeWithTag(UiTestTags.EMPTY_STATE).assertIsDisplayed()
+            val title = composeRule.onNodeWithTag(UiTestTags.EMPTY_TITLE)
+                .assertIsDisplayed()
+                .assertTextEquals("One thought, infinite possibilities")
+            val detail = composeRule.onNodeWithTag(UiTestTags.EMPTY_DETAIL)
+                .assertIsDisplayed()
+                .assertTextEquals("Ask, create, and reason. Start with one thought.")
+            val input = composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).assertIsDisplayed()
+            val topBar = composeRule.onNodeWithTag(UiTestTags.CHAT_TOP_BAR).assertIsDisplayed()
+            val rootBounds = composeRule.onRoot().fetchSemanticsNode().boundsInRoot
+            val stateBounds = emptyState.fetchSemanticsNode().boundsInRoot
+            val horizontalSafety = with(density) { 24.dp.toPx() }
+            val titleLayouts = mutableListOf<TextLayoutResult>()
+            val detailLayouts = mutableListOf<TextLayoutResult>()
+            title.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { action -> action(titleLayouts) }
+            detail.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { action -> action(detailLayouts) }
+            val layouts = titleLayouts + detailLayouts
+
+            assertEquals(rootBounds.width - horizontalSafety * 2, stateBounds.width, 1f)
+            assertEquals(rootBounds.center.x, stateBounds.center.x, 1f)
+            assertNodeWithin(title, emptyState)
+            assertNodeWithin(detail, emptyState)
+            assertNodesDoNotOverlap(title, detail)
+            assertTrue(layouts.any { it.lineCount > 1 })
+            assertTrue(layouts.all { it.layoutInput.softWrap })
+            assertTrue(layouts.all { layout -> (0 until layout.lineCount).none(layout::isLineEllipsized) })
+            assertTrue(stateBounds.top >= topBar.fetchSemanticsNode().boundsInRoot.bottom - 1f)
+            assertTrue(stateBounds.bottom <= input.fetchSemanticsNode().boundsInRoot.top + 1f)
+        } finally {
+            preferences.writeTheme(originalTheme)
+        }
+    }
+
+    @Test
+    fun emptyConversationCapsContentWidthAndUsesDarkThemeColors() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val preferences = ChatDisplayPreferences(context)
+        val originalTheme = preferences.readTheme()
+        preferences.writeTheme(AppTheme.AMOLED_BLACK)
+
+        try {
+            val fake = UiFakeDataSource(withModel = true)
+            val viewModel = AppViewModel(fake)
+            lateinit var density: Density
+            val widePhoneSize = DpSize(480.dp, 640.dp)
+            setAppAt(viewModel, widePhoneSize) { currentDensity, _ -> density = currentDensity }
+            composeRule.waitUntil(5_000) { fake.initialized }
+
+            val emptyState = composeRule.onNodeWithTag(UiTestTags.EMPTY_STATE).assertIsDisplayed()
+            val title = composeRule.onNodeWithTag(UiTestTags.EMPTY_TITLE).assertIsDisplayed()
+            val detail = composeRule.onNodeWithTag(UiTestTags.EMPTY_DETAIL).assertIsDisplayed()
+            val titleLayouts = mutableListOf<TextLayoutResult>()
+            val detailLayouts = mutableListOf<TextLayoutResult>()
+            title.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { action -> action(titleLayouts) }
+            detail.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { action -> action(detailLayouts) }
+            val darkColors = colorSchemeFor(AppTheme.AMOLED_BLACK, dark = true)
+
+            assertEquals(with(density) { 320.dp.toPx() }, emptyState.fetchSemanticsNode().boundsInRoot.width, 1f)
+            assertEquals(darkColors.onSurface, titleLayouts.single().layoutInput.style.color)
+            assertEquals(darkColors.onSurfaceVariant, detailLayouts.single().layoutInput.style.color)
+            assertNodeWithin(title, emptyState)
+            assertNodeWithin(detail, emptyState)
+        } finally {
+            preferences.writeTheme(originalTheme)
+        }
     }
 
     @Test
@@ -255,12 +468,27 @@ class TokenFlowAppTest {
         val summaryBounds = composeRule.onNodeWithTag(UiTestTags.PROCESS_TOKEN_ROW).fetchSemanticsNode().boundsInRoot
         val processBounds = composeRule.onNodeWithTag(UiTestTags.PROCESS_DETAILS).fetchSemanticsNode().boundsInRoot
         val tokenBounds = composeRule.onNodeWithTag(UiTestTags.TOKEN_USAGE).fetchSemanticsNode().boundsInRoot
-        val copyBounds = composeRule.onNodeWithTag(UiTestTags.COPY_ASSISTANT_MESSAGE).fetchSemanticsNode().boundsInRoot
+        val assistantMessageId = viewModel.state.value.activeMessages.single { it.role == "assistant" }.id
+        val assistantHeader = composeRule.onNodeWithTag(UiTestTags.assistantMessageHeader(assistantMessageId))
+            .assertIsDisplayed()
+        val assistantBody = composeRule.onNodeWithTag(UiTestTags.messageBody(assistantMessageId))
+            .assertIsDisplayed()
+        val footerActions = composeRule.onNodeWithTag(
+            UiTestTags.assistantMessageFooterActions(assistantMessageId),
+        ).assertIsDisplayed()
         assertEquals(summaryBounds.left, processBounds.left, 0.5f)
-        assertEquals(summaryBounds.right, tokenBounds.right, 0.5f)
+        assertEquals(summaryBounds.right, footerActions.fetchSemanticsNode().boundsInRoot.right, 0.5f)
         assertTrue(processBounds.left < tokenBounds.left)
         assertTrue(processBounds.top < tokenBounds.bottom && tokenBounds.top < processBounds.bottom)
-        assertTrue(tokenBounds.bottom <= copyBounds.top)
+        assertNodeWithin(footerActions, composeRule.onNodeWithTag(UiTestTags.PROCESS_TOKEN_ROW))
+        assertNodesDoNotOverlap(composeRule.onNodeWithTag(UiTestTags.PROCESS_DETAILS), footerActions)
+        assertNodesDoNotOverlap(composeRule.onNodeWithTag(UiTestTags.TOKEN_USAGE), footerActions)
+        assertNodeWithin(assistantHeader, assistantBody)
+        assertNodeWithin(composeRule.onNodeWithTag(UiTestTags.COPY_ASSISTANT_MESSAGE), assistantHeader)
+        assertTrue(
+            composeRule.onNodeWithTag(UiTestTags.COPY_ASSISTANT_MESSAGE)
+                .fetchSemanticsNode().boundsInRoot.bottom <= summaryBounds.top,
+        )
         composeRule.onNodeWithTag(UiTestTags.SPEECH_ACTION).assertIsDisplayed()
         val userAvatar = composeRule.onNodeWithTag(UiTestTags.USER_MESSAGE_AVATAR).fetchSemanticsNode().boundsInRoot
         assertEquals(userAvatar.width, userAvatar.height, 0.5f)
@@ -268,6 +496,639 @@ class TokenFlowAppTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val clipboard = context.getSystemService(ClipboardManager::class.java)
         assertEquals("Answer from provider", clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString())
+    }
+
+    @Test
+    fun assistantBodyStartsWithIdentityHeaderWhileUserLayoutStaysCompact() {
+        val assistantNickname = "Shared assistant"
+        val conversation = Conversation(id = "conversation-message-layout", title = "Message layout", model = "model-1")
+        val userMessage = ChatMessage(
+            id = "user-message-layout",
+            conversationId = conversation.id,
+            role = "user",
+            content = "Short question",
+        )
+        val assistantMessage = ChatMessage(
+            id = "assistant-message-layout",
+            conversationId = conversation.id,
+            role = "assistant",
+            content = """
+                Budget choices
+
+                | Need | Model | Reference |
+                | --- | --- | --- |
+                | Value | Phone | Note |
+            """.trimIndent(),
+        )
+        val fake = UiFakeDataSource(withModel = true, assistantNickname = assistantNickname).apply {
+            conversations += conversation
+            seedMessages(conversation.id, listOf(userMessage, assistantMessage))
+        }
+        val viewModel = AppViewModel(fake)
+        lateinit var density: Density
+
+        setAppAt(viewModel, PHONE_SIZE) { currentDensity, _ -> density = currentDensity }
+        composeRule.waitUntil(5_000) { fake.initialized }
+        composeRule.runOnIdle { viewModel.openConversation(conversation.id) }
+        composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages.size == 2 }
+
+        val assistantBody = composeRule.onNodeWithTag(UiTestTags.messageBody(assistantMessage.id))
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.waitForIdle()
+        val messageListBounds = composeRule.onNodeWithTag(UiTestTags.MESSAGE_LIST).fetchSemanticsNode().boundsInRoot
+        val assistantBodyBounds = assistantBody.fetchSemanticsNode().boundsInRoot
+        val assistantHeader = composeRule.onNodeWithTag(UiTestTags.assistantMessageHeader(assistantMessage.id))
+            .assertIsDisplayed()
+        val assistantHeaderBounds = assistantHeader.fetchSemanticsNode().boundsInRoot
+        val assistantAvatar = composeRule.onNodeWithTag(UiTestTags.ASSISTANT_MESSAGE_AVATAR).assertIsDisplayed()
+        val assistantAvatarBounds = assistantAvatar.fetchSemanticsNode().boundsInRoot
+        val assistantIdentity = composeRule.onNodeWithTag(UiTestTags.assistantMessageIdentity(assistantMessage.id))
+            .assertIsDisplayed()
+        val assistantName = composeRule.onNodeWithTag(UiTestTags.assistantMessageName(assistantMessage.id))
+            .assertIsDisplayed()
+            .assertTextEquals(assistantNickname)
+        val assistantModel = composeRule.onNodeWithTag(UiTestTags.assistantMessageModel(assistantMessage.id))
+            .assertIsDisplayed()
+            .assertTextEquals(fake.model.remoteId)
+        val assistantActions = composeRule.onNodeWithTag(UiTestTags.assistantMessageActions(assistantMessage.id))
+            .assertIsDisplayed()
+        val assistantBookmark = composeRule.onNodeWithTag(UiTestTags.assistantMessageBookmark(assistantMessage.id))
+            .assertIsDisplayed()
+        val horizontalInset = with(density) { 16.dp.toPx() }
+        val bodyPadding = with(density) { 12.dp.toPx() }
+        val avatarSize = with(density) { 36.dp.toPx() }
+        val avatarBodyGap = with(density) { 10.dp.toPx() }
+
+        assertEquals(avatarSize, assistantAvatarBounds.width, 0.5f)
+        assertEquals(avatarSize, assistantAvatarBounds.height, 0.5f)
+        assertEquals(assistantBodyBounds.left + bodyPadding, assistantHeaderBounds.left, 1f)
+        assertEquals(assistantBodyBounds.right - bodyPadding, assistantHeaderBounds.right, 1f)
+        assertEquals(assistantBodyBounds.left + bodyPadding, assistantAvatarBounds.left, 1f)
+        assertNodeWithin(assistantHeader, assistantBody)
+        assertNodeWithin(assistantAvatar, assistantHeader)
+        assertNodeWithin(assistantIdentity, assistantHeader)
+        assertNodeWithin(assistantName, assistantIdentity)
+        assertNodeWithin(assistantModel, assistantIdentity)
+        assertNodeWithin(assistantActions, assistantHeader)
+        assertNodeWithin(composeRule.onNodeWithTag(UiTestTags.COPY_ASSISTANT_MESSAGE), assistantActions)
+        assertNodeWithin(assistantBookmark, assistantActions)
+        assertNodesDoNotOverlap(assistantAvatar, assistantIdentity)
+        assertNodesDoNotOverlap(assistantIdentity, assistantActions)
+        assertNodesDoNotOverlap(assistantName, assistantModel)
+        assertEquals(messageListBounds.left + horizontalInset, assistantBodyBounds.left, 1f)
+        assertEquals(messageListBounds.right - horizontalInset, assistantBodyBounds.right, 1f)
+        assertEquals(messageListBounds.width - horizontalInset * 2, assistantBodyBounds.width, 1f)
+
+        val paragraph = composeRule.onNodeWithText("Budget choices").assertIsDisplayed()
+        val tableHeader = composeRule.onNodeWithText("Need").assertIsDisplayed()
+        assertNodeWithin(paragraph, assistantBody)
+        assertNodeWithin(tableHeader, assistantBody)
+        assertEquals(assistantAvatarBounds.left, paragraph.fetchSemanticsNode().boundsInRoot.left, 0.5f)
+        assertTrue(paragraph.fetchSemanticsNode().boundsInRoot.top >= assistantHeaderBounds.bottom)
+        assertTrue(tableHeader.fetchSemanticsNode().boundsInRoot.top >= assistantHeaderBounds.bottom)
+        assertNodeWithin(composeRule.onNodeWithTag(UiTestTags.PROCESS_TOKEN_ROW), assistantBody)
+        composeRule.onNodeWithTag(UiTestTags.CHAT_CONVERSATION_TITLE)
+            .assertTextEquals(conversation.title)
+        composeRule.onNodeWithTag(UiTestTags.CHAT_MODEL_NAME)
+            .assertTextEquals(fake.model.displayName)
+
+        val userBody = composeRule.onNodeWithTag(UiTestTags.messageBody(userMessage.id))
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.waitForIdle()
+        val userBodyBounds = userBody.fetchSemanticsNode().boundsInRoot
+        val userAvatarBounds = composeRule.onNodeWithTag(UiTestTags.USER_MESSAGE_AVATAR)
+            .assertIsDisplayed()
+            .fetchSemanticsNode().boundsInRoot
+        assertEquals(userBodyBounds.top, userAvatarBounds.top, 0.5f)
+        assertEquals(avatarBodyGap, userAvatarBounds.left - userBodyBounds.right, 1f)
+        assertEquals(messageListBounds.right - horizontalInset, userAvatarBounds.right, 1f)
+        assertTrue(userBodyBounds.width < assistantBodyBounds.width)
+    }
+
+    @Test
+    fun assistantIdentitySnapshotStaysFrozenAfterGlobalNicknameAndModelChange() {
+        val conversation = Conversation(
+            id = "conversation-frozen-assistant-identity",
+            title = "Current conversation title",
+            model = "model-1",
+        )
+        val assistantMessage = ChatMessage(
+            id = "assistant-frozen-identity",
+            conversationId = conversation.id,
+            role = "assistant",
+            content = "Historical response",
+            metadata = DirectApiTransport.defaultJson.encodeToString(
+                AssistantMetadata(
+                    assistantIdentity = AssistantIdentitySnapshot(
+                        modelId = "removed-model-id",
+                        remoteModelId = "provider-model-at-generation-time",
+                        nickname = "Original assistant",
+                    ),
+                ),
+            ),
+        )
+        val fake = UiFakeDataSource(
+            withModel = true,
+            modelRemoteId = "provider-model-now",
+            modelDisplayName = "Current model alias",
+            assistantNickname = "Renamed assistant",
+        ).apply {
+            conversations += conversation
+            seedMessages(conversation.id, listOf(assistantMessage))
+        }
+        val viewModel = AppViewModel(fake)
+
+        setAppAt(viewModel, PHONE_SIZE)
+        composeRule.waitUntil(5_000) { fake.initialized }
+        composeRule.runOnIdle { viewModel.openConversation(conversation.id) }
+        composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages.size == 1 }
+
+        composeRule.onNodeWithTag(UiTestTags.assistantMessageName(assistantMessage.id))
+            .assertIsDisplayed()
+            .assertTextEquals("Original assistant")
+        composeRule.onNodeWithTag(UiTestTags.assistantMessageModel(assistantMessage.id))
+            .assertIsDisplayed()
+            .assertTextEquals("provider-model-at-generation-time")
+        composeRule.onNodeWithTag(UiTestTags.CHAT_CONVERSATION_TITLE)
+            .assertTextEquals(conversation.title)
+        composeRule.onNodeWithTag(UiTestTags.CHAT_MODEL_NAME)
+            .assertTextEquals(fake.model.displayName)
+    }
+
+    @Test
+    fun legacyAssistantIdentityUsesDefaultNicknameAndHidesUnavailableModelId() {
+        val conversation = Conversation(
+            id = "conversation-missing-model-identity",
+            title = "Missing model",
+            model = "removed-model",
+            modelMode = SettingMode.OVERRIDE,
+        )
+        val assistantMessage = ChatMessage(
+            id = "assistant-missing-model-identity",
+            conversationId = conversation.id,
+            role = "assistant",
+            content = "Legacy response",
+        )
+        val fake = UiFakeDataSource(withModel = true, assistantNickname = "   ").apply {
+            conversations += conversation
+            seedMessages(conversation.id, listOf(assistantMessage))
+        }
+        val viewModel = AppViewModel(fake)
+
+        setAppAt(viewModel, PHONE_SIZE)
+        composeRule.waitUntil(5_000) { fake.initialized }
+        composeRule.runOnIdle { viewModel.openConversation(conversation.id) }
+        composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages.size == 1 }
+
+        composeRule.onNodeWithTag(UiTestTags.assistantMessageName(assistantMessage.id))
+            .assertIsDisplayed()
+            .assertTextEquals(DEFAULT_ASSISTANT_NICKNAME)
+        composeRule.onAllNodesWithTag(UiTestTags.assistantMessageModel(assistantMessage.id))
+            .assertCountEquals(0)
+    }
+
+    @Test
+    fun blankStreamingAssistantKeepsIdentityHeaderAndFullWidthBodyAtLargeFont() {
+        val conversation = Conversation(id = "conversation-streaming-layout", title = "Streaming layout", model = "model-1")
+        val assistantMessage = ChatMessage(
+            id = "assistant-streaming-layout",
+            conversationId = conversation.id,
+            role = "assistant",
+            status = "generating",
+        )
+        val fake = UiFakeDataSource(withModel = true).apply {
+            conversations += conversation
+            seedMessages(conversation.id, listOf(assistantMessage))
+        }
+        val viewModel = AppViewModel(fake)
+        lateinit var density: Density
+
+        setAppAt(viewModel, PHONE_SIZE, fontScale = 1.5f) { currentDensity, _ -> density = currentDensity }
+        composeRule.waitUntil(5_000) { fake.initialized }
+        composeRule.runOnIdle { viewModel.openConversation(conversation.id) }
+        composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages.size == 1 }
+
+        val body = composeRule.onNodeWithTag(UiTestTags.messageBody(assistantMessage.id)).assertIsDisplayed()
+        val bodyBounds = body.fetchSemanticsNode().boundsInRoot
+        val header = composeRule.onNodeWithTag(UiTestTags.assistantMessageHeader(assistantMessage.id))
+            .assertIsDisplayed()
+        val headerBounds = header.fetchSemanticsNode().boundsInRoot
+        val avatar = composeRule.onNodeWithTag(UiTestTags.ASSISTANT_MESSAGE_AVATAR).assertIsDisplayed()
+        val identity = composeRule.onNodeWithTag(UiTestTags.assistantMessageIdentity(assistantMessage.id))
+            .assertIsDisplayed()
+        val name = composeRule.onNodeWithTag(UiTestTags.assistantMessageName(assistantMessage.id))
+            .assertIsDisplayed()
+            .assertTextEquals(DEFAULT_ASSISTANT_NICKNAME)
+        val model = composeRule.onNodeWithTag(UiTestTags.assistantMessageModel(assistantMessage.id))
+            .assertIsDisplayed()
+            .assertTextEquals(fake.model.remoteId)
+        val messageListBounds = composeRule.onNodeWithTag(UiTestTags.MESSAGE_LIST).fetchSemanticsNode().boundsInRoot
+        val horizontalInset = with(density) { 16.dp.toPx() }
+        val bodyPadding = with(density) { 12.dp.toPx() }
+        val avatarBounds = avatar.fetchSemanticsNode().boundsInRoot
+        val generationStatus = composeRule.onNodeWithTag(UiTestTags.GENERATION_STATUS).assertIsDisplayed()
+
+        assertEquals(messageListBounds.left + horizontalInset, bodyBounds.left, 1f)
+        assertEquals(messageListBounds.right - horizontalInset, bodyBounds.right, 1f)
+        assertEquals(bodyBounds.left + bodyPadding, headerBounds.left, 1f)
+        assertEquals(bodyBounds.right - bodyPadding, headerBounds.right, 1f)
+        assertEquals(bodyBounds.left + bodyPadding, avatarBounds.left, 1f)
+        assertNodeWithin(header, body)
+        assertNodeWithin(avatar, header)
+        assertNodeWithin(identity, header)
+        assertNodeWithin(name, identity)
+        assertNodeWithin(model, identity)
+        assertNodesDoNotOverlap(avatar, identity)
+        assertNodesDoNotOverlap(name, model)
+        composeRule.onAllNodesWithTag(UiTestTags.assistantMessageActions(assistantMessage.id))
+            .assertCountEquals(0)
+        composeRule.onAllNodesWithTag(UiTestTags.COPY_ASSISTANT_MESSAGE).assertCountEquals(0)
+        composeRule.onAllNodesWithTag(UiTestTags.assistantMessageBookmark(assistantMessage.id))
+            .assertCountEquals(0)
+        composeRule.onAllNodesWithTag(UiTestTags.PROCESS_TOKEN_ROW).assertCountEquals(0)
+        composeRule.onAllNodesWithTag(
+            UiTestTags.assistantMessageFooterActions(assistantMessage.id),
+        ).assertCountEquals(0)
+        assertNodeWithin(generationStatus, body)
+        assertTrue(generationStatus.fetchSemanticsNode().boundsInRoot.top >= headerBounds.bottom)
+        assertEquals(avatarBounds.left, generationStatus.fetchSemanticsNode().boundsInRoot.left, 0.5f)
+    }
+
+    @Test
+    fun wideAssistantBodyKeepsReadingWidthWithHeaderInside() {
+        val conversation = Conversation(id = "conversation-wide-message-layout", title = "Wide message layout", model = "model-1")
+        val assistantMessage = ChatMessage(
+            id = "assistant-wide-message-layout",
+            conversationId = conversation.id,
+            role = "assistant",
+            content = "Wide response",
+        )
+        val fake = UiFakeDataSource(withModel = true).apply {
+            conversations += conversation
+            seedMessages(conversation.id, listOf(assistantMessage))
+        }
+        val viewModel = AppViewModel(fake)
+        lateinit var density: Density
+
+        setAppAt(viewModel, WIDE_CHAT_SIZE) { currentDensity, _ -> density = currentDensity }
+        composeRule.waitUntil(5_000) { fake.initialized }
+        composeRule.runOnIdle { viewModel.openConversation(conversation.id) }
+        composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages.size == 1 }
+
+        val body = composeRule.onNodeWithTag(UiTestTags.messageBody(assistantMessage.id)).assertIsDisplayed()
+        val bodyBounds = body.fetchSemanticsNode().boundsInRoot
+        val header = composeRule.onNodeWithTag(UiTestTags.assistantMessageHeader(assistantMessage.id))
+            .assertIsDisplayed()
+        val messageListBounds = composeRule.onNodeWithTag(UiTestTags.MESSAGE_LIST).fetchSemanticsNode().boundsInRoot
+        val horizontalInset = with(density) { 16.dp.toPx() }
+        val readingWidthLimit = with(density) { 760.dp.toPx() }
+        val expectedWidth = minOf(messageListBounds.width - horizontalInset * 2, readingWidthLimit)
+
+        assertEquals(messageListBounds.left + horizontalInset, bodyBounds.left, 1f)
+        assertEquals(expectedWidth, bodyBounds.width, 1f)
+        assertTrue(bodyBounds.width <= readingWidthLimit + 1f)
+        assertNodeWithin(header, body)
+    }
+
+    @Test
+    fun longAssistantIdentityDoesNotOverlapHeaderActionsAtLargeFont() {
+        val longTitle = "Assistant identity with an exceptionally long conversation title ".repeat(3).trim()
+        val longNickname = "Assistant identity with an exceptionally long nickname ".repeat(3).trim()
+        val longModelRemoteId = "provider-model-with-an-exceptionally-long-id-".repeat(4).trimEnd('-')
+        val conversation = Conversation(
+            id = "conversation-long-assistant-identity",
+            title = longTitle,
+            model = "model-1",
+        )
+        val assistantMessage = ChatMessage(
+            id = "assistant-long-identity",
+            conversationId = conversation.id,
+            role = "assistant",
+            content = "Compact response",
+        )
+        val fake = UiFakeDataSource(
+            withModel = true,
+            modelRemoteId = longModelRemoteId,
+            assistantNickname = longNickname,
+        ).apply {
+            conversations += conversation
+            seedMessages(conversation.id, listOf(assistantMessage))
+        }
+        val viewModel = AppViewModel(fake)
+        lateinit var density: Density
+
+        setAppAt(viewModel, PHONE_SIZE, fontScale = 1.5f) { currentDensity, _ -> density = currentDensity }
+        composeRule.waitUntil(5_000) { fake.initialized }
+        composeRule.runOnIdle { viewModel.openConversation(conversation.id) }
+        composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages.size == 1 }
+
+        val header = composeRule.onNodeWithTag(UiTestTags.assistantMessageHeader(assistantMessage.id))
+            .assertIsDisplayed()
+        val body = composeRule.onNodeWithTag(UiTestTags.messageBody(assistantMessage.id)).assertIsDisplayed()
+        val avatar = composeRule.onNodeWithTag(UiTestTags.ASSISTANT_MESSAGE_AVATAR).assertIsDisplayed()
+        val identity = composeRule.onNodeWithTag(UiTestTags.assistantMessageIdentity(assistantMessage.id))
+            .assertIsDisplayed()
+        val name = composeRule.onNodeWithTag(UiTestTags.assistantMessageName(assistantMessage.id))
+            .assertIsDisplayed()
+            .assertTextEquals(longNickname)
+        val model = composeRule.onNodeWithTag(UiTestTags.assistantMessageModel(assistantMessage.id))
+            .assertIsDisplayed()
+            .assertTextEquals(longModelRemoteId)
+        val actions = composeRule.onNodeWithTag(UiTestTags.assistantMessageActions(assistantMessage.id))
+            .assertIsDisplayed()
+        val copy = composeRule.onNodeWithTag(UiTestTags.COPY_ASSISTANT_MESSAGE).assertIsDisplayed()
+        val bookmark = composeRule.onNodeWithTag(UiTestTags.assistantMessageBookmark(assistantMessage.id))
+            .assertIsDisplayed()
+        val messageListBounds = composeRule.onNodeWithTag(UiTestTags.MESSAGE_LIST).fetchSemanticsNode().boundsInRoot
+        val headerBounds = header.fetchSemanticsNode().boundsInRoot
+        val bodyBounds = body.fetchSemanticsNode().boundsInRoot
+        val avatarBounds = avatar.fetchSemanticsNode().boundsInRoot
+        val horizontalInset = with(density) { 16.dp.toPx() }
+        val bodyPadding = with(density) { 12.dp.toPx() }
+        val response = composeRule.onNodeWithText("Compact response").assertIsDisplayed()
+
+        assertEquals(messageListBounds.left + horizontalInset, bodyBounds.left, 1f)
+        assertEquals(messageListBounds.right - horizontalInset, bodyBounds.right, 1f)
+        assertEquals(bodyBounds.left + bodyPadding, headerBounds.left, 1f)
+        assertEquals(bodyBounds.right - bodyPadding, headerBounds.right, 1f)
+        assertEquals(bodyBounds.left + bodyPadding, avatarBounds.left, 1f)
+        assertNodeWithin(header, body)
+        assertNodeWithin(avatar, header)
+        assertNodeWithin(identity, header)
+        assertNodeWithin(name, identity)
+        assertNodeWithin(model, identity)
+        assertNodeWithin(actions, header)
+        assertNodeWithin(copy, actions)
+        assertNodeWithin(bookmark, actions)
+        assertNodesDoNotOverlap(avatar, identity)
+        assertNodesDoNotOverlap(identity, actions)
+        assertNodesDoNotOverlap(name, model)
+        assertTrue(identity.fetchSemanticsNode().boundsInRoot.width > 0f)
+        assertNodeWithin(response, body)
+        assertTrue(response.fetchSemanticsNode().boundsInRoot.top >= headerBounds.bottom)
+        assertEquals(avatarBounds.left, response.fetchSemanticsNode().boundsInRoot.left, 0.5f)
+    }
+
+    @Test
+    fun assistantFooterUsesOneCompactRowAndKeepsReadySpeechBelowIt() {
+        val conversation = Conversation(
+            id = "conversation-compact-footer",
+            title = "Compact footer",
+            model = "model-1",
+        )
+        val assistantMessage = ChatMessage(
+            id = "assistant-compact-footer",
+            conversationId = conversation.id,
+            role = "assistant",
+            content = "A concise completed response.",
+            metadata = DirectApiTransport.defaultJson.encodeToString(
+                AssistantMetadata(
+                    usage = SerializableUsage(inputTokens = 2_500, outputTokens = 900),
+                ),
+            ),
+        )
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val fake = UiFakeDataSource(withModel = true).apply {
+            conversations += conversation
+            speechAudio = TtsAudio(File(context.cacheDir, "compact-footer-ready.mp3"), false)
+            seedMessages(conversation.id, listOf(assistantMessage))
+        }
+        val viewModel = AppViewModel(fake)
+        lateinit var density: Density
+
+        setAppAt(viewModel, PHONE_SIZE) { currentDensity, _ -> density = currentDensity }
+        composeRule.waitUntil(5_000) { fake.initialized }
+        composeRule.runOnIdle { viewModel.openConversation(conversation.id) }
+        composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages.size == 1 }
+
+        val footer = composeRule.onNodeWithTag(UiTestTags.PROCESS_TOKEN_ROW)
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.waitForIdle()
+        val process = composeRule.onNodeWithTag(UiTestTags.PROCESS_DETAILS).assertIsDisplayed()
+        val token = composeRule.onNodeWithTag(UiTestTags.TOKEN_USAGE).assertIsDisplayed()
+        val actions = composeRule.onNodeWithTag(
+            UiTestTags.assistantMessageFooterActions(assistantMessage.id),
+        ).assertIsDisplayed()
+        val branch = composeRule.onNodeWithContentDescription(
+            context.getString(xyz.mek030399.tokenflow.R.string.create_branch),
+        ).assertIsDisplayed()
+        val speech = composeRule.onNodeWithTag(UiTestTags.SPEECH_ACTION).assertIsDisplayed()
+        val note = composeRule.onNodeWithContentDescription(
+            context.getString(xyz.mek030399.tokenflow.R.string.save_as_note),
+        ).assertIsDisplayed()
+        val regenerate = composeRule.onNodeWithContentDescription(
+            context.getString(xyz.mek030399.tokenflow.R.string.regenerate),
+        ).assertIsDisplayed()
+        val footerBounds = footer.fetchSemanticsNode().boundsInRoot
+        val expectedFooterHeight = with(density) { 32.dp.toPx() }
+        val expectedFourActionWidth = with(density) { (32.dp * 4).toPx() }
+
+        assertEquals(expectedFooterHeight, footerBounds.height, 1f)
+        assertEquals(expectedFourActionWidth, actions.fetchSemanticsNode().boundsInRoot.width, 1f)
+        assertNodeWithin(process, footer)
+        assertNodeWithin(token, footer)
+        assertNodeWithin(actions, footer)
+        assertNodeWithin(branch, actions)
+        assertNodeWithin(speech, actions)
+        assertNodeWithin(note, actions)
+        assertNodeWithin(regenerate, actions)
+        assertNodesDoNotOverlap(process, token)
+        assertNodesDoNotOverlap(process, actions)
+        assertNodesDoNotOverlap(token, actions)
+        assertEquals(footerBounds.center.y, process.fetchSemanticsNode().boundsInRoot.center.y, 1f)
+        assertEquals(footerBounds.center.y, actions.fetchSemanticsNode().boundsInRoot.center.y, 1f)
+        assertTrue(abs(footerBounds.center.y - token.fetchSemanticsNode().boundsInRoot.center.y) <= 1f)
+
+        composeRule.runOnIdle { viewModel.synthesizeSpeech(assistantMessage.id) }
+        composeRule.waitUntil(5_000) {
+            viewModel.state.value.tts[assistantMessage.id]?.filePath == fake.speechAudio?.file?.absolutePath
+        }
+        composeRule.onAllNodesWithTag(UiTestTags.SPEECH_ACTION).assertCountEquals(0)
+        val readyActions = composeRule.onNodeWithTag(
+            UiTestTags.assistantMessageFooterActions(assistantMessage.id),
+        ).assertIsDisplayed()
+        val playback = composeRule.onNodeWithTag(UiTestTags.SPEECH_CONTROLS)
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.waitForIdle()
+        val refreshedFooter = composeRule.onNodeWithTag(UiTestTags.PROCESS_TOKEN_ROW).assertIsDisplayed()
+        val expectedThreeActionWidth = with(density) { (32.dp * 3).toPx() }
+
+        assertEquals(
+            expectedFooterHeight,
+            refreshedFooter.fetchSemanticsNode().boundsInRoot.height,
+            1f,
+        )
+        assertEquals(expectedThreeActionWidth, readyActions.fetchSemanticsNode().boundsInRoot.width, 1f)
+        assertNodeWithin(readyActions, refreshedFooter)
+        assertTrue(
+            refreshedFooter.fetchSemanticsNode().boundsInRoot.bottom <=
+                playback.fetchSemanticsNode().boundsInRoot.top + 0.5f,
+        )
+    }
+
+    @Test
+    fun longTokenSummaryStaysSingleLineAndClearOfFooterActionsAtLargeFont() {
+        val inputTokens = 9_000_000_000_000L
+        val outputTokens = 8_000_000_000_000L
+        val conversation = Conversation(
+            id = "conversation-long-footer-usage",
+            title = "Long footer usage",
+            model = "model-1",
+        )
+        val assistantMessage = ChatMessage(
+            id = "assistant-long-footer-usage",
+            conversationId = conversation.id,
+            role = "assistant",
+            content = "Response with deliberately large usage counters.",
+            metadata = DirectApiTransport.defaultJson.encodeToString(
+                AssistantMetadata(
+                    usage = SerializableUsage(
+                        inputTokens = inputTokens,
+                        outputTokens = outputTokens,
+                        cacheReadTokens = 7_200_000_000_000L,
+                        cacheMetricsReported = true,
+                    ),
+                ),
+            ),
+        )
+        val fake = UiFakeDataSource(withModel = true).apply {
+            conversations += conversation
+            seedMessages(conversation.id, listOf(assistantMessage))
+        }
+        val viewModel = AppViewModel(fake)
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        lateinit var density: Density
+
+        setAppAt(viewModel, PHONE_SIZE, fontScale = 1.5f) { currentDensity, _ -> density = currentDensity }
+        composeRule.waitUntil(5_000) { fake.initialized }
+        composeRule.runOnIdle { viewModel.openConversation(conversation.id) }
+        composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages.size == 1 }
+
+        val footer = composeRule.onNodeWithTag(UiTestTags.PROCESS_TOKEN_ROW)
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.waitForIdle()
+        val process = composeRule.onNodeWithTag(UiTestTags.PROCESS_DETAILS).assertIsDisplayed()
+        val token = composeRule.onNodeWithTag(UiTestTags.TOKEN_USAGE).assertIsDisplayed()
+        val actions = composeRule.onNodeWithTag(
+            UiTestTags.assistantMessageFooterActions(assistantMessage.id),
+        ).assertIsDisplayed()
+        val footerBounds = footer.fetchSemanticsNode().boundsInRoot
+        val tokenLayouts = mutableListOf<TextLayoutResult>()
+        token.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { action -> action(tokenLayouts) }
+        val tokenLayout = tokenLayouts.single()
+        val expectedDescription = context.getString(
+            xyz.mek030399.tokenflow.R.string.tokens_used_with_cache_accessibility,
+            formatTokenCount(inputTokens + outputTokens),
+            formatTokenCount(inputTokens),
+            formatTokenCount(outputTokens),
+            80,
+        )
+
+        assertEquals(with(density) { 32.dp.toPx() }, footerBounds.height, 1f)
+        assertTrue(process.fetchSemanticsNode().boundsInRoot.width <= with(density) { 96.dp.toPx() } + 1f)
+        assertNodeWithin(process, footer)
+        assertNodeWithin(token, footer)
+        assertNodeWithin(actions, footer)
+        assertNodesDoNotOverlap(process, token)
+        assertNodesDoNotOverlap(process, actions)
+        assertNodesDoNotOverlap(token, actions)
+        assertEquals(1, tokenLayout.lineCount)
+        assertEquals(1, tokenLayout.layoutInput.maxLines)
+        assertEquals(TextOverflow.Ellipsis, tokenLayout.layoutInput.overflow)
+        assertTrue(tokenLayout.isLineEllipsized(0))
+        assertEquals(
+            listOf(expectedDescription),
+            token.fetchSemanticsNode().config[SemanticsProperties.ContentDescription],
+        )
+    }
+
+    @Test
+    fun assistantFooterHandlesNoTokensOlderRepliesExpandedProcessAndFailure() {
+        val conversation = Conversation(
+            id = "conversation-footer-states",
+            title = "Footer states",
+            model = "model-1",
+        )
+        val olderAssistant = ChatMessage(
+            id = "assistant-footer-older",
+            conversationId = conversation.id,
+            role = "assistant",
+            content = "Earlier response without usage.",
+        )
+        val failedAssistant = ChatMessage(
+            id = "assistant-footer-failed",
+            conversationId = conversation.id,
+            role = "assistant",
+            content = "Partial failed response.",
+            status = "failed",
+        )
+        val fake = UiFakeDataSource(withModel = true).apply {
+            conversations += conversation
+            seedMessages(conversation.id, listOf(olderAssistant, failedAssistant))
+        }
+        val viewModel = AppViewModel(fake)
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        lateinit var density: Density
+
+        setAppAt(viewModel, PHONE_SIZE) { currentDensity, _ -> density = currentDensity }
+        composeRule.waitUntil(5_000) { fake.initialized }
+        composeRule.runOnIdle { viewModel.openConversation(conversation.id) }
+        composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages.size == 2 }
+
+        val olderBodyTag = UiTestTags.messageBody(olderAssistant.id)
+        val failedBodyTag = UiTestTags.messageBody(failedAssistant.id)
+        val olderFooter = composeRule.onNode(
+            hasTestTag(UiTestTags.PROCESS_TOKEN_ROW) and hasAnyAncestor(hasTestTag(olderBodyTag)),
+        ).assertIsDisplayed()
+        val failedFooter = composeRule.onNode(
+            hasTestTag(UiTestTags.PROCESS_TOKEN_ROW) and hasAnyAncestor(hasTestTag(failedBodyTag)),
+        ).assertIsDisplayed()
+        val olderActions = composeRule.onNodeWithTag(
+            UiTestTags.assistantMessageFooterActions(olderAssistant.id),
+        ).assertIsDisplayed()
+        val failedActions = composeRule.onNodeWithTag(
+            UiTestTags.assistantMessageFooterActions(failedAssistant.id),
+        ).assertIsDisplayed()
+        val failedProcess = composeRule.onNode(
+            hasTestTag(UiTestTags.PROCESS_DETAILS) and hasAnyAncestor(hasTestTag(failedBodyTag)),
+        ).assertIsDisplayed()
+        val regenerate = composeRule.onNodeWithContentDescription(
+            context.getString(xyz.mek030399.tokenflow.R.string.regenerate),
+        ).assertIsDisplayed()
+        val compactHeight = with(density) { 32.dp.toPx() }
+
+        composeRule.onAllNodesWithTag(UiTestTags.TOKEN_USAGE).assertCountEquals(0)
+        assertEquals(compactHeight, olderFooter.fetchSemanticsNode().boundsInRoot.height, 1f)
+        assertEquals(compactHeight, failedFooter.fetchSemanticsNode().boundsInRoot.height, 1f)
+        assertEquals(with(density) { (32.dp * 3).toPx() }, olderActions.fetchSemanticsNode().boundsInRoot.width, 1f)
+        assertEquals(with(density) { (32.dp * 4).toPx() }, failedActions.fetchSemanticsNode().boundsInRoot.width, 1f)
+        assertNodeWithin(olderActions, olderFooter)
+        assertNodeWithin(failedActions, failedFooter)
+        assertNodeWithin(regenerate, failedActions)
+        assertNodesDoNotOverlap(failedProcess, failedActions)
+
+        failedProcess.performClick()
+        val noDetails = composeRule.onNodeWithText(
+            context.getString(xyz.mek030399.tokenflow.R.string.no_process_details),
+        ).assertIsDisplayed()
+        val failure = composeRule.onNodeWithText(
+            context.getString(xyz.mek030399.tokenflow.R.string.assistant_failed),
+        ).assertIsDisplayed()
+        val refreshedFailedFooter = composeRule.onNode(
+            hasTestTag(UiTestTags.PROCESS_TOKEN_ROW) and hasAnyAncestor(hasTestTag(failedBodyTag)),
+        ).assertIsDisplayed()
+        val refreshedFooterBounds = refreshedFailedFooter.fetchSemanticsNode().boundsInRoot
+
+        assertEquals(compactHeight, refreshedFooterBounds.height, 1f)
+        assertTrue(refreshedFooterBounds.bottom <= noDetails.fetchSemanticsNode().boundsInRoot.top + 0.5f)
+        assertTrue(refreshedFooterBounds.bottom <= failure.fetchSemanticsNode().boundsInRoot.top + 0.5f)
+        assertNodeWithin(noDetails, composeRule.onNodeWithTag(failedBodyTag))
+        assertNodeWithin(failure, composeRule.onNodeWithTag(failedBodyTag))
     }
 
     @Test
@@ -434,6 +1295,8 @@ class TokenFlowAppTest {
             GenerationActivity.READING_URL to xyz.mek030399.tokenflow.R.string.reading_url,
             GenerationActivity.SEARCHING_LOCAL_KNOWLEDGE to
                 xyz.mek030399.tokenflow.R.string.searching_local_knowledge,
+            GenerationActivity.CALCULATING to xyz.mek030399.tokenflow.R.string.calculating,
+            GenerationActivity.CONVERTING_UNITS to xyz.mek030399.tokenflow.R.string.converting_units,
             GenerationActivity.CALLING_TOOL to xyz.mek030399.tokenflow.R.string.calling_tool,
         )
         composeRule.setContent {
@@ -932,6 +1795,16 @@ class TokenFlowAppTest {
                 xyz.mek030399.tokenflow.R.string.about_model_tool_search_knowledge_body,
                 "search_knowledge",
             ),
+            UiTestTags.ABOUT_MODEL_TOOL_CALCULATE to Triple(
+                xyz.mek030399.tokenflow.R.string.about_model_tool_calculate_title,
+                xyz.mek030399.tokenflow.R.string.about_model_tool_calculate_body,
+                "calculate",
+            ),
+            UiTestTags.ABOUT_MODEL_TOOL_CONVERT_UNITS to Triple(
+                xyz.mek030399.tokenflow.R.string.about_model_tool_convert_units_title,
+                xyz.mek030399.tokenflow.R.string.about_model_tool_convert_units_body,
+                "convert_units",
+            ),
         ).forEach { (tag, resourcesAndId) ->
             val (titleResource, descriptionResource, rawId) = resourcesAndId
             about.performScrollToNode(hasTestTag(tag))
@@ -1397,8 +2270,10 @@ class TokenFlowAppTest {
 
     @Test
     fun attachmentMenuCanAttachANoteSnapshot() {
+        val noteBody = "Independent note body\n\nWith the complete Markdown snapshot."
         val fake = UiFakeDataSource(withModel = true).apply {
-            notes += Note(id = "note-chat", title = "Chat context", body = "Independent note body")
+            notes += Note(id = "note-other", title = "Chat context", body = "Other private body")
+            notes += Note(id = "note-chat", title = "Chat context", body = noteBody)
         }
         val viewModel = AppViewModel(fake)
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -1407,13 +2282,98 @@ class TokenFlowAppTest {
 
         composeRule.onNodeWithContentDescription(context.getString(xyz.mek030399.tokenflow.R.string.add_attachment)).performClick()
         composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.import_note)).performClick()
-        composeRule.onNodeWithText("Chat context").performClick()
+        val otherItem = composeRule.onNodeWithTag(UiTestTags.noteImportItem("note-other"))
+            .assertIsDisplayed()
+        val chatItem = composeRule.onNodeWithTag(UiTestTags.noteImportItem("note-chat"))
+            .assertIsDisplayed()
+        assertNodeWithin(
+            composeRule.onNodeWithTag(UiTestTags.noteImportTitle("note-other"))
+                .assertIsDisplayed()
+                .assertTextEquals("Chat context"),
+            otherItem,
+        )
+        assertNodeWithin(
+            composeRule.onNodeWithTag(UiTestTags.noteImportTitle("note-chat"))
+                .assertIsDisplayed()
+                .assertTextEquals("Chat context"),
+            chatItem,
+        )
+        composeRule.onAllNodesWithText("Other private body").assertCountEquals(0)
+        composeRule.onAllNodesWithText(noteBody).assertCountEquals(0)
+
+        chatItem.performClick()
 
         composeRule.waitUntil(5_000) { viewModel.state.value.pendingAttachments.size == 1 }
         val attachment = viewModel.state.value.pendingAttachments.single()
         assertEquals("Chat context.md", attachment.displayName)
-        assertEquals("Independent note body", attachment.inlineText)
+        assertEquals(noteBody, attachment.inlineText)
+        assertEquals(noteBody.toByteArray(Charsets.UTF_8).size.toLong(), attachment.sizeBytes)
         composeRule.onNodeWithText("Chat context.md").assertIsDisplayed()
+    }
+
+    @Test
+    fun noteImportPickerShowsEmptyState() {
+        val fake = UiFakeDataSource(withModel = true)
+        val viewModel = AppViewModel(fake)
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        composeRule.setContent { TokenFlowTheme { TokenFlowApp(viewModel) } }
+        composeRule.waitUntil(5_000) { fake.initialized }
+
+        composeRule.onNodeWithContentDescription(
+            context.getString(xyz.mek030399.tokenflow.R.string.add_attachment),
+        ).performClick()
+        composeRule.onNodeWithText(
+            context.getString(xyz.mek030399.tokenflow.R.string.import_note),
+        ).performClick()
+
+        composeRule.onNodeWithText(
+            context.getString(xyz.mek030399.tokenflow.R.string.no_notes_to_import),
+        ).assertIsDisplayed()
+        val noteImportItemTagPrefix = UiTestTags.noteImportItem("")
+        composeRule.onAllNodes(
+            SemanticsMatcher("has note import item tag") { node ->
+                runCatching { node.config[SemanticsProperties.TestTag] }.getOrNull()
+                    ?.startsWith(noteImportItemTagPrefix) == true
+            },
+        ).assertCountEquals(0)
+    }
+
+    @Test
+    fun noteImportPickerEllipsizesLongTitleOnPhoneAtLargeFont() {
+        val longTitle = "A deliberately long note title that must remain on one line in the import picker ".repeat(4).trim()
+        val noteId = "note-long-import-title"
+        val fake = UiFakeDataSource(withModel = true).apply {
+            notes += Note(id = noteId, title = longTitle, body = "Hidden note body")
+        }
+        val viewModel = AppViewModel(fake)
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        setAppAt(viewModel, PHONE_SIZE, fontScale = 1.5f)
+        composeRule.waitUntil(5_000) { fake.initialized }
+
+        composeRule.onNodeWithContentDescription(
+            context.getString(xyz.mek030399.tokenflow.R.string.add_attachment),
+        ).performClick()
+        composeRule.onNodeWithText(
+            context.getString(xyz.mek030399.tokenflow.R.string.import_note),
+        ).performClick()
+
+        val item = composeRule.onNodeWithTag(UiTestTags.noteImportItem(noteId)).assertIsDisplayed()
+        val title = composeRule.onNodeWithTag(UiTestTags.noteImportTitle(noteId))
+            .assertIsDisplayed()
+            .assertTextEquals(longTitle)
+        val layoutResults = mutableListOf<TextLayoutResult>()
+        title.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { action ->
+            action(layoutResults)
+        }
+        val layoutResult = checkNotNull(layoutResults.singleOrNull()) {
+            "Expected one text layout result for the note import title"
+        }
+
+        assertNodeWithin(title, item)
+        assertEquals(1, layoutResult.lineCount)
+        assertTrue(layoutResult.hasVisualOverflow)
+        assertTrue(layoutResult.isLineEllipsized(0))
+        composeRule.onAllNodesWithText("Hidden note body").assertCountEquals(0)
     }
 
     @Test
@@ -1593,6 +2553,7 @@ class TokenFlowAppTest {
         val PHONE_SIZE = DpSize(360.dp, 640.dp)
         val SHORT_TABLET_SIZE = DpSize(853.dp, 480.dp)
         val PORTRAIT_TABLET_SIZE = DpSize(600.dp, 960.dp)
+        val WIDE_CHAT_SIZE = DpSize(1440.dp, 900.dp)
     }
 
     @OptIn(ExperimentalTestApi::class, ExperimentalMaterial3Api::class)
@@ -1608,6 +2569,37 @@ class TokenFlowAppTest {
                     val density = LocalDensity.current
                     onLayoutEnvironment(density, TopAppBarDefaults.windowInsets.getTop(density))
                     TokenFlowTheme { TokenFlowApp(viewModel) }
+                }
+            }
+        }
+    }
+
+    @OptIn(ExperimentalTestApi::class, ExperimentalMaterial3Api::class)
+    private fun setLocalizedAppAt(
+        viewModel: AppViewModel,
+        size: DpSize,
+        fontScale: Float,
+        locale: Locale,
+        nightMode: Int,
+        onLayoutEnvironment: (Density, Int) -> Unit = { _, _ -> },
+    ) {
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.ForcedSize(size)) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.FontScale(fontScale)) {
+                    val baseContext = LocalContext.current
+                    val configuration = Configuration(LocalConfiguration.current).apply {
+                        setLocale(locale)
+                        uiMode = (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or nightMode
+                    }
+                    val localizedContext = baseContext.createConfigurationContext(configuration)
+                    CompositionLocalProvider(
+                        LocalConfiguration provides configuration,
+                        LocalContext provides localizedContext,
+                    ) {
+                        val density = LocalDensity.current
+                        onLayoutEnvironment(density, TopAppBarDefaults.windowInsets.getTop(density))
+                        TokenFlowTheme { TokenFlowApp(viewModel) }
+                    }
                 }
             }
         }
@@ -1864,9 +2856,11 @@ private class UiFakeDataSource(
     withModel: Boolean,
     private val withProvider: Boolean = withModel,
     modelDisplayName: String = "Model A",
+    modelRemoteId: String = "model-a",
+    assistantNickname: String = DEFAULT_ASSISTANT_NICKNAME,
 ) : ChatDataSource {
     val provider = ProviderConfig("provider-1", "Provider", "https://api.example.com/v1", ProviderProtocol.OPENAI_RESPONSES, true)
-    val model = ModelProfile("model-1", provider.id, "model-a", modelDisplayName, 4096, true)
+    val model = ModelProfile("model-1", provider.id, modelRemoteId, modelDisplayName, 4096, true)
     val conversations = mutableListOf<Conversation>()
     val bookmarks = mutableListOf<BookmarkedMessage>()
     val notes = mutableListOf<Note>()
@@ -1876,6 +2870,10 @@ private class UiFakeDataSource(
     val deletedKnowledgeIds = mutableListOf<String>()
     private val messages = mutableMapOf<String, List<ChatMessage>>()
     private var models = if (withModel) listOf(model) else emptyList()
+    private var storedGlobalSettings = GlobalChatSettings(
+        defaultModelId = models.firstOrNull()?.id,
+        assistantNickname = assistantNickname,
+    )
     @Volatile var initialized = false
     @Volatile var sentRequest: SendMessageRequest? = null
     @Volatile var noteKnowledgeImportCalls = 0
@@ -1889,6 +2887,7 @@ private class UiFakeDataSource(
     var applyImportError: Throwable? = null
     var saveNoteGate: CompletableDeferred<Unit>? = null
     var saveNoteError: Throwable? = null
+    var speechAudio: TtsAudio? = null
     var sendMessageFlow: ((String, SendMessageRequest) -> Flow<ChatEvent>)? = null
 
     fun seedMessages(conversationId: String, items: List<ChatMessage>) {
@@ -1901,7 +2900,7 @@ private class UiFakeDataSource(
         models = models,
         conversations = conversations.toList(),
         exaConfigured = false,
-        globalSettings = GlobalChatSettings(defaultModelId = models.firstOrNull()?.id),
+        globalSettings = storedGlobalSettings,
         bookmarks = bookmarks.toList(),
         notes = notes.toList(),
         knowledgeDocuments = knowledgeDocuments.toList(),
@@ -1910,9 +2909,18 @@ private class UiFakeDataSource(
     override suspend fun fetchModels(draft: ProviderDraft) = listOf(RemoteModel("model-a"))
     override suspend fun saveProvider(draft: ProviderDraft, models: List<ModelProfile>): ProviderConfig { this.models = models; return provider }
     override suspend fun deleteProvider(id: String) { models = emptyList() }
-    override suspend fun setDefaultModel(id: String) = Unit
+    override suspend fun setDefaultModel(id: String) {
+        storedGlobalSettings = storedGlobalSettings.copy(defaultModelId = id)
+    }
     override fun exaConfigured() = false
     override fun saveExaKey(value: String) = Unit
+    override suspend fun globalSettings() = storedGlobalSettings
+    override suspend fun saveGlobalSettings(
+        settings: GlobalChatSettings,
+        mimoTtsKey: String?,
+    ): GlobalChatSettings = settings.copy(
+        assistantNickname = settings.assistantNickname.trim().ifBlank { DEFAULT_ASSISTANT_NICKNAME },
+    ).also { storedGlobalSettings = it }
     override suspend fun conversations() = conversations.toList()
     override suspend fun knowledgeSnippets(ids: List<Long>) =
         knowledgeSnippets.filter { it.chunkId in ids }
@@ -2002,6 +3010,8 @@ private class UiFakeDataSource(
     }
 
     override fun regenerate(id: String, request: SendMessageRequest): Flow<ChatEvent> = flow { }
+    override suspend fun synthesizeSpeech(messageId: String, force: Boolean) =
+        requireNotNull(speechAudio) { "No speech audio was configured for this test" }
     override suspend fun exportConfiguration(password: CharArray) = "archive"
     override suspend fun previewImport(raw: String, password: CharArray): ImportPreview {
         importPreviewGate?.await()

@@ -72,6 +72,7 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.CallSplit
+import androidx.compose.material.icons.outlined.Calculate
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Edit
@@ -99,6 +100,7 @@ import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material.icons.outlined.Stop
+import androidx.compose.material.icons.outlined.Straighten
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
@@ -197,6 +199,7 @@ import xyz.mek030399.tokenflow.data.ChatDisplayPreferences
 import xyz.mek030399.tokenflow.data.ChatMessage
 import xyz.mek030399.tokenflow.data.CameraCaptureStore
 import xyz.mek030399.tokenflow.data.CONTEXT_BOUNDARY_ROLE
+import xyz.mek030399.tokenflow.data.DEFAULT_ASSISTANT_NICKNAME
 import xyz.mek030399.tokenflow.data.Conversation
 import xyz.mek030399.tokenflow.data.GlobalChatSettings
 import xyz.mek030399.tokenflow.data.KnowledgeSnippet
@@ -236,6 +239,11 @@ import kotlinx.coroutines.withContext
 object UiTestTags {
     const val MESSAGE_INPUT = "message_input"
     const val MESSAGE_ACTION = "message_action"
+    const val MESSAGE_LIST = "message_list"
+    const val EMPTY_STATE = "empty_state"
+    const val EMPTY_LOGO = "empty_logo"
+    const val EMPTY_TITLE = "empty_title"
+    const val EMPTY_DETAIL = "empty_detail"
     const val TAKE_PHOTO = "take_photo"
     const val PROCESS_DETAILS = "process_details"
     const val SETTINGS = "settings"
@@ -277,6 +285,7 @@ object UiTestTags {
     const val APP_BACKGROUND = "app_background"
     const val USER_AVATAR_PICKER = "user_avatar_picker"
     const val ASSISTANT_AVATAR_PICKER = "assistant_avatar_picker"
+    const val ASSISTANT_NICKNAME = "assistant_nickname"
     const val PROVIDER_NAME = "provider_name"
     const val PROVIDER_BASE_URL = "provider_base_url"
     const val PROVIDER_API_KEY = "provider_api_key"
@@ -301,6 +310,8 @@ object UiTestTags {
     const val ABOUT_MODEL_TOOL_WEB_SEARCH = "about_model_tool_web_search"
     const val ABOUT_MODEL_TOOL_READ_URL = "about_model_tool_read_url"
     const val ABOUT_MODEL_TOOL_SEARCH_KNOWLEDGE = "about_model_tool_search_knowledge"
+    const val ABOUT_MODEL_TOOL_CALCULATE = "about_model_tool_calculate"
+    const val ABOUT_MODEL_TOOL_CONVERT_UNITS = "about_model_tool_convert_units"
     const val ABOUT_EXA_KEY_LINK = "about_exa_key_link"
     const val ABOUT_MIMO_KEY_LINK = "about_mimo_key_link"
     const val ABOUT_THIRD_PARTY_NOTICES = "about_third_party_notices"
@@ -313,6 +324,16 @@ object UiTestTags {
     fun noteItem(id: String) = "note_item_$id"
     fun knowledgeDocument(id: String) = "knowledge_document_$id"
     fun knowledgeDelete(id: String) = "knowledge_delete_$id"
+    fun messageBody(id: String) = "message_body_$id"
+    fun assistantMessageHeader(id: String) = "assistant_message_header_$id"
+    fun assistantMessageIdentity(id: String) = "assistant_message_identity_$id"
+    fun assistantMessageName(id: String) = "assistant_message_name_$id"
+    fun assistantMessageModel(id: String) = "assistant_message_model_$id"
+    fun assistantMessageActions(id: String) = "assistant_message_actions_$id"
+    fun assistantMessageBookmark(id: String) = "assistant_message_bookmark_$id"
+    fun assistantMessageFooterActions(id: String) = "assistant_message_footer_actions_$id"
+    fun noteImportItem(id: String) = "note_import_item_$id"
+    fun noteImportTitle(id: String) = "note_import_title_$id"
     fun sidebarDestination(screen: AppScreen) = "sidebar_destination_${screen.name}"
     fun workspaceDestination(screen: AppScreen) = "workspace_destination_${screen.name}"
     fun themeOption(theme: AppTheme) = "theme_option_${theme.storageValue}"
@@ -981,6 +1002,13 @@ private fun GlobalSettingsScreen(
                     ) }
                 }
             }
+            OutlinedTextField(
+                value = draft.assistantNickname,
+                onValueChange = { draft = draft.copy(assistantNickname = it) },
+                label = { Text(stringResource(R.string.assistant_nickname)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag(UiTestTags.ASSISTANT_NICKNAME),
+            )
             Text(stringResource(R.string.vision_fallback_model), style = MaterialTheme.typography.labelLarge)
             Box {
                 OutlinedButton(onClick = { fallbackMenu = true }, modifier = Modifier.fillMaxWidth()) {
@@ -1518,6 +1546,10 @@ private fun ChatPane(
     }
     val activeConversation = state.activeConversation
     val effectiveModelId = if (state.config.modelMode == SettingMode.INHERIT) state.globalSettings.defaultModelId else state.config.model
+    val newChatLabel = stringResource(R.string.new_chat)
+    val conversationTitle = activeConversation?.let { displayTitle(it, newChatLabel) } ?: newChatLabel
+    val effectiveModel = state.models.firstOrNull { it.id == effectiveModelId }
+    val assistantNickname = state.globalSettings.assistantNickname.trim().ifBlank { DEFAULT_ASSISTANT_NICKNAME }
     val effectiveUserAvatar = if (state.config.userAvatarMode == SettingMode.INHERIT) state.globalSettings.userAvatar else state.config.userAvatar
     val effectiveAssistantAvatar = if (state.config.assistantAvatarMode == SettingMode.INHERIT) state.globalSettings.assistantAvatar else state.config.assistantAvatar
     val compactTopBarHeight = with(LocalDensity.current) {
@@ -1530,9 +1562,7 @@ private fun ChatPane(
             title = {
                 Column(Modifier.testTag(UiTestTags.CHAT_TITLE_BLOCK)) {
                     Text(
-                        text = state.activeConversation?.let {
-                            displayTitle(it, stringResource(R.string.new_chat))
-                        } ?: stringResource(R.string.new_chat),
+                        text = conversationTitle,
                         modifier = Modifier.testTag(UiTestTags.CHAT_CONVERSATION_TITLE),
                         style = MaterialTheme.typography.titleMedium.copy(
                             fontSize = 16.sp,
@@ -1542,10 +1572,9 @@ private fun ChatPane(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    val model = state.models.firstOrNull { it.id == effectiveModelId }
-                    if (model != null) {
+                    if (effectiveModel != null) {
                         Text(
-                            text = model.displayName,
+                            text = effectiveModel.displayName,
                             modifier = Modifier.testTag(UiTestTags.CHAT_MODEL_NAME),
                             style = MaterialTheme.typography.labelSmall.copy(lineHeight = 14.sp),
                             maxLines = 1,
@@ -1592,16 +1621,47 @@ private fun ChatPane(
             }
         }
         if (state.activeMessages.isEmpty()) {
-            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(24.dp)) {
-                    AppLogo(64.dp)
-                    Text(stringResource(R.string.empty_title), style = MaterialTheme.typography.titleLarge)
-                    Text(stringResource(R.string.empty_detail), style = MaterialTheme.typography.bodyMedium)
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .widthIn(max = 320.dp)
+                        .fillMaxWidth()
+                        .testTag(UiTestTags.EMPTY_STATE),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Box(Modifier.size(56.dp).testTag(UiTestTags.EMPTY_LOGO)) {
+                        AppLogo(56.dp)
+                    }
+                    Spacer(Modifier.height(18.dp))
+                    Text(
+                        text = stringResource(R.string.empty_title),
+                        modifier = Modifier.testTag(UiTestTags.EMPTY_TITLE),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.Medium,
+                        style = MaterialTheme.typography.headlineSmall,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = stringResource(R.string.empty_detail),
+                        modifier = Modifier.testTag(UiTestTags.EMPTY_DETAIL),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                    )
                 }
             }
         } else MessageList(
             messages = state.activeMessages,
             generation = state.activeGeneration,
+            assistantNickname = assistantNickname,
+            modelRemoteId = effectiveModel?.remoteId,
             userAvatar = effectiveUserAvatar,
             assistantAvatar = effectiveAssistantAvatar,
             userImage = userAvatarImage,
@@ -1698,6 +1758,8 @@ private fun ChatPane(
 private fun MessageList(
     messages: List<ChatMessage>,
     generation: GenerationState?,
+    assistantNickname: String,
+    modelRemoteId: String?,
     userAvatar: String,
     assistantAvatar: String,
     userImage: ImageBitmap?,
@@ -1756,7 +1818,7 @@ private fun MessageList(
     }
     Box(modifier) {
         LazyColumn(
-            Modifier.fillMaxSize(),
+            Modifier.fillMaxSize().testTag(UiTestTags.MESSAGE_LIST),
             state = listState,
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -1769,6 +1831,8 @@ private fun MessageList(
                     MessageItem(
                         message = message,
                         generation = if (isLastAssistant) generation else null,
+                        assistantNickname = assistantNickname,
+                        modelRemoteId = modelRemoteId,
                         avatar = if (message.role == "user") userAvatar else assistantAvatar,
                         avatarImage = if (message.role == "user") userImage else assistantImage,
                         fontScale = fontScale,
@@ -1820,6 +1884,8 @@ private fun ContextBoundary() {
 private fun MessageItem(
     message: ChatMessage,
     generation: GenerationState?,
+    assistantNickname: String,
+    modelRemoteId: String?,
     avatar: String,
     avatarImage: ImageBitmap?,
     fontScale: Float,
@@ -1843,6 +1909,13 @@ private fun MessageItem(
     val isUser = message.role == "user"
     val clipboard = LocalClipboardManager.current
     val metadata = message.assistantMetadata(xyz.mek030399.tokenflow.data.DirectApiTransport.defaultJson)
+    val assistantIdentity = metadata.assistantIdentity
+    val displayedAssistantNickname = (assistantIdentity?.nickname ?: assistantNickname)
+        .trim()
+        .ifBlank { DEFAULT_ASSISTANT_NICKNAME }
+    val displayedModelRemoteId = (if (assistantIdentity == null) modelRemoteId else assistantIdentity.remoteModelId)
+        ?.trim()
+        ?.takeIf(String::isNotEmpty)
     val events = generation?.events?.takeIf { it.isNotEmpty() } ?: metadata.events
     val knowledgeCitations = allowedAssistantKnowledgeCitations(
         persisted = metadata.knowledgeCitations,
@@ -1852,17 +1925,89 @@ private fun MessageItem(
     val generationActive = generation?.active == true
     val generationActivity = currentGenerationActivity(generation?.events.orEmpty(), generationActive)
     val streaming = !isUser && (message.status == "generating" || generationActive)
+    val compactFooterHeight = with(LocalDensity.current) {
+        maxOf(32.dp, MaterialTheme.typography.labelLarge.lineHeight.toDp())
+    }
     var expanded by rememberSaveable(message.id) { mutableStateOf(processExpandedByDefault) }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start, verticalAlignment = Alignment.Top) {
-        if (!isUser) {
-            Avatar(avatar, avatarImage, Modifier.testTag(UiTestTags.ASSISTANT_MESSAGE_AVATAR)); Spacer(Modifier.width(10.dp))
-        }
+    val messageBody: @Composable (Modifier) -> Unit = { modifier ->
         Surface(
             color = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(8.dp),
-            modifier = Modifier.widthIn(max = 760.dp).weight(1f, fill = false),
+            modifier = modifier.testTag(UiTestTags.messageBody(message.id)),
         ) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(if (isUser) 8.dp else 4.dp),
+            ) {
+                if (!isUser) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth()
+                            .padding(bottom = 4.dp)
+                            .testTag(UiTestTags.assistantMessageHeader(message.id)),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Avatar(
+                            avatar,
+                            avatarImage,
+                            Modifier.testTag(UiTestTags.ASSISTANT_MESSAGE_AVATAR),
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Column(
+                            modifier = Modifier.weight(1f)
+                                .padding(end = 4.dp)
+                                .testTag(UiTestTags.assistantMessageIdentity(message.id)),
+                        ) {
+                            Text(
+                                text = displayedAssistantNickname,
+                                modifier = Modifier.testTag(UiTestTags.assistantMessageName(message.id)),
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (displayedModelRemoteId != null) {
+                                Text(
+                                    text = displayedModelRemoteId,
+                                    modifier = Modifier.testTag(UiTestTags.assistantMessageModel(message.id)),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                        if (!streaming) {
+                            Row(
+                                modifier = Modifier.testTag(UiTestTags.assistantMessageActions(message.id)),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                IconButton(
+                                    onClick = { clipboard.setText(AnnotatedString(message.content)) },
+                                    modifier = Modifier.size(32.dp)
+                                        .testTag(UiTestTags.COPY_ASSISTANT_MESSAGE),
+                                ) {
+                                    Icon(
+                                        Icons.Outlined.ContentCopy,
+                                        stringResource(R.string.copy),
+                                        Modifier.size(17.dp),
+                                    )
+                                }
+                                IconButton(
+                                    onClick = onBookmark,
+                                    modifier = Modifier.size(32.dp)
+                                        .testTag(UiTestTags.assistantMessageBookmark(message.id)),
+                                ) {
+                                    Icon(
+                                        Icons.Outlined.Bookmarks,
+                                        stringResource(if (bookmarked) R.string.remove_bookmark else R.string.bookmark),
+                                        Modifier.size(17.dp),
+                                        tint = if (bookmarked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
                 val density = LocalDensity.current
                 CompositionLocalProvider(
                     LocalDensity provides Density(density.density, density.fontScale * fontScale),
@@ -1907,19 +2052,29 @@ private fun MessageItem(
                     }
                 }
                 if (attachments.isNotEmpty()) AttachmentPreview(attachments)
+                val speechReady = tts?.filePath != null
                 if (!isUser && !streaming) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().testTag(UiTestTags.PROCESS_TOKEN_ROW),
+                        modifier = Modifier.fillMaxWidth()
+                            .height(compactFooterHeight)
+                            .testTag(UiTestTags.PROCESS_TOKEN_ROW),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         TextButton(
                             onClick = { expanded = !expanded },
-                            modifier = Modifier.defaultMinSize(minWidth = 0.dp)
+                            modifier = Modifier.height(compactFooterHeight)
+                                .widthIn(max = 96.dp)
+                                .defaultMinSize(minWidth = 0.dp)
                                 .testTag(UiTestTags.PROCESS_DETAILS),
                             contentPadding = PaddingValues(0.dp),
                         ) {
                             Icon(if (expanded) Icons.Outlined.Close else Icons.Outlined.Tune, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.process))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = stringResource(R.string.process),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                         if (usage.totalTokens > 0) {
                             val totalTokens = formatTokenCount(usage.totalTokens)
@@ -1951,51 +2106,45 @@ private fun MessageItem(
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 textAlign = TextAlign.End,
-                                maxLines = 2,
+                                maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f)
-                                    .padding(start = 8.dp)
+                                    .padding(horizontal = 4.dp)
                                     .semantics { contentDescription = tokenDescription }
                                     .testTag(UiTestTags.TOKEN_USAGE),
                             )
+                        } else {
+                            Spacer(Modifier.weight(1f))
+                        }
+                        Row(
+                            modifier = Modifier.testTag(UiTestTags.assistantMessageFooterActions(message.id)),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            IconButton(onClick = onBranch, enabled = message.status == "completed", modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Outlined.CallSplit, stringResource(R.string.create_branch), Modifier.size(17.dp))
+                            }
+                            if (!speechReady) IconButton(
+                                onClick = onSpeak,
+                                enabled = tts?.loading != true && message.status == "completed",
+                                modifier = Modifier.size(32.dp).testTag(UiTestTags.SPEECH_ACTION),
+                            ) {
+                                if (tts?.loading == true) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                                else Icon(Icons.Outlined.VolumeUp, stringResource(R.string.generate_speech), Modifier.size(17.dp))
+                            }
+                            IconButton(onClick = onSaveNote, enabled = !savedAsNote, modifier = Modifier.size(32.dp)) {
+                                Icon(
+                                    Icons.Outlined.NoteAlt,
+                                    stringResource(if (savedAsNote) R.string.already_saved_as_note else R.string.save_as_note),
+                                    Modifier.size(17.dp),
+                                    tint = if (savedAsNote) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            if (isLatestAssistant && message.status != "generating") IconButton(onClick = onRegenerate, modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Outlined.Refresh, stringResource(R.string.regenerate), Modifier.size(17.dp))
+                            }
                         }
                     }
                     if (expanded) ProcessDetails(events, message.status, onKnowledgeCitation)
-                }
-                val speechReady = tts?.filePath != null
-                if (!isUser && !streaming) Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = onBranch, enabled = message.status == "completed", modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Outlined.CallSplit, stringResource(R.string.create_branch), Modifier.size(17.dp))
-                    }
-                    IconButton(onClick = { clipboard.setText(AnnotatedString(message.content)) }, modifier = Modifier.size(32.dp).testTag(UiTestTags.COPY_ASSISTANT_MESSAGE)) {
-                        Icon(Icons.Outlined.ContentCopy, stringResource(R.string.copy), Modifier.size(17.dp))
-                    }
-                    if (!speechReady) IconButton(
-                        onClick = onSpeak,
-                        enabled = tts?.loading != true && message.status == "completed",
-                        modifier = Modifier.size(32.dp).testTag(UiTestTags.SPEECH_ACTION),
-                    ) {
-                        if (tts?.loading == true) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                        else Icon(Icons.Outlined.VolumeUp, stringResource(R.string.generate_speech), Modifier.size(17.dp))
-                    }
-                    IconButton(onClick = onBookmark, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Outlined.Bookmarks, stringResource(if (bookmarked) R.string.remove_bookmark else R.string.bookmark), Modifier.size(17.dp), tint = if (bookmarked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    IconButton(onClick = onSaveNote, enabled = !savedAsNote, modifier = Modifier.size(32.dp)) {
-                        Icon(
-                            Icons.Outlined.NoteAlt,
-                            stringResource(if (savedAsNote) R.string.already_saved_as_note else R.string.save_as_note),
-                            Modifier.size(17.dp),
-                            tint = if (savedAsNote) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    if (isLatestAssistant && message.status != "generating") IconButton(onClick = onRegenerate, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Outlined.Refresh, stringResource(R.string.regenerate), Modifier.size(17.dp))
-                    }
                 }
                 if (!isUser && !streaming && speechReady) SpeechPlaybackBar(
                     loading = tts.loading,
@@ -2010,7 +2159,19 @@ private fun MessageItem(
                 }
             }
         }
-        if (isUser) { Spacer(Modifier.width(10.dp)); Avatar(avatar, avatarImage, Modifier.testTag(UiTestTags.USER_MESSAGE_AVATAR)) }
+    }
+    if (isUser) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.Top,
+        ) {
+            messageBody(Modifier.widthIn(max = 760.dp).weight(1f, fill = false))
+            Spacer(Modifier.width(10.dp))
+            Avatar(avatar, avatarImage, Modifier.testTag(UiTestTags.USER_MESSAGE_AVATAR))
+        }
+    } else {
+        messageBody(Modifier.widthIn(max = 760.dp).fillMaxWidth())
     }
 }
 
@@ -2019,6 +2180,8 @@ internal enum class GenerationActivity {
     SEARCHING_WEB,
     READING_URL,
     SEARCHING_LOCAL_KNOWLEDGE,
+    CALCULATING,
+    CONVERTING_UNITS,
     CALLING_TOOL,
 }
 
@@ -2043,6 +2206,8 @@ internal fun currentGenerationActivity(
         "web_search" -> GenerationActivity.SEARCHING_WEB
         "read_url" -> GenerationActivity.READING_URL
         "search_knowledge" -> GenerationActivity.SEARCHING_LOCAL_KNOWLEDGE
+        "calculate" -> GenerationActivity.CALCULATING
+        "convert_units" -> GenerationActivity.CONVERTING_UNITS
         else -> GenerationActivity.CALLING_TOOL
     }
 }
@@ -2058,6 +2223,8 @@ internal fun GenerationStatus(
         GenerationActivity.SEARCHING_WEB -> stringResource(R.string.searching_web)
         GenerationActivity.READING_URL -> stringResource(R.string.reading_url)
         GenerationActivity.SEARCHING_LOCAL_KNOWLEDGE -> stringResource(R.string.searching_local_knowledge)
+        GenerationActivity.CALCULATING -> stringResource(R.string.calculating)
+        GenerationActivity.CONVERTING_UNITS -> stringResource(R.string.converting_units)
         GenerationActivity.CALLING_TOOL -> stringResource(R.string.calling_tool)
     }
     val icon = when (activity) {
@@ -2065,6 +2232,8 @@ internal fun GenerationStatus(
         GenerationActivity.SEARCHING_WEB -> Icons.Outlined.Public
         GenerationActivity.READING_URL -> Icons.Outlined.Link
         GenerationActivity.SEARCHING_LOCAL_KNOWLEDGE -> Icons.Outlined.FolderOpen
+        GenerationActivity.CALCULATING -> Icons.Outlined.Calculate
+        GenerationActivity.CONVERTING_UNITS -> Icons.Outlined.Straighten
         GenerationActivity.CALLING_TOOL -> Icons.Outlined.Build
     }
     val contentColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2563,20 +2732,20 @@ private fun Composer(
                                     origin = PendingAttachmentOrigin.NOTE,
                                     inlineText = snapshot,
                                 )))
-                            }.padding(vertical = 12.dp),
-                            verticalAlignment = Alignment.Top,
+                            }.padding(vertical = 12.dp)
+                                .testTag(UiTestTags.noteImportItem(note.id)),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Icon(Icons.Outlined.NoteAlt, null)
-                            Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                                Text(note.title, fontWeight = FontWeight.Medium)
-                                Text(
-                                    note.body,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
+                            Text(
+                                text = note.title,
+                                modifier = Modifier.padding(start = 12.dp)
+                                    .weight(1f)
+                                    .testTag(UiTestTags.noteImportTitle(note.id)),
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     }
                 }

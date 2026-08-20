@@ -338,7 +338,7 @@ class LocalDatabaseTest {
     }
 
     @Test
-    fun migrationOneToFivePreservesMessagesAndAddsMultimodalColumns() = runBlocking {
+    fun migrationOneToSixPreservesMessagesAndAddsMultimodalColumns() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val name = "migration-${System.nanoTime()}.db"
         context.deleteDatabase(name)
@@ -379,6 +379,7 @@ class LocalDatabaseTest {
                 TokenFlowDatabase.MIGRATION_2_3,
                 TokenFlowDatabase.MIGRATION_3_4,
                 TokenFlowDatabase.MIGRATION_4_5,
+                TokenFlowDatabase.MIGRATION_5_6,
             )
             .build()
         try {
@@ -396,9 +397,58 @@ class LocalDatabaseTest {
             assertTrue(migratedDao.agents().isEmpty())
             assertEquals(VisionStatus.UNKNOWN.name, migratedDao.model("default")?.visionStatus)
             assertEquals("mimo_default", migratedDao.appSettings()?.mimoTtsVoice)
+            assertEquals(DEFAULT_ASSISTANT_NICKNAME, migratedDao.appSettings()?.assistantNickname)
             assertTrue(migratedDao.attachmentsForMessage("m").isEmpty())
         } finally {
             migrated.close()
+            context.deleteDatabase(name)
+        }
+    }
+
+    @Test
+    fun migrationFiveToSixAddsDefaultAssistantNicknameAndPreservesSettings() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "migration-assistant-nickname-${System.nanoTime()}.db"
+        context.deleteDatabase(name)
+        val helper = FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name(name)
+                .callback(object : SupportSQLiteOpenHelper.Callback(5) {
+                    override fun onCreate(db: SupportSQLiteDatabase) {
+                        db.execSQL(
+                            "CREATE TABLE app_settings (" +
+                                "id INTEGER NOT NULL PRIMARY KEY, systemPrompt TEXT NOT NULL, " +
+                                "userAvatar TEXT NOT NULL, assistantAvatar TEXT NOT NULL, " +
+                                "urlReaderBackend TEXT NOT NULL, visionFallbackModelId TEXT, " +
+                                "mimoTtsVoice TEXT NOT NULL DEFAULT 'mimo_default')",
+                        )
+                        db.execSQL(
+                            "INSERT INTO app_settings(" +
+                                "id,systemPrompt,userAvatar,assistantAvatar,urlReaderBackend," +
+                                "visionFallbackModelId,mimoTtsVoice" +
+                                ") VALUES(1,'kept prompt','U','AI','INFOFLOW',NULL,'mimo_default')",
+                        )
+                    }
+
+                    override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+                })
+                .build(),
+        )
+        val db = helper.writableDatabase
+        try {
+            TokenFlowDatabase.MIGRATION_5_6.migrate(db)
+
+            db.query(
+                "SELECT systemPrompt, urlReaderBackend, assistantNickname " +
+                    "FROM app_settings WHERE id = 1",
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("kept prompt", cursor.getString(0))
+                assertEquals(UrlReaderBackend.INFOFLOW.name, cursor.getString(1))
+                assertEquals(DEFAULT_ASSISTANT_NICKNAME, cursor.getString(2))
+            }
+        } finally {
+            helper.close()
             context.deleteDatabase(name)
         }
     }

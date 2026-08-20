@@ -8,6 +8,7 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -28,6 +29,7 @@ data class ConfigArchivePayload(
     val globalSystemPrompt: String? = null,
     val globalUrlReaderBackend: UrlReaderBackend? = null,
     val agents: List<AgentProfile> = emptyList(),
+    @SerialName("global_assistant_nickname") val globalAssistantNickname: String? = null,
 ) {
     companion object {
         const val PAYLOAD_FORMAT = "tokenflow-local-config"

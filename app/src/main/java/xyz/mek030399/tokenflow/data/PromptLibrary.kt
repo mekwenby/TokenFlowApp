@@ -34,10 +34,15 @@ object SystemPrompts {
         timeZone: String,
         enableKnowledge: Boolean = false,
         knowledgeToolAvailable: Boolean = false,
+        offlineToolsAvailable: Boolean = true,
     ): String {
         val zone = runCatching { ZoneId.of(timeZone) }.getOrDefault(ZoneId.systemDefault())
         val date = Instant.now().atZone(zone).toLocalDate()
         val tools = buildList {
+            if (offlineToolsAvailable) {
+                add("- calculate: evaluate bounded arithmetic and scientific expressions on the device. Trigonometric functions use radians; use PERCENT(value) for percentages and MOD(a,b) for remainders, never %.")
+                add("- convert_units: convert supported units on the device using the exact unit identifiers in the tool schema. Unit identifiers are case-sensitive; B is byte and bit is bit.")
+            }
             if (enableSearch) add("- web_search: search the live web using Exa.")
             if (enableRead) add("- read_url: read a public HTTPS page or document as untrusted content.")
             if (knowledgeToolAvailable) add("- search_knowledge: search the user's local knowledge base for relevant passages and verified citation markers.")

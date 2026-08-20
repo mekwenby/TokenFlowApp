@@ -58,6 +58,45 @@ class ConfigImportTest {
     }
 
     @Test
+    fun importAppliesAssistantNicknameWhileLegacyPayloadPreservesCurrentValue() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val database = Room.inMemoryDatabaseBuilder(context, TokenFlowDatabase::class.java).build()
+        val dao = database.localDao()
+        val secrets = SecretStore(context)
+        val repository = repository(context, dao, secrets)
+
+        try {
+            repository.applyImport(preview(ConfigArchivePayload(
+                createdAt = 1,
+                providers = emptyList(),
+                models = emptyList(),
+                globalAssistantNickname = "Imported assistant",
+            )))
+            assertEquals("Imported assistant", repository.globalSettings().assistantNickname)
+
+            repository.applyImport(preview(ConfigArchivePayload(
+                createdAt = 2,
+                providers = emptyList(),
+                models = emptyList(),
+                globalSystemPrompt = "Imported legacy prompt",
+            )))
+            val settings = repository.globalSettings()
+            assertEquals("Imported assistant", settings.assistantNickname)
+            assertEquals("Imported legacy prompt", settings.systemPrompt)
+
+            repository.applyImport(preview(ConfigArchivePayload(
+                createdAt = 3,
+                providers = emptyList(),
+                models = emptyList(),
+                globalAssistantNickname = "   ",
+            )))
+            assertEquals(DEFAULT_ASSISTANT_NICKNAME, repository.globalSettings().assistantNickname)
+        } finally {
+            database.close()
+        }
+    }
+
+    @Test
     fun failedDatabaseMergeRestoresSecretsAndWritesNoPartialRows() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val database = Room.inMemoryDatabaseBuilder(context, TokenFlowDatabase::class.java).build()

@@ -498,7 +498,10 @@ class WebToolExecutor(
     private val infoFlowReader: UrlContentReader? = null,
     private val knowledgeStore: KnowledgeStore? = null,
 ) : ToolRunner {
+    private val offlineTools = OfflineCalculationTools(json)
+
     override fun definitions(enableSearch: Boolean, enableRead: Boolean): List<ToolDefinition> = buildList {
+        addAll(offlineTools.definitions())
         if (enableSearch && secretStore.read(SecretStore.EXA_KEY) != null) add(
             ToolDefinition(
                 name = "web_search",
@@ -551,6 +554,9 @@ class WebToolExecutor(
         enableRead: Boolean,
         urlReaderBackend: UrlReaderBackend,
     ): ToolExecutionResult {
+        if (call.name == "calculate" || call.name == "convert_units") {
+            return offlineTools.execute(call)
+        }
         val args = runCatching { json.parseToJsonElement(call.arguments).jsonObject }
             .getOrElse { return ToolExecutionResult(error("Invalid tool arguments"), false) }
         return try {

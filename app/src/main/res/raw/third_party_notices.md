@@ -84,6 +84,7 @@ This document lists the resolved third-party runtime artifacts distributed with 
 - `androidx.versionedparcelable:versionedparcelable:1.1.1`
 - `androidx.window:window-core-android:1.5.0`
 - `androidx.window:window:1.5.0`
+- `com.ezylang:EvalEx:3.7.0`
 - `com.google.guava:failureaccess:1.0.2`
 - `com.google.guava:guava:33.3.1-android`
 - `com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava`

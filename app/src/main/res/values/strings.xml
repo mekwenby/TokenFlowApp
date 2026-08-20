@@ -36,8 +36,8 @@
     <string name="stop">Stop</string>
     <string name="loading">Loading…</string>
     <string name="retry">Retry</string>
-    <string name="empty_title">Start a conversation</string>
-    <string name="empty_detail">One thought connects. Inspiration flows.</string>
+    <string name="empty_title">One thought, infinite possibilities</string>
+    <string name="empty_detail">Ask, create, and reason. Start with one thought.</string>
     <string name="no_models">No models are configured. Add a provider and at least one model.</string>
     <string name="rename">Rename</string>
     <string name="generate_title">Generate title</string>
@@ -114,6 +114,8 @@
     <string name="searching_web">Searching the web</string>
     <string name="reading_url">Reading URL</string>
     <string name="searching_local_knowledge">Searching local knowledge</string>
+    <string name="calculating">Calculating</string>
+    <string name="converting_units">Converting units</string>
     <string name="calling_tool">Calling tool</string>
     <string name="back">Back</string>
     <string name="edit">Edit</string>
@@ -144,6 +146,7 @@
     <string name="added_models">Added models</string>
     <string name="save_provider">Save provider</string>
     <string name="default_model">Default model</string>
+    <string name="assistant_nickname">Assistant nickname</string>
     <string name="model_alias">Model alias</string>
     <string name="max_output_tokens">Maximum output tokens</string>
     <string name="model_count">%1$d models</string>
@@ -210,6 +213,10 @@
     <string name="about_model_tool_read_url_body">Available when URL reading is enabled for the current chat and the maximum tool-call count is above zero. The app fetches the public HTTPS URL directly, or sends it to InfoFlow when that reader is selected; extracted content is passed to the configured model service. Do not put credentials or personal data in the URL.</string>
     <string name="about_model_tool_search_knowledge_title">Local knowledge search</string>
     <string name="about_model_tool_search_knowledge_body">Available when local knowledge is enabled for the current chat, local knowledge storage is available, and the maximum tool-call count is above zero. The app searches its on-device index without using a separate search service; matched passages, document names, and citation markers are passed to the configured model service.</string>
+    <string name="about_model_tool_calculate_title">Offline calculator</string>
+    <string name="about_model_tool_calculate_body">Available when the maximum tool-call count is above zero. Arithmetic and scientific expressions are evaluated entirely on this device without a network request; the expression and result are still included in the conversation context sent to the configured model service.</string>
+    <string name="about_model_tool_convert_units_title">Offline unit conversion</string>
+    <string name="about_model_tool_convert_units_body">Available when the maximum tool-call count is above zero. Supported unit conversions run entirely on this device without a network request; the value, units, and result are still included in the conversation context sent to the configured model service.</string>
     <string name="about_service_keys">Service API keys</string>
     <string name="about_exa_key">Get an Exa API key</string>
     <string name="about_exa_key_purpose">Used for web search</string>

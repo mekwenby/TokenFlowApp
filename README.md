@@ -12,8 +12,10 @@
 
 - 支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages 兼容接口。
 - 提供流式对话、思考与工具过程、停止、重试、分支、上下文清理和多会话并发生成。
+- 助手消息显示可在全局设置中修改的昵称，并保留生成回复时实际使用的模型 ID。
 - 支持图片、相机、PDF、Word、Excel、纯文本和源码附件，以及视觉模型兜底。
 - 内置收藏、Markdown 笔记、智能体和本地知识库；笔记支持逐篇导入和导出 `.md`，知识引用可在 App 内定位并预览原文。
+- 模型可调用完全在设备内执行的科学计算器和单位换算工具，无需联网工具服务。
 - 可选 Exa 联网搜索、内置或 InfoFlow URL 读取，以及 Xiaomi MiMo 语音生成。
 - 支持中英文、深浅色与多套主题、字体排版设置，以及手机、平板和超宽屏布局。
 - 会话和工作区数据保存在本地；API Key 通过 Android Keystore 支持的加密存储保护。
@@ -31,7 +33,7 @@
 | Android | `minSdk 26`，`targetSdk 36`，`compileSdk 36` |
 | 构建工具 | Gradle `9.4.1`，AGP `9.2.1`，Build Tools `36.0.0` |
 | 语言与 UI | Kotlin `2.3.10`，Java 目标 `17`，Compose BOM `2026.06.01` |
-| 本地数据库 | Schema v5（AndroidX Room `2.8.4`），显式迁移 `1 -> 2 -> 3 -> 4 -> 5` |
+| 本地数据库 | Schema v6（AndroidX Room `2.8.4`），显式迁移 `1 -> 2 -> 3 -> 4 -> 5 -> 6` |
 | 模型协议 | OpenAI Chat Completions、OpenAI Responses、Anthropic Messages |
 
 版本和 SDK 值以 [`app/build.gradle.kts`](app/build.gradle.kts) 为准；数据库版本以 [`LocalDatabase.kt`](app/src/main/java/xyz/mek030399/tokenflow/data/LocalDatabase.kt) 为准。
@@ -98,7 +100,7 @@ app/build/outputs/apk/debug/app-debug.apk
 ## 数据与安全
 
 - 聊天、收藏、笔记、智能体、知识文件和相关配置主要保存在应用私有存储中。
-- 只有在执行相应功能时，请求内容才会按用户配置发送到模型供应商或可选工具服务。
+- 只有在执行相应功能时，请求内容才会按用户配置发送到模型供应商或可选工具服务；离线计算和单位换算不自行联网，但工具参数和结果会作为对话上下文发送给模型供应商。
 - API Key 会发送到对应服务进行认证；自定义服务地址的运营者将能够接收相应凭据和请求内容。
 - `.tfcfg` 导出配置使用用户设置的密码加密，但不包含完整聊天与工作区数据；逐篇导出的笔记 `.md` 也不是完整备份。
 - 不要在 Issue、日志或提交中包含 API Key、keystore、密码、`.tfcfg`、`local.properties` 或私人对话内容。
@@ -127,7 +129,7 @@ TokenFlowApp/
 ├── .github/workflows/               # GitHub CI 和正式 APK 自动发布
 ├── app/
 │   ├── build.gradle.kts             # App 版本、SDK、依赖、签名和构建变体
-│   ├── schemas/                     # Room schema 3/4/5 快照
+│   ├── schemas/                     # Room schema 3/4/5/6 快照
 │   └── src/
 │       ├── main/                    # App 源码和资源
 │       ├── test/                    # JVM 单元测试

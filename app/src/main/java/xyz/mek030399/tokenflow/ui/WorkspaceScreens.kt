@@ -41,6 +41,7 @@ import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.BookmarkRemove
 import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.Calculate
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
@@ -60,6 +61,7 @@ import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SmartToy
+import androidx.compose.material.icons.outlined.Straighten
 import androidx.compose.material.icons.outlined.UploadFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
@@ -1332,6 +1334,20 @@ private val ABOUT_MODEL_TOOLS = listOf(
         title = R.string.about_model_tool_search_knowledge_title,
         description = R.string.about_model_tool_search_knowledge_body,
         testTag = UiTestTags.ABOUT_MODEL_TOOL_SEARCH_KNOWLEDGE,
+    ),
+    AboutModelTool(
+        id = "calculate",
+        icon = Icons.Outlined.Calculate,
+        title = R.string.about_model_tool_calculate_title,
+        description = R.string.about_model_tool_calculate_body,
+        testTag = UiTestTags.ABOUT_MODEL_TOOL_CALCULATE,
+    ),
+    AboutModelTool(
+        id = "convert_units",
+        icon = Icons.Outlined.Straighten,
+        title = R.string.about_model_tool_convert_units_title,
+        description = R.string.about_model_tool_convert_units_body,
+        testTag = UiTestTags.ABOUT_MODEL_TOOL_CONVERT_UNITS,
     ),
 )
 

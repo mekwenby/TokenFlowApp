@@ -16,11 +16,11 @@ App 是本地 BYOK 客户端，但“本地”不表示所有内容只留在设�
 ## Room 数据库
 
 - 文件名：`tokenflow-local.db`
-- 当前 schema：v5
+- 当前 schema：v6
 - `exportSchema = true`
-- 显式迁移：`1 -> 2 -> 3 -> 4 -> 5`
+- 显式迁移：`1 -> 2 -> 3 -> 4 -> 5 -> 6`
 - 不使用 destructive fallback
-- schema 快照：`app/schemas/xyz.mek030399.tokenflow.data.TokenFlowDatabase/{3,4,5}.json`
+- schema 快照：`app/schemas/xyz.mek030399.tokenflow.data.TokenFlowDatabase/{3,4,5,6}.json`
 
 当前表：
 
@@ -57,6 +57,7 @@ User/Assistant 扩展字段保存在消息行内 JSON，而不是独立 Room 列
 - 是否由供应商报告缓存指标
 - `KnowledgeCitation` 和用户消息固定的 knowledge chunk IDs
 - 视觉兜底生成的附件描述
+- 生成回复时的全局助手昵称、内部模型 ID 和真实模型 ID
 
 新增可选字段应提供序列化默认值，确保旧 metadata 可以重新加载。只有关系或查询需要新列时才升级 Room schema。
 
@@ -102,7 +103,7 @@ Android Keystore 只保护 App 内凭据，不是 APK 发布签名 keystore。�
 - AAD 完整性绑定
 - 最短 10 字符密码
 
-归档包括供应商及其 API Key、模型、默认模型、视觉状态/兜底、Exa/MiMo Key、MiMo 音色、全局系统提示词、URL Reader 和智能体。
+归档包括供应商及其 API Key、模型、默认模型、视觉状态/兜底、Exa/MiMo Key、MiMo 音色、全局助手昵称、全局系统提示词、URL Reader 和智能体。
 
 归档不包括会话、消息、附件、收藏、笔记、知识文件、头像、Chat 字体/字间距/行间距或其他 UI 偏好。旧格式的 InfoFlow Key 字段只为读取兼容保留，当前不会导出或应用。
 
@@ -120,6 +121,10 @@ Android Keystore 只保护 App 内凭据，不是 APK 发布签名 keystore。�
 - 笔记 `.md` 导入导出使用系统 Storage Access Framework 的临时 URI 授权，无需存储权限。
 
 ## 网络安全边界
+
+### 离线计算工具
+
+`calculate` 和 `convert_units` 的求值与换算只在设备内完成，不读取 Room、不写入文件，也不直接访问网络。它们仍属于模型工具循环：模型供应商会生成工具名称和参数，App 执行后再把结果发送给该模型供应商。最大工具调用数设为 `0` 时，引擎不会向模型提供这些工具或其他工具。
 
 ### 模型供应商
 
@@ -141,7 +146,7 @@ URL Reader 面对模型或网页提供的任意 URL，边界更严格：
 
 | 操作 | 可能发送的数据 | 接收方 |
 | --- | --- | --- |
-| 模型对话 | 系统提示词、上下文消息、附件图片/提取文本、知识片段、工具结果 | 用户配置的模型供应商 |
+| 模型对话 | 系统提示词、上下文消息、附件图片/提取文本、知识片段、离线计算/单位换算的参数与结果及其他工具结果 | 用户配置的模型供应商 |
 | 视觉兜底 | 图片及描述请求 | 用户配置的视觉兜底供应商 |
 | Exa 搜索 | 搜索词 | Exa |
 | 内置 URL 读取 | 目标 URL、标准 HTTP 请求信息 | 目标网站及网络基础设施 |

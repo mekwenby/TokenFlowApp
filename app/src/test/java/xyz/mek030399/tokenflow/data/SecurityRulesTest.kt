@@ -55,9 +55,30 @@ class SecurityRulesTest {
             timeZone = "Asia/Shanghai",
         )
         assertTrue(prompt.contains("Asia/Shanghai"))
+        assertTrue(prompt.contains("- calculate:"))
+        assertTrue(prompt.contains("- convert_units:"))
         assertTrue(prompt.contains("web_search"))
         assertTrue(prompt.contains("read_url"))
         assertTrue(prompt.contains("untrusted data"))
+    }
+
+    @Test
+    fun zeroToolBudgetPromptDoesNotAdvertiseOfflineOrOptionalTools() {
+        val prompt = SystemPrompts.compose(
+            customPrompt = "",
+            nickname = "",
+            enableSearch = false,
+            enableRead = false,
+            timeZone = "UTC",
+            offlineToolsAvailable = false,
+        )
+
+        assertTrue(prompt.contains("No callable tools are available"))
+        assertFalse(prompt.contains("- calculate:"))
+        assertFalse(prompt.contains("- convert_units:"))
+        assertFalse(prompt.contains("- web_search:"))
+        assertFalse(prompt.contains("- read_url:"))
+        assertFalse(prompt.contains("- search_knowledge:"))
     }
 
     @Test

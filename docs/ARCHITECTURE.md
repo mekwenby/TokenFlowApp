@@ -9,12 +9,13 @@ flowchart LR
     UI["Jetpack Compose UI"] --> VM["AppViewModel\nStateFlow + generation jobs"]
     VM --> DS["ChatDataSource"]
     DS --> Repo["ChatRepository"]
-    Repo --> DB["Room v5"]
+    Repo --> DB["Room v6"]
     Repo --> Files["App private files"]
     Repo --> Engine["DirectChatEngine"]
     Engine --> Gateway["ModelGateway adapters"]
     Gateway --> Provider["User-configured model API"]
     Engine --> Tools["WebToolExecutor"]
+    Tools --> Offline["Offline calculator / unit converter"]
     Tools --> KB["Local knowledge FTS"]
     Tools --> Exa["Exa search"]
     Tools --> Reader["URL reader / InfoFlow"]
@@ -42,7 +43,7 @@ flowchart LR
 | 本地数据 | `LocalDatabase.kt` | Room 实体、DAO、事务、外键和显式迁移 |
 | 文件与知识 | `AttachmentStore.kt`、`KnowledgeStore.kt`、`LocalAvatarStore.kt` | 私有文件生命周期、文档提取、分块、FTS、图片处理和头像 |
 | 安全与归档 | `SecretStore.kt`、`ConfigArchive.kt` | 凭据加密、加密配置导入导出 |
-| 可选工具 | `WebTools.kt`、`MimoTtsClient.kt` | Exa、URL 读取、InfoFlow、本地知识工具和语音生成 |
+| 模型与可选工具 | `OfflineCalculationTools.kt`、`WebTools.kt`、`MimoTtsClient.kt` | 本地计算与单位换算、Exa、URL 读取、InfoFlow、本地知识工具和语音生成 |
 
 ## 消息生成数据流
 
@@ -52,8 +53,8 @@ flowchart LR
 4. 用户消息及其 metadata 先写入 Room；metadata 固定本轮知识片段 ID 和视觉描述，保证重试、历史重载和分支一致。
 5. Repository 根据最近一次“清空上下文”边界构造历史，注入系统提示词、本地知识和附件内容。
 6. `DirectChatEngine` 调用选定协议的 `ModelGateway`，把不同供应商事件统一为文本、思考、工具、usage 和完成/错误事件。
-7. 工具调用由 `WebToolExecutor` 执行，结果回送给模型；过程事件持续合并到当前 Assistant metadata。
-8. 流式正文和状态实时更新 UI；完成、失败或中断时都持久化最终正文、过程、Token usage 和知识引用。
+7. 工具调用由 `WebToolExecutor` 统一分派：计算与单位换算在设备内执行，知识、搜索和网页读取按各自边界运行；结果回送给模型，过程事件持续合并到当前 Assistant metadata。
+8. 流式正文和状态实时更新 UI；完成、失败或中断时都持久化最终正文、过程、Token usage、知识引用以及生成时的助手昵称和模型身份快照。
 
 生成中的消息在进程恢复时会被标记为中断，而不是伪装成成功完成。
 
@@ -78,9 +79,11 @@ flowchart LR
 
 这样 Repository、过程 UI 和持久化不需要按供应商分叉。协议特有字段的新增应先在 `Models.kt` 中定义兼容默认值，再分别补齐请求、SSE 和非流式解析测试。
 
+`calculate` 和 `convert_units` 与联网工具共用上述定义、调用和结果通道，也计入同一 `maxToolCalls` 额度。只要额度大于零，它们就可供模型调用；额度为零时，引擎不向任何协议发送工具定义。离线执行器不发起网络请求，但工具参数由模型生成，执行结果会进入下一轮模型请求。
+
 ## 持久化边界
 
-- 结构化数据存放于 Room v5。
+- 结构化数据存放于 Room v6。
 - Assistant/User 扩展信息存放在消息行内 JSON metadata；可选字段使用默认值兼容旧记录，通常不需要修改 Room 表。
 - 附件、知识原文件和头像放在 App 私有文件目录；Room 只保存索引和路径。
 - API Key 不存入 Room，由 `SecretStore` 使用 Android Keystore 加密后写入私有 SharedPreferences。

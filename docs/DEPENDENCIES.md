@@ -25,6 +25,7 @@
 | Media3 ExoPlayer | 1.8.0 | MiMo WAV 播放与 Audio Focus | Apache-2.0 |
 | kotlinx-coroutines-android | 1.10.2 | coroutine、Flow、异步任务 | Apache-2.0 |
 | kotlinx-serialization-json | 1.9.0 | API、metadata、归档 JSON | Apache-2.0 |
+| EvalEx | 3.7.0 | 设备内 BigDecimal 科学表达式求值 | Apache-2.0 |
 | OkHttp | 4.12.0 | 模型、工具和 TTS HTTP/SSE | Apache-2.0 |
 | AndroidX Room runtime/ktx/compiler | 2.8.4 | SQLite、DAO、Migration、KSP | Apache-2.0 |
 | AndroidX ExifInterface | 1.4.2 | 相机图片方向修正 | Apache-2.0 |
@@ -54,6 +55,7 @@ Debug 变体还包含 Compose UI tooling 和 test manifest；这些组件不会�
 ## 依赖职责边界
 
 - 三种模型协议没有引入供应商 SDK，由 OkHttp、Kotlin Serialization 和本地 adapter 实现。
+- EvalEx 只负责设备内表达式求值；App 在外层限制语法、函数和复杂度，并自行实现受限单位注册表。它不发起网络请求。
 - 核心知识检索使用 Room FTS，不依赖向量数据库或 embedding SDK。
 - PDFBox/POI 只在设备上提取文本，不负责渲染文档 UI。
 - MarkdownRenderer 以 commonmark-java AST 为基础，并在 App 层执行 HTML/链接/citation 安全策略。

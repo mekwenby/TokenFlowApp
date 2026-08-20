@@ -128,6 +128,8 @@ class KnowledgeAutoRetrievalRepositoryTest {
             assertTrue(captured.systemPrompt.contains("Local knowledge mode:"))
             assertTrue(captured.systemPrompt.contains("prefer supported local evidence over web content"))
             assertTrue(captured.tools.isEmpty())
+            assertFalse(captured.systemPrompt.contains("- calculate:"))
+            assertFalse(captured.systemPrompt.contains("- convert_units:"))
             assertFalse(captured.systemPrompt.contains("- search_knowledge:"))
             assertTrue(captured.systemPrompt.contains("search_knowledge is unavailable"))
 
@@ -158,6 +160,12 @@ class KnowledgeAutoRetrievalRepositoryTest {
             val toolRequest = gateway.requests[toolRequestIndex]
             val searchTool = toolRequest.tools.single { it.name == "search_knowledge" }
             assertEquals("search_knowledge", searchTool.name)
+            assertEquals(
+                setOf("calculate", "convert_units", "search_knowledge"),
+                toolRequest.tools.map(ToolDefinition::name).toSet(),
+            )
+            assertTrue(toolRequest.systemPrompt.contains("- calculate:"))
+            assertTrue(toolRequest.systemPrompt.contains("- convert_units:"))
             assertTrue(toolRequest.systemPrompt.contains("- search_knowledge:"))
             assertEquals(
                 "string",

@@ -41,6 +41,20 @@ class ChatFormattingTest {
             ),
         )
         assertEquals(
+            GenerationActivity.CALCULATING,
+            currentGenerationActivity(
+                listOf(ProcessEvent(type = "tool_started", id = "calculation", name = "calculate")),
+                generationActive = true,
+            ),
+        )
+        assertEquals(
+            GenerationActivity.CONVERTING_UNITS,
+            currentGenerationActivity(
+                listOf(ProcessEvent(type = "tool_started", id = "conversion", name = "convert_units")),
+                generationActive = true,
+            ),
+        )
+        assertEquals(
             GenerationActivity.CALLING_TOOL,
             currentGenerationActivity(
                 listOf(ProcessEvent(type = "tool_started", id = "future", name = "future_tool")),

@@ -6,7 +6,7 @@
 
 [![Android CI](https://github.com/mekwenby/TokenFlowApp/actions/workflows/android-ci.yml/badge.svg?branch=main)](https://github.com/mekwenby/TokenFlowApp/actions/workflows/android-ci.yml)
 
-一念通流是一款原生 Android AI 客户端，使用 Kotlin、Jetpack Compose、Room 和 OkHttp 构建。应用采用 BYOK（用户自备 API Key）模式，直接连接用户配置的模型与工具服务，不依赖 TokenFlow Go 服务、PWA、`/mobile/v1` 或 `TOKENFLOW_BASE_URL`。
+一念通流是一款原生 Android AI 客户端，使用 Kotlin、Jetpack Compose、Room 和 OkHttp 构建。应用采用 BYOK（用户自备 API Key）模式，用户可通过自定义 Base URL 和 API Key，接入任何支持 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages 协议的 LLM 服务。
 
 ## 主要功能
 

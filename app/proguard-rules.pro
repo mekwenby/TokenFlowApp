@@ -1,6 +1,17 @@
 -keepattributes *Annotation*
 -dontwarn org.commonmark.**
 
+# EvalEx reads operator and function annotations from concrete classes at runtime.
+# Its rules ship inside a plain JAR, so mirror them here for Android's R8 pipeline.
+-keep class com.ezylang.evalex.operators.** { *; }
+-keep class com.ezylang.evalex.functions.** { *; }
+
+# These annotated EvalEx implementations live outside the library package.
+-keep class xyz.mek030399.tokenflow.data.PercentFunction { *; }
+-keep class xyz.mek030399.tokenflow.data.ModFunction { *; }
+-keep class xyz.mek030399.tokenflow.data.BoundedRoundFunction { *; }
+-keep class xyz.mek030399.tokenflow.data.BoundedPowerOperator { *; }
+
 # EvalEx retains this provided-only Lombok annotation in its published bytecode.
 -dontwarn lombok.Generated
 

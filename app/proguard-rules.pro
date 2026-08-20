@@ -1,6 +1,9 @@
 -keepattributes *Annotation*
 -dontwarn org.commonmark.**
 
+# EvalEx retains this provided-only Lombok annotation in its published bytecode.
+-dontwarn lombok.Generated
+
 # XMLBeans stores generated schema class names in binary .xsb resources.
 -keepnames class org.apache.poi.schemas.ooxml.system.ooxml.TypeSystemHolder
 -keepnames class org.apache.xmlbeans.metadata.system.sXMLSCHEMA.TypeSystemHolder

@@ -56,7 +56,7 @@ internal class OfflineCalculationTools(
                         put("maxLength", MAX_EXPRESSION_CHARS)
                         put(
                             "description",
-                            "ASCII arithmetic expression. Trigonometric functions use radians; use RAD(degrees) and DEG(radians) for explicit conversion.",
+                            "Required 1-256 character ASCII arithmetic expression to evaluate; no default. Trigonometric functions use radians; use RAD(degrees) and DEG(radians) for explicit conversion.",
                         )
                     }
                 }
@@ -70,13 +70,24 @@ internal class OfflineCalculationTools(
                 put("type", "object")
                 put("additionalProperties", false)
                 putJsonObject("properties") {
-                    putJsonObject("value") { put("type", "number") }
+                    putJsonObject("value") {
+                        put("type", "number")
+                        put("description", "Required JSON number to convert; no default.")
+                    }
                     putJsonObject("from_unit") {
                         put("type", "string")
+                        put(
+                            "description",
+                            "Required case-sensitive source unit identifier; no default. Use exactly one of the listed values.",
+                        )
                         put("enum", buildJsonArray { UNIT_NAMES.forEach { add(JsonPrimitive(it)) } })
                     }
                     putJsonObject("to_unit") {
                         put("type", "string")
+                        put(
+                            "description",
+                            "Required case-sensitive target unit identifier; no default. Use a listed value with the same dimension as from_unit.",
+                        )
                         put("enum", buildJsonArray { UNIT_NAMES.forEach { add(JsonPrimitive(it)) } })
                     }
                 }
@@ -539,10 +550,10 @@ internal const val CALCULATE_TOOL_NAME = "calculate"
 internal const val CONVERT_UNITS_TOOL_NAME = "convert_units"
 
 internal const val CALCULATE_TOOL_DESCRIPTION =
-    "Evaluate a deterministic offline numeric expression. Supports +, -, *, /, ^, parentheses, PI, E, and ABS, SQRT, LOG, LOG10, MIN, MAX, SUM, AVERAGE, ROUND, FLOOR, CEILING, SIN, COS, TAN, ASIN, ACOS, ATAN, ATAN2, SINH, COSH, TANH, RAD, DEG, PERCENT, and MOD. Trigonometric inputs and inverse results use radians. Use PERCENT(13) for 13 percent and MOD(a,b) for modulo; the % operator is not accepted. ROUND scale must be an integer from -100 to 100."
+    "Evaluate a deterministic numeric expression entirely on this device; no request is sent to a network service. The expression and returned JSON remain in the ongoing model conversation. Returns the decimal result as a string in result. Supports +, -, *, /, ^, parentheses, PI, E, and ABS, SQRT, LOG, LOG10, MIN, MAX, SUM, AVERAGE, ROUND, FLOOR, CEILING, SIN, COS, TAN, ASIN, ACOS, ATAN, ATAN2, SINH, COSH, TANH, RAD, DEG, PERCENT, and MOD. Trigonometric inputs and inverse results use radians. Use PERCENT(13) for 13 percent and MOD(a,b) for modulo; the % operator is not accepted. ROUND scale must be an integer from -100 to 100."
 
 internal const val CONVERT_UNITS_TOOL_DESCRIPTION =
-    "Convert a numeric value offline between canonical units of the same dimension. Unit identifiers are case-sensitive. B means byte and bit means bit; US and imperial volume units must be selected explicitly. Currency conversion is not supported."
+    "Convert a numeric value entirely on this device between canonical units of the same dimension; no request is sent to a network service. The arguments and returned JSON remain in the ongoing model conversation. Returns input, from_unit, result, and to_unit as strings. Unit identifiers are case-sensitive. B means byte and bit means bit; US and imperial volume units must be selected explicitly. Currency conversion is not supported."
 
 private val CALCULATION_CONTEXT: MathContext = MathContext.DECIMAL128
 private val ONE_HUNDRED = BigDecimal("100")

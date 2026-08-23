@@ -19,12 +19,51 @@ import org.junit.Test
 
 class WebToolsParsingTest {
     @Test
+    fun webToolSchemasDescribeNetworkRecipientsReturnsDefaultsAndLimits() {
+        val search = webSearchToolDefinition()
+        val searchProperties = search.parameters.getValue("properties").jsonObject
+        val count = searchProperties.getValue("count").jsonObject
+
+        assertTrue(search.description.contains("over the network using Exa"))
+        assertTrue(search.description.contains("Exa receives the query and requested result count"))
+        assertTrue(search.description.contains("result titles, public URLs, optional published dates, and highlights"))
+        assertTrue(searchProperties.getValue("query").jsonObject.getValue("description").jsonPrimitive.content.contains("sent to Exa"))
+        assertEquals(1, count.getValue("minimum").jsonPrimitive.int)
+        assertEquals(10, count.getValue("maximum").jsonPrimitive.int)
+        assertTrue(count.getValue("description").jsonPrimitive.content.contains("defaults to 5"))
+
+        val read = readUrlToolDefinition()
+        val urlDescription = read.parameters.getValue("properties").jsonObject
+            .getValue("url").jsonObject.getValue("description").jsonPrimitive.content
+
+        assertTrue(read.description.contains("public HTTPS URL on port 443"))
+        assertTrue(read.description.contains("target site receives the request"))
+        assertTrue(read.description.contains("additional public HTTPS port 443 subresources"))
+        assertTrue(read.description.contains("URL is also sent to InfoFlow"))
+        assertTrue(read.description.contains("InfoFlow Markdown and page metadata"))
+        assertTrue(read.description.contains("ongoing model conversation"))
+        assertTrue(read.description.contains("PDF and other non-text documents are not guaranteed"))
+        assertTrue(urlDescription.contains("no default"))
+        assertTrue(urlDescription.contains("Do not include credentials, secrets, or personal data"))
+    }
+
+    @Test
     fun knowledgeToolDescriptionSetsRetrievalAndSafetyExpectations() {
+        val definition = searchKnowledgeToolDefinition()
+        val queryDescription = definition.parameters.getValue("properties").jsonObject
+            .getValue("query").jsonObject.getValue("description").jsonPrimitive.content
+
+        assertTrue(SEARCH_KNOWLEDGE_TOOL_DESCRIPTION.contains("entirely on this device"))
+        assertTrue(SEARCH_KNOWLEDGE_TOOL_DESCRIPTION.contains("no request is sent to a network service"))
+        assertTrue(SEARCH_KNOWLEDGE_TOOL_DESCRIPTION.contains("included in the ongoing model conversation"))
         assertTrue(SEARCH_KNOWLEDGE_TOOL_DESCRIPTION.contains("before web search"))
-        assertTrue(SEARCH_KNOWLEDGE_TOOL_DESCRIPTION.contains("refine the query once"))
-        assertTrue(SEARCH_KNOWLEDGE_TOOL_DESCRIPTION.contains("untrusted reference data"))
-        assertTrue(SEARCH_KNOWLEDGE_TOOL_DESCRIPTION.contains("preserve source conflicts"))
+        assertTrue(SEARCH_KNOWLEDGE_TOOL_DESCRIPTION.contains("another tool call is available"))
+        assertTrue(SEARCH_KNOWLEDGE_TOOL_DESCRIPTION.contains("untrusted passages"))
+        assertTrue(SEARCH_KNOWLEDGE_TOOL_DESCRIPTION.contains("preserve source conflicts", ignoreCase = true))
         assertTrue(SEARCH_KNOWLEDGE_TOOL_DESCRIPTION.contains("exact document and reference"))
+        assertTrue(queryDescription.contains("on-device knowledge index"))
+        assertTrue(queryDescription.contains("no default"))
+        assertTrue(queryDescription.contains("minimum context"))
     }
 
     @Test

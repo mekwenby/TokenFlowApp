@@ -77,7 +77,7 @@ class AttachmentStore(
                     }
                 }
                 descriptions.forEachIndexed { index, description ->
-                    add(CanonicalContentPart.Text("[Image ${index + 1} description]\n$description"))
+                    add(CanonicalContentPart.Text(untrustedImageDescription(index, description)))
                 }
             }
         }
@@ -374,3 +374,6 @@ class AttachmentStore(
         )
     }
 }
+
+internal fun untrustedImageDescription(index: Int, description: String): String =
+    untrustedAttachmentData("Image ${index + 1} description", description)

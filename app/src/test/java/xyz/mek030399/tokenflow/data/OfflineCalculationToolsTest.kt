@@ -26,20 +26,40 @@ class OfflineCalculationToolsTest {
         val definitions = tools.definitions()
 
         assertEquals(listOf(CALCULATE_TOOL_NAME, CONVERT_UNITS_TOOL_NAME), definitions.map(ToolDefinition::name))
+        assertTrue(definitions.first().description.contains("entirely on this device"))
+        assertTrue(definitions.first().description.contains("no request is sent to a network service"))
+        assertTrue(definitions.first().description.contains("remain in the ongoing model conversation"))
+        assertTrue(definitions.first().description.contains("decimal result as a string"))
         val calculate = definitions.first().parameters
         assertFalse(calculate.getValue("additionalProperties").jsonPrimitive.boolean)
         val expression = calculate.getValue("properties").jsonObject.getValue("expression").jsonObject
         assertEquals(1, expression.getValue("minLength").jsonPrimitive.int)
         assertEquals(256, expression.getValue("maxLength").jsonPrimitive.int)
+        assertTrue(expression.getValue("description").jsonPrimitive.content.contains("no default"))
 
         val conversionProperties = definitions.last().parameters.getValue("properties").jsonObject
+        assertTrue(definitions.last().description.contains("entirely on this device"))
+        assertTrue(definitions.last().description.contains("remain in the ongoing model conversation"))
+        assertTrue(definitions.last().description.contains("input, from_unit, result, and to_unit as strings"))
         assertEquals("number", conversionProperties.getValue("value").jsonObject.getValue("type").jsonPrimitive.content)
+        assertTrue(
+            conversionProperties.getValue("value").jsonObject.getValue("description").jsonPrimitive.content
+                .contains("no default"),
+        )
         val fromUnits = conversionProperties.getValue("from_unit").jsonObject.getValue("enum").jsonArray
             .map { it.jsonPrimitive.content }
         val toUnits = conversionProperties.getValue("to_unit").jsonObject.getValue("enum").jsonArray
             .map { it.jsonPrimitive.content }
         assertEquals(EXPECTED_UNITS, fromUnits)
         assertEquals(EXPECTED_UNITS, toUnits)
+        assertTrue(
+            conversionProperties.getValue("from_unit").jsonObject.getValue("description").jsonPrimitive.content
+                .contains("case-sensitive source unit"),
+        )
+        assertTrue(
+            conversionProperties.getValue("to_unit").jsonObject.getValue("description").jsonPrimitive.content
+                .contains("same dimension as from_unit"),
+        )
     }
 
     @Test

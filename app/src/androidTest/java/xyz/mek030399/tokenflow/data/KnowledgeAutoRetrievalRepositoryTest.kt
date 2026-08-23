@@ -131,7 +131,8 @@ class KnowledgeAutoRetrievalRepositoryTest {
             assertFalse(captured.systemPrompt.contains("- calculate:"))
             assertFalse(captured.systemPrompt.contains("- convert_units:"))
             assertFalse(captured.systemPrompt.contains("- search_knowledge:"))
-            assertTrue(captured.systemPrompt.contains("search_knowledge is unavailable"))
+            assertFalse(captured.systemPrompt.contains("Available tools:"))
+            assertTrue(captured.systemPrompt.contains("If a schema is absent, the tool is unavailable"))
 
             val toolConversation = repository.createConversation(
                 ConversationWriteRequest(
@@ -164,9 +165,8 @@ class KnowledgeAutoRetrievalRepositoryTest {
                 setOf("calculate", "convert_units", "search_knowledge"),
                 toolRequest.tools.map(ToolDefinition::name).toSet(),
             )
-            assertTrue(toolRequest.systemPrompt.contains("- calculate:"))
-            assertTrue(toolRequest.systemPrompt.contains("- convert_units:"))
-            assertTrue(toolRequest.systemPrompt.contains("- search_knowledge:"))
+            assertFalse(toolRequest.systemPrompt.contains("Available tools:"))
+            assertTrue(toolRequest.systemPrompt.contains("Tool schemas attached to the current model turn are the sole authority"))
             assertEquals(
                 "string",
                 searchTool.parameters["properties"]!!.jsonObject["query"]!!.jsonObject["type"]!!.jsonPrimitive.content,

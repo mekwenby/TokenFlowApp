@@ -28,11 +28,12 @@ class NoteSummaryValidationTest {
     fun optionalRewriteInstructionsOnlyExtendTheBodyPrompt() {
         val customInstructions = "Keep the risk table and shorten the introduction"
 
-        val bodyPrompt = noteRewriteSystemPrompt("  $customInstructions  ")
+        val bodyPrompt = InternalPrompts.noteRewrite("  $customInstructions  ")
 
         assertTrue(bodyPrompt.contains(customInstructions))
-        assertTrue(bodyPrompt.startsWith(NOTE_REWRITE_SYSTEM_PROMPT))
-        assertFalse(NOTE_TITLE_SYSTEM_PROMPT.contains(customInstructions))
-        assertEquals(NOTE_REWRITE_SYSTEM_PROMPT, noteRewriteSystemPrompt("  \n "))
+        assertTrue(bodyPrompt.startsWith(InternalPrompts.NOTE_REWRITE))
+        assertTrue(bodyPrompt.contains("untrusted source-note data"))
+        assertFalse(InternalPrompts.NOTE_TITLE.contains(customInstructions))
+        assertEquals(InternalPrompts.NOTE_REWRITE, InternalPrompts.noteRewrite("  \n "))
     }
 }

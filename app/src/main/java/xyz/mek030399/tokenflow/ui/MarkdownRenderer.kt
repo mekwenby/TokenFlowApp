@@ -54,6 +54,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -112,6 +113,7 @@ internal const val KNOWLEDGE_CITATION_ANNOTATION_TAG = "KNOWLEDGE_CITATION"
 private val knowledgeCitationPattern = Regex("\\[\\[KB:[0-9]+]]")
 internal val LocalChatLetterSpacing = compositionLocalOf { TextUnit.Unspecified }
 internal val LocalChatLineSpacing = compositionLocalOf { ChatDisplayPreferences.DEFAULT_LINE_SPACING }
+internal val LocalNotificationDispatcher = compositionLocalOf<(String) -> Unit> { {} }
 
 internal fun scaledChatLineHeightSp(
     fontSizeSp: Float,
@@ -561,21 +563,35 @@ private fun appendChildren(node: Node, append: (Node) -> Unit) {
     }
 }
 
+internal fun normalizeCodeBlockContent(code: String): String {
+    val lines = code.lines()
+    val firstContentLine = lines.indexOfFirst { it.isNotBlank() }
+    if (firstContentLine == -1) return ""
+    val lastContentLine = lines.indexOfLast { it.isNotBlank() }
+    return lines.subList(firstContentLine, lastContentLine + 1).joinToString("\n")
+}
+
 @Composable
 private fun CodeBlock(code: String, rawLanguage: String) {
     val language = normalizeCodeLanguage(rawLanguage)
+    val normalizedCode = remember(code) { normalizeCodeBlockContent(code) }
     val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val clipboard = LocalClipboardManager.current
+    val dispatchNotification = LocalNotificationDispatcher.current
+    val copiedMessage = stringResource(R.string.copied)
     var preview by remember { mutableStateOf(false) }
-    var copied by remember { mutableStateOf(false) }
     Surface(
-        modifier = Modifier.fillMaxWidth().border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f), RoundedCornerShape(6.dp)),
+        modifier = Modifier.fillMaxWidth()
+            .testTag(UiTestTags.CODE_BLOCK)
+            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f), RoundedCornerShape(6.dp)),
         shape = RoundedCornerShape(6.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
     ) {
         Column {
             Row(
-                Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp),
+                Modifier.fillMaxWidth()
+                    .testTag(UiTestTags.CODE_BLOCK_HEADER)
+                    .padding(start = 12.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(language.ifBlank { stringResource(R.string.code) }, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
@@ -583,21 +599,20 @@ private fun CodeBlock(code: String, rawLanguage: String) {
                     TextButton(onClick = { preview = true }) { Text(stringResource(R.string.preview)) }
                 }
                 IconButton(onClick = {
-                    clipboard.setText(AnnotatedString(code))
-                    copied = true
-                }) {
+                    clipboard.setText(AnnotatedString(normalizedCode))
+                    dispatchNotification(copiedMessage)
+                }, modifier = Modifier.testTag(UiTestTags.COPY_CODE_BLOCK)) {
                     Icon(Icons.Outlined.ContentCopy, contentDescription = stringResource(R.string.copy))
                 }
             }
-            if (copied) Text(
-                stringResource(R.string.copied),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(horizontal = 12.dp),
-            )
             Text(
-                text = remember(code, language, darkTheme) { highlightedCode(code, language, darkTheme) },
-                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(12.dp),
+                text = remember(normalizedCode, language, darkTheme) {
+                    highlightedCode(normalizedCode, language, darkTheme)
+                },
+                modifier = Modifier.fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    .testTag(UiTestTags.CODE_BLOCK_CONTENT),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp,
                 lineHeight = scaledChatLineHeight(12.sp, 18.sp, LocalChatLineSpacing.current),
@@ -605,7 +620,7 @@ private fun CodeBlock(code: String, rawLanguage: String) {
             )
         }
     }
-    if (preview) HtmlPreviewDialog(code, onDismiss = { preview = false })
+    if (preview) HtmlPreviewDialog(normalizedCode, onDismiss = { preview = false })
 }
 
 internal enum class SyntaxKind {

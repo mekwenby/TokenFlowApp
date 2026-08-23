@@ -26,10 +26,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -39,12 +41,14 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -130,6 +134,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarData
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -233,8 +238,11 @@ import java.util.UUID
 import java.io.File
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private const val NOTIFICATION_AUTO_DISMISS_MILLIS = 500L
 
 object UiTestTags {
     const val MESSAGE_INPUT = "message_input"
@@ -253,6 +261,10 @@ object UiTestTags {
     const val USER_MESSAGE_AVATAR = "user_message_avatar"
     const val ASSISTANT_MESSAGE_AVATAR = "assistant_message_avatar"
     const val COPY_ASSISTANT_MESSAGE = "copy_assistant_message"
+    const val CODE_BLOCK = "code_block"
+    const val CODE_BLOCK_HEADER = "code_block_header"
+    const val CODE_BLOCK_CONTENT = "code_block_content"
+    const val COPY_CODE_BLOCK = "copy_code_block"
     const val SPEECH_ACTION = "speech_action"
     const val SPEECH_CONTROLS = "speech_controls"
     const val PROCESS_TOKEN_ROW = "process_token_row"
@@ -283,6 +295,9 @@ object UiTestTags {
     const val CHAT_LINE_SPACING = "chat_line_spacing"
     const val THEME_SELECTOR = "theme_selector"
     const val APP_BACKGROUND = "app_background"
+    const val TOP_NOTIFICATION = "top_notification"
+    const val TOP_NOTIFICATION_MESSAGE = "top_notification_message"
+    const val DISMISS_NOTIFICATION = "dismiss_notification"
     const val USER_AVATAR_PICKER = "user_avatar_picker"
     const val ASSISTANT_AVATAR_PICKER = "assistant_avatar_picker"
     const val ASSISTANT_NICKNAME = "assistant_nickname"
@@ -340,7 +355,10 @@ object UiTestTags {
 }
 
 @Composable
-fun TokenFlowApp(viewModel: AppViewModel) {
+fun TokenFlowApp(
+    viewModel: AppViewModel,
+    notificationAutoDismissMillis: Long = NOTIFICATION_AUTO_DISMISS_MILLIS,
+) {
     val context = LocalContext.current
     val displayPreferences = remember(context.applicationContext) { ChatDisplayPreferences(context.applicationContext) }
     var appTheme by remember { mutableStateOf(displayPreferences.readTheme()) }
@@ -353,6 +371,7 @@ fun TokenFlowApp(viewModel: AppViewModel) {
                 viewModel = viewModel,
                 displayPreferences = displayPreferences,
                 appTheme = appTheme,
+                notificationAutoDismissMillis = notificationAutoDismissMillis,
                 onThemeSelected = { theme ->
                     displayPreferences.writeTheme(theme)
                     appTheme = theme
@@ -367,6 +386,7 @@ private fun TokenFlowAppContent(
     viewModel: AppViewModel,
     displayPreferences: ChatDisplayPreferences,
     appTheme: AppTheme,
+    notificationAutoDismissMillis: Long,
     onThemeSelected: (AppTheme) -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -441,8 +461,30 @@ private fun TokenFlowAppContent(
     LaunchedEffect(notice) {
         notice?.let { snackbar.showSnackbar(it); viewModel.clearNotice() }
     }
+    val currentSnackbarData = snackbar.currentSnackbarData
+    LaunchedEffect(currentSnackbarData, notificationAutoDismissMillis) {
+        currentSnackbarData ?: return@LaunchedEffect
+        delay(notificationAutoDismissMillis.coerceAtLeast(0L))
+        currentSnackbarData.dismiss()
+    }
+    val notificationTopBarHeight = when {
+        state.phase == AppPhase.LOADING -> 0.dp
+        state.screen == AppScreen.CHAT -> compactChatTopBarHeight()
+        else -> 64.dp
+    }
+    val dispatchNotification: (String) -> Unit = remember(snackbar, scope) {
+        { message ->
+            scope.launch {
+                snackbar.currentSnackbarData
+                    ?.takeIf { it.visuals.message == message }
+                    ?.dismiss()
+                snackbar.showSnackbar(message)
+            }
+        }
+    }
 
     Box(Modifier.fillMaxSize()) {
+        CompositionLocalProvider(LocalNotificationDispatcher provides dispatchNotification) {
         if (state.phase == AppPhase.LOADING) {
             LoadingScreen()
         } else if (state.screen == AppScreen.KNOWLEDGE && state.knowledgePreview !is KnowledgePreviewState.Closed) {
@@ -532,7 +574,17 @@ private fun TokenFlowAppContent(
                     WorkspaceScreen(state, viewModel)
             }
         }
-        SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(12.dp))
+        }
+        SnackbarHost(
+            hostState = snackbar,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .windowInsetsPadding(
+                    WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
+                )
+                .padding(top = notificationTopBarHeight + 8.dp, start = 12.dp, end = 12.dp),
+            snackbar = { OutlinedTopNotification(it) },
+        )
     }
 
     if (showExportPassword) PasswordDialog(
@@ -594,6 +646,62 @@ private fun TokenFlowAppContent(
                 }
             },
         )
+    }
+}
+
+@Composable
+private fun OutlinedTopNotification(data: SnackbarData) {
+    val accent = if (LocalTokenFlowDarkTheme.current) Color(0xFF7ED3C1) else Color(0xFF0B7468)
+    Surface(
+        modifier = Modifier
+            .widthIn(min = 196.dp, max = 640.dp)
+            .width(IntrinsicSize.Max)
+            .testTag(UiTestTags.TOP_NOTIFICATION)
+            .semantics { liveRegion = LiveRegionMode.Polite },
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        border = BorderStroke(1.5.dp, accent),
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+    ) {
+        Box(modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
+            Icon(
+                imageVector = Icons.Outlined.Info,
+                contentDescription = null,
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 16.dp)
+                    .size(22.dp),
+                tint = accent,
+            )
+            Text(
+                text = data.visuals.message,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .fillMaxWidth()
+                    .padding(horizontal = 56.dp, vertical = 12.dp)
+                    .testTag(UiTestTags.TOP_NOTIFICATION_MESSAGE),
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            IconButton(
+                onClick = data::dismiss,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 4.dp)
+                    .testTag(UiTestTags.DISMISS_NOTIFICATION),
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Close,
+                    contentDescription = stringResource(R.string.close),
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
@@ -1241,6 +1349,11 @@ private fun TransferScreen(
 }
 
 @Composable
+private fun compactChatTopBarHeight(): Dp = with(LocalDensity.current) {
+    maxOf(48.dp, 20.sp.toDp() + 14.sp.toDp() + 2.dp)
+}
+
+@Composable
 private fun ChatWorkspace(
     state: AppUiState,
     viewModel: AppViewModel,
@@ -1552,9 +1665,7 @@ private fun ChatPane(
     val assistantNickname = state.globalSettings.assistantNickname.trim().ifBlank { DEFAULT_ASSISTANT_NICKNAME }
     val effectiveUserAvatar = if (state.config.userAvatarMode == SettingMode.INHERIT) state.globalSettings.userAvatar else state.config.userAvatar
     val effectiveAssistantAvatar = if (state.config.assistantAvatarMode == SettingMode.INHERIT) state.globalSettings.assistantAvatar else state.config.assistantAvatar
-    val compactTopBarHeight = with(LocalDensity.current) {
-        maxOf(48.dp, 20.sp.toDp() + 14.sp.toDp() + 2.dp)
-    }
+    val compactTopBarHeight = compactChatTopBarHeight()
     Column(Modifier.fillMaxSize()) {
         TopAppBar(
             modifier = Modifier.testTag(UiTestTags.CHAT_TOP_BAR),

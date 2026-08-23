@@ -20,6 +20,8 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.ClipboardManager as ComposeClipboardManager
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
@@ -32,6 +34,7 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.FontScale
@@ -163,6 +166,154 @@ class TokenFlowAppTest {
         composeRule.setContent { TokenFlowTheme { TokenFlowApp(configuredViewModel) } }
         composeRule.waitUntil(5_000) { configured.initialized }
         composeRule.onAllNodesWithTag(UiTestTags.INITIAL_IMPORT).assertCountEquals(0)
+    }
+
+    @Test
+    fun notificationUsesSingleLineAdaptiveWidthAndCanBeDismissed() {
+        val fake = UiFakeDataSource(withModel = true)
+        val viewModel = AppViewModel(fake)
+        lateinit var density: Density
+        setAppAt(
+            viewModel = viewModel,
+            size = PHONE_SIZE,
+            notificationAutoDismissMillis = 10_000L,
+        ) { currentDensity, _ -> density = currentDensity }
+        composeRule.waitUntil(5_000) { fake.initialized }
+
+        composeRule.runOnIdle { viewModel.saveSettings(viewModel.state.value.config) }
+        composeRule.waitUntil(5_000) {
+            runCatching {
+                composeRule.onAllNodesWithTag(UiTestTags.TOP_NOTIFICATION)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+
+        val notification = composeRule.onNodeWithTag(UiTestTags.TOP_NOTIFICATION).assertIsDisplayed()
+        val notificationBounds = notification.fetchSemanticsNode().boundsInRoot
+        val topBarBounds = composeRule.onNodeWithTag(UiTestTags.CHAT_TOP_BAR)
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val rootBounds = composeRule.onRoot().fetchSemanticsNode().boundsInRoot
+        assertEquals(
+            with(density) { 8.dp.toPx() },
+            notificationBounds.top - topBarBounds.bottom,
+            1f,
+        )
+        assertTrue(notificationBounds.width >= with(density) { 196.dp.toPx() } - 1f)
+        assertTrue(notificationBounds.width < rootBounds.width - with(density) { 24.dp.toPx() })
+        assertEquals(rootBounds.center.x, notificationBounds.center.x, 1f)
+        assertTrue(notificationBounds.center.y < rootBounds.center.y)
+        val messageBounds = composeRule.onNodeWithTag(UiTestTags.TOP_NOTIFICATION_MESSAGE)
+            .fetchSemanticsNode()
+            .boundsInRoot
+        assertEquals(notificationBounds.center.x, messageBounds.center.x, 1f)
+        assertEquals(
+            LiveRegionMode.Polite,
+            notification.fetchSemanticsNode().config[SemanticsProperties.LiveRegion],
+        )
+        val shortMessageLayouts = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithTag(UiTestTags.TOP_NOTIFICATION_MESSAGE)
+            .performSemanticsAction(SemanticsActions.GetTextLayoutResult) { action ->
+                action(shortMessageLayouts)
+        }
+        assertEquals(1, shortMessageLayouts.single().layoutInput.maxLines)
+        assertEquals(TextAlign.Center, shortMessageLayouts.single().layoutInput.style.textAlign)
+        assertEquals(1, shortMessageLayouts.single().lineCount)
+
+        composeRule.onNodeWithTag(UiTestTags.DISMISS_NOTIFICATION)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+        composeRule.waitUntil(5_000) {
+            runCatching {
+                composeRule.onAllNodesWithTag(UiTestTags.TOP_NOTIFICATION)
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+            }.getOrDefault(false)
+        }
+        composeRule.waitUntil(5_000) { viewModel.state.value.notice == null }
+
+        composeRule.runOnIdle { viewModel.reportCameraCaptureFailure() }
+        composeRule.waitUntil(5_000) {
+            runCatching {
+                composeRule.onAllNodesWithTag(UiTestTags.TOP_NOTIFICATION)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+        val expandedNotification = composeRule.onNodeWithTag(UiTestTags.TOP_NOTIFICATION)
+            .assertIsDisplayed()
+        assertTrue(expandedNotification.fetchSemanticsNode().boundsInRoot.width > notificationBounds.width)
+        val longMessageLayouts = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithTag(UiTestTags.TOP_NOTIFICATION_MESSAGE)
+            .performSemanticsAction(SemanticsActions.GetTextLayoutResult) { action ->
+                action(longMessageLayouts)
+            }
+        assertEquals(1, longMessageLayouts.single().layoutInput.maxLines)
+        assertEquals(1, longMessageLayouts.single().lineCount)
+        composeRule.onNodeWithTag(UiTestTags.DISMISS_NOTIFICATION).performClick()
+        composeRule.waitUntil(5_000) {
+            runCatching {
+                composeRule.onAllNodesWithTag(UiTestTags.TOP_NOTIFICATION)
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+            }.getOrDefault(false)
+        }
+        composeRule.waitUntil(5_000) { viewModel.state.value.notice == null }
+    }
+
+    @Test
+    fun notificationAutomaticallyDismissesAfterHalfSecond() {
+        val fake = UiFakeDataSource(withModel = true)
+        val viewModel = AppViewModel(fake)
+        composeRule.setContent { TokenFlowTheme { TokenFlowApp(viewModel) } }
+        composeRule.waitUntil(5_000) { fake.initialized }
+
+        composeRule.runOnIdle {
+            viewModel.saveSettings(viewModel.state.value.config)
+            assertNotNull(viewModel.state.value.notice)
+        }
+        composeRule.waitUntil(2_000) { viewModel.state.value.notice == null }
+        composeRule.waitUntil(2_000) {
+            composeRule.onAllNodesWithTag(UiTestTags.TOP_NOTIFICATION)
+                .fetchSemanticsNodes()
+                .isEmpty()
+        }
+    }
+
+    @Test
+    fun codeBlockCopyUsesTopNotificationInsteadOfInlineStatus() {
+        val conversation = Conversation(id = "conversation-code-copy", title = "Code copy", model = "model-1")
+        val assistantMessage = ChatMessage(
+            id = "assistant-code-copy",
+            conversationId = conversation.id,
+            role = "assistant",
+            content = "```json\n{\"status\": \"ok\"}\n```",
+        )
+        val fake = UiFakeDataSource(withModel = true).apply {
+            conversations += conversation
+            seedMessages(conversation.id, listOf(assistantMessage))
+        }
+        val viewModel = AppViewModel(fake)
+        val copied = InstrumentationRegistry.getInstrumentation().targetContext
+            .getString(xyz.mek030399.tokenflow.R.string.copied)
+
+        setAppAt(viewModel, PHONE_SIZE)
+        composeRule.waitUntil(5_000) { fake.initialized }
+        composeRule.runOnIdle { viewModel.openConversation(conversation.id) }
+        composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages.size == 1 }
+
+        composeRule.onNodeWithTag(UiTestTags.COPY_CODE_BLOCK).performScrollTo().performClick()
+        composeRule.waitUntil(5_000) {
+            composeRule.onAllNodesWithTag(UiTestTags.TOP_NOTIFICATION).fetchSemanticsNodes().isNotEmpty()
+        }
+
+        val notification = composeRule.onNodeWithTag(UiTestTags.TOP_NOTIFICATION).assertIsDisplayed()
+        val copiedText = composeRule.onNodeWithText(copied).assertIsDisplayed()
+        composeRule.onAllNodesWithText(copied).assertCountEquals(1)
+        assertNodeWithin(copiedText, notification)
     }
 
     @Test
@@ -1708,6 +1859,69 @@ class TokenFlowAppTest {
         }
     }
 
+    @Suppress("DEPRECATION")
+    @Test
+    fun markdownCodeBlockTrimsOuterBlankLinesAndUsesCompactVerticalPadding() {
+        val markdown = listOf(
+            "```python",
+            "",
+            " \t",
+            "def greet(name: str) -> str:",
+            "    return f\"Hello, {name}!\"",
+            "",
+            "print(greet(\"TokenFlow\"))",
+            "\t ",
+            "",
+            "```",
+        ).joinToString("\n")
+        val expectedCode =
+            "def greet(name: str) -> str:\n    return f\"Hello, {name}!\"\n\nprint(greet(\"TokenFlow\"))"
+        val clipboard = FakeComposeClipboardManager()
+        var notification: String? = null
+        lateinit var density: Density
+        val copied = InstrumentationRegistry.getInstrumentation().targetContext
+            .getString(xyz.mek030399.tokenflow.R.string.copied)
+
+        composeRule.setContent {
+            CompositionLocalProvider(
+                LocalClipboardManager provides clipboard,
+                LocalNotificationDispatcher provides { notification = it },
+            ) {
+                TokenFlowTheme {
+                    density = LocalDensity.current
+                    MarkdownContent(markdown)
+                }
+            }
+        }
+
+        val block = composeRule.onNodeWithTag(UiTestTags.CODE_BLOCK).assertIsDisplayed()
+        val header = composeRule.onNodeWithTag(UiTestTags.CODE_BLOCK_HEADER).assertIsDisplayed()
+        val content = composeRule.onNodeWithTag(UiTestTags.CODE_BLOCK_CONTENT)
+            .assertIsDisplayed()
+            .assertTextEquals(expectedCode)
+        val layouts = mutableListOf<TextLayoutResult>()
+        content.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { action ->
+            action(layouts)
+        }
+
+        assertEquals(4, layouts.single().lineCount)
+        val blockBounds = block.fetchSemanticsNode().boundsInRoot
+        val headerBounds = header.fetchSemanticsNode().boundsInRoot
+        val contentBounds = content.fetchSemanticsNode().boundsInRoot
+        val expectedVerticalPadding = with(density) { 6.dp.toPx() }
+        assertEquals(expectedVerticalPadding, contentBounds.top - headerBounds.bottom, 1f)
+        assertEquals(expectedVerticalPadding, blockBounds.bottom - contentBounds.bottom, 1f)
+
+        composeRule.onNodeWithTag(UiTestTags.COPY_CODE_BLOCK).performClick()
+        composeRule.runOnIdle {
+            assertEquals(expectedCode, clipboard.copiedText)
+            assertEquals(copied, notification)
+        }
+        composeRule.onAllNodesWithText(copied).assertCountEquals(0)
+        assertEquals(blockBounds, block.fetchSemanticsNode().boundsInRoot)
+        assertEquals(contentBounds, content.fetchSemanticsNode().boundsInRoot)
+    }
+
     @Test
     fun appLogoKeepsContrastBrandColorsAndGeometryAcrossThemesAndSizes() {
         composeRule.setContent {
@@ -2561,6 +2775,7 @@ class TokenFlowAppTest {
         viewModel: AppViewModel,
         size: DpSize,
         fontScale: Float = 1f,
+        notificationAutoDismissMillis: Long = 10_000L,
         onLayoutEnvironment: (Density, Int) -> Unit = { _, _ -> },
     ) {
         composeRule.setContent {
@@ -2568,7 +2783,12 @@ class TokenFlowAppTest {
                 DeviceConfigurationOverride(DeviceConfigurationOverride.FontScale(fontScale)) {
                     val density = LocalDensity.current
                     onLayoutEnvironment(density, TopAppBarDefaults.windowInsets.getTop(density))
-                    TokenFlowTheme { TokenFlowApp(viewModel) }
+                    TokenFlowTheme {
+                        TokenFlowApp(
+                            viewModel = viewModel,
+                            notificationAutoDismissMillis = notificationAutoDismissMillis,
+                        )
+                    }
                 }
             }
         }
@@ -2810,6 +3030,20 @@ private fun SemanticsNodeInteraction.performClickOnText(text: String): Semantics
     val offset = layoutResult.layoutInput.text.text.indexOf(text)
     check(offset >= 0) { "Text '$text' is missing from the layout" }
     return performTouchInput { click(layoutResult.getBoundingBox(offset).center) }
+}
+
+@Suppress("DEPRECATION")
+private class FakeComposeClipboardManager : ComposeClipboardManager {
+    private var value: AnnotatedString? = null
+
+    val copiedText: String?
+        get() = value?.text
+
+    override fun setText(annotatedString: AnnotatedString) {
+        value = annotatedString
+    }
+
+    override fun getText(): AnnotatedString? = value
 }
 
 private fun controlledToolFlow(

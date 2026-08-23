@@ -8,6 +8,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.commonmark.node.FencedCodeBlock
 import org.commonmark.parser.Parser
 
 class MarkdownSafetyTest {
@@ -221,6 +222,41 @@ class MarkdownSafetyTest {
             rendered.getStringAnnotations("URL", 0, rendered.length).map { it.item },
         )
         assertEquals("Source: $url.", rendered.text)
+    }
+
+    @Test
+    fun codeBlockContentRemovesFencedLiteralTrailingNewline() {
+        val document = parser.parse("```kotlin\nval answer = 42\n```")
+        val literal = (document.firstChild as FencedCodeBlock).literal
+
+        assertEquals("val answer = 42\n", literal)
+        assertEquals("val answer = 42", normalizeCodeBlockContent(literal))
+    }
+
+    @Test
+    fun codeBlockContentRemovesConsecutiveBlankBoundaryLines() {
+        val code = "\n  \n\t\nfirst\nsecond\n\t\n   \n"
+
+        assertEquals("first\nsecond", normalizeCodeBlockContent(code))
+    }
+
+    @Test
+    fun codeBlockContentKeepsInternalBlankLines() {
+        val code = "first\n\n  \n\t\nlast"
+
+        assertEquals(code, normalizeCodeBlockContent(code))
+    }
+
+    @Test
+    fun codeBlockContentKeepsIndentationAndTrailingWhitespaceOnContentLines() {
+        val code = "  first  \n\tlast\t"
+
+        assertEquals(code, normalizeCodeBlockContent(code))
+    }
+
+    @Test
+    fun codeBlockContentNormalizesAllBlankInputToEmpty() {
+        assertEquals("", normalizeCodeBlockContent("\n \n\t\n  \t\n"))
     }
 
     @Test

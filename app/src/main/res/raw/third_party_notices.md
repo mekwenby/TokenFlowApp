@@ -1,6 +1,6 @@
 # Third-party notices
 
-This document lists the resolved third-party runtime artifacts distributed with TokenFlow 2.4.7. Copyright remains with the respective owners. The license texts and attribution notices below are provided for offline review and do not replace the license files in the corresponding upstream source distributions.
+This document lists the resolved third-party runtime artifacts distributed with TokenFlow 2.4.8. Copyright remains with the respective owners. The license texts and attribution notices below are provided for offline review and do not replace the license files in the corresponding upstream source distributions.
 
 ## Apache License 2.0 components
 

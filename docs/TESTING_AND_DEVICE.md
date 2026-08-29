@@ -34,7 +34,7 @@
 
 这会验证 JVM 测试和 Lint，并构建 App/Test APK，但不会连接设备。
 
-涉及 JSch、反射加载或 R8 规则时，还必须执行 `.\gradlew.bat -PfdroidBuild=true assembleRelease --no-configuration-cache`，并用 `apkanalyzer` 检查压缩后的未签名 APK。正式发布工作流会将 JSch 依赖 JAR 的完整类集合与最终 DEX 比较，缺少任何运行时类都会阻止发布。
+涉及 JSch、反射加载或 R8 规则时，还必须执行 `.\gradlew.bat -PfdroidBuild=true assembleRelease --no-configuration-cache`，并检查压缩后的未签名 APK。正式发布工作流会将 JSch 依赖 JAR 的完整类集合与 `mapping.txt` 比较，并用 `apkanalyzer` 验证最终 DEX；缺少或重命名任何运行时类都会阻止发布。
 
 完整仓库门禁还包括从仓库根目录执行：
 

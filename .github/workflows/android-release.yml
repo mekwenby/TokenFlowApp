@@ -269,25 +269,36 @@ jobs:
             echo "The resolved JSch 2.28.0 JAR is unavailable for R8 verification." >&2
             exit 1
           }
+          mapping_path="app/build/outputs/mapping/release/mapping.txt"
+          [[ -s "$mapping_path" ]] || {
+            echo "R8 mapping.txt is unavailable for JSch verification." >&2
+            exit 1
+          }
           expected_jsch_classes="$(mktemp)"
-          actual_jsch_classes="$(mktemp)"
-          trap 'rm -f -- "$expected_jsch_classes" "$actual_jsch_classes"' EXIT
+          preserved_jsch_classes="$(mktemp)"
+          trap 'rm -f -- "$expected_jsch_classes" "$preserved_jsch_classes"' EXIT
           jar tf "$jsch_jar" |
             sed -n 's#^com/jcraft/jsch/\(.*\)\.class$#com.jcraft.jsch.\1#p' |
+            tr '/' '.' |
             sort -u > "$expected_jsch_classes"
-          "$apkanalyzer" dex packages --defined-only "$APK_PATH" |
-            awk '$1 == "C" && $NF ~ /^com\.jcraft\.jsch\./ { print $NF }' |
-            sort -u > "$actual_jsch_classes"
+          awk -F ' -> ' '
+            /^com\.jcraft\.jsch\..* -> .*:$/ {
+              target = $2
+              sub(/:$/, "", target)
+              if ($1 == target) print $1
+            }
+          ' "$mapping_path" | sort -u > "$preserved_jsch_classes"
           [[ -s "$expected_jsch_classes" ]] || {
             echo "No JSch classes were found in the resolved dependency." >&2
             exit 1
           }
-          missing_jsch_classes="$(comm -23 "$expected_jsch_classes" "$actual_jsch_classes")"
+          missing_jsch_classes="$(comm -23 "$expected_jsch_classes" "$preserved_jsch_classes")"
           if [[ -n "$missing_jsch_classes" ]]; then
             echo "R8 removed or renamed JSch runtime classes:" >&2
             printf '%s\n' "$missing_jsch_classes" >&2
             exit 1
           fi
+          "$apkanalyzer" dex code --class com.jcraft.jsch.jce.Random "$APK_PATH" > /dev/null
           echo "Release APK retains $(wc -l < "$expected_jsch_classes") JSch runtime classes."
 
       - name: Package release assets

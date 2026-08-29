@@ -15,6 +15,14 @@
 # EvalEx retains this provided-only Lombok annotation in its published bytecode.
 -dontwarn lombok.Generated
 
+# JSch resolves SSH implementations from class names stored in its runtime config.
+-keep,allowoptimization class com.jcraft.jsch.** { *; }
+
+# Optional JSch desktop connectors are not used by the Android public-key flow.
+-dontwarn com.sun.jna.**
+-dontwarn org.ietf.jgss.**
+-dontwarn org.newsclub.net.unix.**
+
 # XMLBeans stores generated schema class names in binary .xsb resources.
 -keepnames class org.apache.poi.schemas.ooxml.system.ooxml.TypeSystemHolder
 -keepnames class org.apache.xmlbeans.metadata.system.sXMLSCHEMA.TypeSystemHolder

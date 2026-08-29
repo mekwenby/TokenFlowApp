@@ -224,8 +224,13 @@ jobs:
           fi
           apksigner="$android_sdk/build-tools/36.0.0/apksigner"
           aapt2="$android_sdk/build-tools/36.0.0/aapt2"
+          apkanalyzer="$android_sdk/cmdline-tools/latest/bin/apkanalyzer"
+          if [[ ! -x "$apkanalyzer" ]]; then
+            apkanalyzer="$(command -v apkanalyzer || true)"
+          fi
           [[ -x "$apksigner" ]] || { echo "apksigner 36.0.0 is unavailable." >&2; exit 1; }
           [[ -x "$aapt2" ]] || { echo "aapt2 36.0.0 is unavailable." >&2; exit 1; }
+          [[ -n "$apkanalyzer" && -x "$apkanalyzer" ]] || { echo "apkanalyzer is unavailable." >&2; exit 1; }
 
           cert_output="$("$apksigner" verify --verbose --print-certs "$APK_PATH")"
           actual_cert="$(
@@ -255,6 +260,35 @@ jobs:
             echo "Release APK has an unexpected versionName." >&2
             exit 1
           }
+
+          jsch_jar="$(
+            find "$HOME/.gradle/caches/modules-2/files-2.1/com.github.mwiede/jsch/2.28.0" \
+              -type f -name 'jsch-2.28.0.jar' -print -quit
+          )"
+          [[ -n "$jsch_jar" && -s "$jsch_jar" ]] || {
+            echo "The resolved JSch 2.28.0 JAR is unavailable for R8 verification." >&2
+            exit 1
+          }
+          expected_jsch_classes="$(mktemp)"
+          actual_jsch_classes="$(mktemp)"
+          trap 'rm -f -- "$expected_jsch_classes" "$actual_jsch_classes"' EXIT
+          jar tf "$jsch_jar" |
+            sed -n 's#^com/jcraft/jsch/\(.*\)\.class$#com.jcraft.jsch.\1#p' |
+            sort -u > "$expected_jsch_classes"
+          "$apkanalyzer" dex packages --defined-only "$APK_PATH" |
+            awk '$1 == "C" && $NF ~ /^com\.jcraft\.jsch\./ { print $NF }' |
+            sort -u > "$actual_jsch_classes"
+          [[ -s "$expected_jsch_classes" ]] || {
+            echo "No JSch classes were found in the resolved dependency." >&2
+            exit 1
+          }
+          missing_jsch_classes="$(comm -23 "$expected_jsch_classes" "$actual_jsch_classes")"
+          if [[ -n "$missing_jsch_classes" ]]; then
+            echo "R8 removed or renamed JSch runtime classes:" >&2
+            printf '%s\n' "$missing_jsch_classes" >&2
+            exit 1
+          fi
+          echo "Release APK retains $(wc -l < "$expected_jsch_classes") JSch runtime classes."
 
       - name: Package release assets
         shell: bash

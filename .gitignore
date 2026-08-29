@@ -24,6 +24,7 @@ local.properties
 .env.*
 
 # Generated packages and local archives
+/output/
 *.apk
 *.aab
 archive/legacy-apks/*.apk

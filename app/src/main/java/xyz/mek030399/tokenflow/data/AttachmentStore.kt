@@ -16,6 +16,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.net.URLConnection
 import java.util.Base64
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +33,7 @@ class AttachmentStore(
 ) {
     private val appContext = context.applicationContext
     private val root = File(appContext.filesDir, "chat_attachments").apply { mkdirs() }
+    private val cloudDeliveryCache = File(appContext.filesDir, "cloud_artifact_delivery_cache").apply { mkdirs() }
     private val cameraDraftRoot = File(appContext.cacheDir, CameraCaptureStore.DIRECTORY_NAME).apply { mkdirs() }
 
     init {
@@ -59,6 +61,74 @@ class AttachmentStore(
 
     suspend fun forMessages(messageIds: List<String>): List<MessageAttachment> =
         if (messageIds.isEmpty()) emptyList() else dao.attachmentsForMessages(messageIds).map(MessageAttachmentEntity::toDomain)
+
+    suspend fun persistCloudArtifact(
+        messageId: String,
+        displayName: String,
+        bytes: ByteArray,
+        declaredMimeType: String? = null,
+        attachmentId: String = UUID.randomUUID().toString(),
+    ): MessageAttachment =
+        withContext(Dispatchers.IO) {
+            dao.attachment(attachmentId)?.let { existing ->
+                require(existing.messageId == messageId) { "Artifact attachment belongs to another message" }
+                return@withContext existing.toDomain()
+            }
+            require(bytes.isNotEmpty()) { "Remote artifact is empty" }
+            val existing = dao.attachmentsForMessage(messageId).map(MessageAttachmentEntity::toDomain)
+            require(existing.sumOf(MessageAttachment::sizeBytes) + bytes.size <= MAX_TOTAL_BYTES) {
+                "Assistant artifacts exceed the 20 MiB total limit"
+            }
+            val safeDisplayName = displayName.substringAfterLast('/').substringAfterLast('\\')
+                .filterNot(Char::isISOControl).trim().take(160).ifBlank { "artifact.bin" }
+            val extension = safeDisplayName.substringAfterLast('.', "bin").lowercase()
+                .filter(Char::isLetterOrDigit).take(12).ifBlank { "bin" }
+            val output = File(root, "${UUID.randomUUID()}.$extension")
+            try {
+                output.writeBytes(bytes)
+                MessageAttachment(
+                    id = attachmentId,
+                    messageId = messageId,
+                    fileName = safeDisplayName,
+                    mimeType = declaredMimeType?.takeIf(String::isNotBlank)
+                        ?: URLConnection.guessContentTypeFromName(safeDisplayName)
+                        ?: "application/octet-stream",
+                    kind = AttachmentKind.DOCUMENT,
+                    storedPath = output.absolutePath,
+                    sizeBytes = output.length(),
+                    status = AttachmentStatus.READY,
+                ).also { dao.putAttachments(listOf(it.toEntity())) }
+            } catch (failure: Throwable) {
+                output.delete()
+                throw failure
+            }
+        }
+
+    suspend fun cacheCloudArtifact(source: File): String = withContext(Dispatchers.IO) {
+        require(source.isFile) { "Cloud artifact cache source is unavailable" }
+        val extension = source.extension.lowercase().filter(Char::isLetterOrDigit).take(12).ifBlank { "bin" }
+        val target = File(cloudDeliveryCache, "${UUID.randomUUID()}.$extension")
+        try {
+            source.inputStream().buffered().use { input ->
+                target.outputStream().buffered().use(input::copyTo)
+            }
+            target.absolutePath
+        } catch (failure: Throwable) {
+            target.delete()
+            throw failure
+        }
+    }
+
+    suspend fun deleteCloudArtifactCache(path: String?) = withContext(Dispatchers.IO) {
+        val file = path?.let(::File) ?: return@withContext
+        val candidate = file.canonicalFile
+        val allowedRoots = listOf(
+            cloudDeliveryCache.canonicalFile,
+            File(appContext.cacheDir, "infinite_cloud_mcp_artifacts").canonicalFile,
+            File(appContext.filesDir, "infinite_cloud_artifact_cache").canonicalFile,
+        )
+        if (candidate.parentFile?.let(allowedRoots::contains) == true) candidate.delete()
+    }
 
     suspend fun canonicalParts(message: ChatMessage, descriptions: List<String> = emptyList()): List<CanonicalContentPart> =
         withContext(Dispatchers.IO) {

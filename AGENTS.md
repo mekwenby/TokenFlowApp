@@ -11,7 +11,7 @@
 - Application ID and Kotlin namespace: `xyz.mek030399.tokenflow`.
 - Debug application ID: `xyz.mek030399.tokenflow.debug`.
 - The project is a single Gradle module, `:app`, using Kotlin, Jetpack Compose, Room, KSP, and OkHttp.
-- Room is version 5 with explicit migrations `1 -> 2 -> 3 -> 4 -> 5`. Never add destructive fallback. Commit every new schema snapshot under `app/schemas/`.
+- Room is version 7 with explicit migrations `1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7`. Never add destructive fallback. Commit every new schema snapshot under `app/schemas/`.
 
 ## Build And Test
 

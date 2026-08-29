@@ -474,6 +474,13 @@ data class ToolExecutionResult(
     val citations: List<KnowledgeCitation> = emptyList(),
 )
 
+interface ToolSession {
+    val definitions: List<ToolDefinition>
+    val initializationWarnings: List<ProcessEvent> get() = emptyList()
+    suspend fun execute(call: CanonicalToolCall): ToolExecutionResult
+    suspend fun close() = Unit
+}
+
 interface ToolRunner {
     fun definitions(enableSearch: Boolean, enableRead: Boolean): List<ToolDefinition>
     suspend fun execute(call: CanonicalToolCall, enableSearch: Boolean, enableRead: Boolean): ToolExecutionResult
@@ -485,6 +492,16 @@ interface ToolRunner {
     ): ToolExecutionResult = execute(call, enableSearch, enableRead)
 
     fun definitions(options: ToolOptions): List<ToolDefinition> = definitions(options.enableSearch, options.enableRead)
+    suspend fun prepare(options: ToolOptions): List<ToolDefinition> = definitions(options)
+
+    suspend fun openSession(options: ToolOptions): ToolSession {
+        val runner = this
+        val preparedDefinitions = prepare(options)
+        return object : ToolSession {
+            override val definitions = preparedDefinitions
+            override suspend fun execute(call: CanonicalToolCall) = runner.execute(call, options)
+        }
+    }
 
     suspend fun execute(call: CanonicalToolCall, options: ToolOptions): ToolExecutionResult =
         execute(call, options.enableSearch, options.enableRead, options.urlReaderBackend)
@@ -497,6 +514,8 @@ class WebToolExecutor(
     private val json: Json = DirectApiTransport.defaultJson,
     private val infoFlowReader: UrlContentReader? = null,
     private val knowledgeStore: KnowledgeStore? = null,
+    private val infiniteCloudTools: InfiniteCloudToolExecutor? = null,
+    private val infiniteCloudMcp: InfiniteCloudMcpExecutor? = null,
 ) : ToolRunner {
     private val offlineTools = OfflineCalculationTools(json)
 
@@ -515,6 +534,34 @@ class WebToolExecutor(
         if (options.enableKnowledge && knowledgeStore != null) add(
             searchKnowledgeToolDefinition(),
         )
+        infiniteCloudTools?.let { addAll(it.definitions(options)) }
+    }
+
+    override suspend fun prepare(options: ToolOptions): List<ToolDefinition> = buildList {
+        addAll(definitions(options))
+        infiniteCloudMcp?.let { addAll(it.prepare(options)) }
+    }
+
+    override suspend fun openSession(options: ToolOptions): ToolSession {
+        val fixedDefinitions = definitions(options)
+        val mcpPreparation = infiniteCloudMcp?.prepareSession(options)
+        val executor = this
+        return object : ToolSession {
+            override val definitions = fixedDefinitions + mcpPreparation?.definitions.orEmpty()
+            override val initializationWarnings = mcpPreparation?.warnings.orEmpty()
+
+            override suspend fun execute(call: CanonicalToolCall): ToolExecutionResult {
+                if (call.name.startsWith("mcp__")) {
+                    return infiniteCloudMcp?.execute(call, options, mcpPreparation?.bindings.orEmpty())
+                        ?: ToolExecutionResult(error("MCP is unavailable"), false)
+                }
+                return executor.execute(call, options)
+            }
+
+            override suspend fun close() {
+                mcpPreparation?.close()
+            }
+        }
     }
 
     override suspend fun execute(call: CanonicalToolCall, enableSearch: Boolean, enableRead: Boolean): ToolExecutionResult {
@@ -586,6 +633,14 @@ class WebToolExecutor(
     }
 
     override suspend fun execute(call: CanonicalToolCall, options: ToolOptions): ToolExecutionResult {
+        if (call.name.startsWith("cloud_")) {
+            return infiniteCloudTools?.execute(call, options)
+                ?: ToolExecutionResult(error("Infinite Cloud is unavailable"), false)
+        }
+        if (call.name.startsWith("mcp__")) {
+            return infiniteCloudMcp?.execute(call, options)
+                ?: ToolExecutionResult(error("MCP is unavailable"), false)
+        }
         if (call.name != "search_knowledge") return execute(
             call,
             options.enableSearch,

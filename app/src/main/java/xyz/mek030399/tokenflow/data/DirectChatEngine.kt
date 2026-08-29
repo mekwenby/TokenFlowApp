@@ -36,11 +36,18 @@ class DirectChatEngine(
         var usedToolCalls = 0
         var thinkingEffort = initial.thinkingEffort
         var round = 0
+        val toolBudget = maxToolCalls.coerceIn(0, 20)
+        val toolSession = if (toolBudget > 0) tools.openSession(options) else null
 
-        while (true) {
+        try {
+            toolSession?.initializationWarnings.orEmpty().forEach { warning ->
+                processEvents += warning
+                emit(EngineEvent.Process(warning))
+            }
+            while (true) {
             round += 1
-            val definitions = if (usedToolCalls < maxToolCalls.coerceIn(0, 20)) {
-                tools.definitions(options)
+            val definitions = if (usedToolCalls < toolBudget) {
+                toolSession?.definitions.orEmpty()
             } else {
                 emptyList()
             }
@@ -142,7 +149,7 @@ class DirectChatEngine(
             if (completedCalls.isEmpty()) break
 
             completedCalls.forEach { call ->
-                val canExecute = usedToolCalls < maxToolCalls.coerceIn(0, 20)
+                val canExecute = usedToolCalls < toolBudget
                 val started = ProcessEvent(
                     type = "tool_started",
                     id = call.id,
@@ -155,7 +162,7 @@ class DirectChatEngine(
 
                 val result = if (canExecute) {
                     usedToolCalls += 1
-                    tools.execute(call, options)
+                    requireNotNull(toolSession).execute(call)
                 } else {
                     ToolExecutionResult("{\"error\":\"Maximum tool call limit reached\"}", false)
                 }
@@ -181,9 +188,12 @@ class DirectChatEngine(
                     toolName = call.name,
                 )
             }
-        }
+            }
 
-        emit(EngineEvent.Done(output.toString(), totalUsage, processEvents.toList()))
+            emit(EngineEvent.Done(output.toString(), totalUsage, processEvents.toList()))
+        } finally {
+            toolSession?.close()
+        }
     }
 
     suspend fun generateTitle(request: ModelCallRequest): String {

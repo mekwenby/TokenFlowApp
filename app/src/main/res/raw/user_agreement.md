@@ -1,6 +1,6 @@
-**Agreement version: 1.1**
+**Agreement version: 1.2**
 
-**Effective date: August 18, 2026**
+**Effective date: August 28, 2026**
 
 Welcome to TokenFlow (the "App"). This agreement is available under About > User agreement and is not presented as a mandatory first-launch checkbox. Please read it before using network-connected features. Rights granted by the App's free and open-source licenses are independent of this agreement and are described in Section 8.
 
@@ -17,11 +17,12 @@ Welcome to TokenFlow (the "App"). This agreement is available under About > User
 2. Models, search results, web content, and generated speech come from services that you select, configure, or enable. The App developer does not control their content, prices, quotas, or availability unless expressly stated otherwise.
 3. Some optional tools can be invoked by you or by a configured model during a conversation. A separate confirmation may not be shown before every invocation.
 4. Features and compatibility can change between releases. No promise is made that every external service will remain available, free, or compatible.
+5. Infinite Cloud lets the App connect directly to a Linux server by SSH and lets a configured model run shell commands, Python, JavaScript, file operations, background tasks, and MCP tools. Once enabled, these operations can run without confirmation for each command.
 
 ## 3. API keys, accounts, and charges
 
 1. You are responsible for obtaining accounts and credentials lawfully and for having permission to use each configured endpoint.
-2. Protect API keys, archive passwords, and device access. If a credential may have been exposed, revoke or replace it at the corresponding provider.
+2. Protect API keys, SSH private keys and passphrases, MCP secrets, archive passwords, and device access. If a credential may have been exposed, revoke or replace it at the corresponding provider or server.
 3. The App uses Android security facilities to protect configured secrets and encrypts configuration archives with the password you choose. No security measure can eliminate all risks of disclosure, device loss, or data loss.
 4. Subscription fees, usage charges, network costs, taxes, and refunds are matters between you and the relevant service operator.
 
@@ -43,9 +44,11 @@ Welcome to TokenFlow (the "App"). This agreement is available under About > User
    - A URL and related request data can be sent to InfoFlow, sent to the target website, or fetched directly by the App.
    - Search results and extracted web content can be forwarded to the configured model as tool results.
    - Text selected for speech and speech parameters are sent to Xiaomi MiMo.
+   - When Infinite Cloud is enabled, every attachment on the current user message is uploaded to the selected Linux server before model generation. Commands, scripts, file content, task metadata, and logs can also be transferred over SSH.
+   - MCP tool arguments and results are exchanged with the configured remote MCP process or endpoint. Configured MCP environment values or HTTP headers are disclosed to that process or endpoint as required to connect.
 3. External operators can log, process, retain, or transfer received data under their own policies. Review those policies before enabling a service.
 4. Temporary results such as audio files can be stored in the App cache and removed by Android or the App. Exported encrypted configuration files are under your control outside private App storage.
-5. Deleting local content or uninstalling the App affects only copies controlled by the App. It does not delete copies retained by external services or in files you exported.
+5. Deleting local content or uninstalling the App affects only copies controlled by the App. It does not delete copies retained by external services, on an Infinite Cloud server, or in files you exported. Deleting a server configuration does not delete its remote task directories.
 
 ## 6. External services and links
 
@@ -60,6 +63,7 @@ Welcome to TokenFlow (the "App"). This agreement is available under About > User
 2. AI output is not medical, legal, financial, investment, employment, admissions, safety, or other professional advice and should not be the sole basis for a high-risk decision.
 3. Check output against reliable sources and qualified professionals where appropriate. You are responsible for deciding whether output is suitable for your intended use.
 4. Rights in output can depend on applicable law, provider terms, input rights, and the particular use. The App developer does not guarantee exclusive or complete rights in any output.
+5. Infinite Cloud does not add a command blacklist, directory sandbox, `sudo` block, or per-command approval. The selected Unix account is the only permission boundary. A model can make destructive changes, disclose data, consume paid resources, access networks, or execute malicious instructions within that account's permissions. Use a dedicated least-privilege account and review the server and MCP software you enable.
 
 ## 8. Free and open-source licenses
 
@@ -72,7 +76,7 @@ Welcome to TokenFlow (the "App"). This agreement is available under About > User
 ## 9. Changes, availability, and stopping use
 
 1. Future versions can be changed, discontinued, or left without maintenance or technical support because of feature work, security risks, legal requirements, or external-service changes.
-2. You can stop using network-connected features or uninstall the App at any time. Current configuration export includes providers and keys, models, some global settings, Exa and MiMo settings, and agents. It does not include conversations, messages, attachments, saved messages, notes, knowledge files, avatars, or display preferences.
+2. You can stop using network-connected features or uninstall the App at any time. Current configuration export includes providers and keys, models, some global settings, Exa and MiMo settings, agents, and non-sensitive Infinite Cloud server/MCP definitions with pinned host fingerprints. It never includes SSH private keys or passphrases, MCP environment values, or MCP HTTP header values. It does not include conversations, messages, attachments, saved messages, notes, knowledge files, avatars, or display preferences.
 3. The current App does not provide a complete export, backup, or cloud recovery mechanism for all local workspace data. Uninstalling, system cleanup, or device failure can make that data unrecoverable.
 
 ## 10. Disclaimers and liability

@@ -126,6 +126,8 @@ data class Conversation(
     @SerialName("enable_search") val enableSearch: Boolean = true,
     @SerialName("enable_read") val enableRead: Boolean = true,
     @SerialName("enable_knowledge") val enableKnowledge: Boolean = false,
+    @SerialName("enable_infinite_cloud") val enableInfiniteCloud: Boolean = false,
+    @SerialName("cloud_server_id") val cloudServerId: String? = null,
     @SerialName("pinned_at") val pinnedAt: Long? = null,
     @SerialName("archived_at") val archivedAt: Long? = null,
     @SerialName("branched_from_conversation_id") val branchedFromConversationId: String? = null,
@@ -183,6 +185,10 @@ data class WorkspaceSnapshot(
     val notes: List<Note> = emptyList(),
     val agents: List<AgentProfile> = emptyList(),
     val knowledgeDocuments: List<KnowledgeDocument> = emptyList(),
+    val cloudServers: List<CloudServerProfile> = emptyList(),
+    val cloudMcpServers: List<CloudMcpServer> = emptyList(),
+    val cloudTasks: List<CloudTask> = emptyList(),
+    val cloudArtifactDeliveries: List<CloudArtifactDelivery> = emptyList(),
 )
 
 data class ConversationDetail(
@@ -209,6 +215,9 @@ data class ConversationWriteRequest(
     val enableSearch: Boolean? = null,
     val enableRead: Boolean? = null,
     val enableKnowledge: Boolean? = null,
+    val enableInfiniteCloud: Boolean? = null,
+    val cloudServerId: String? = null,
+    val updateCloudServerId: Boolean = false,
     val pinnedAt: Long? = null,
     val archivedAt: Long? = null,
     val updatePinnedAt: Boolean = false,
@@ -287,8 +296,99 @@ data class AgentProfile(
     @SerialName("enable_search") val enableSearch: Boolean = true,
     @SerialName("enable_read") val enableRead: Boolean = true,
     @SerialName("enable_knowledge") val enableKnowledge: Boolean = false,
+    @SerialName("enable_infinite_cloud") val enableInfiniteCloud: Boolean = false,
+    @SerialName("cloud_server_id") val cloudServerId: String? = null,
     @SerialName("created_at") val createdAt: Long = System.currentTimeMillis(),
     @SerialName("updated_at") val updatedAt: Long = System.currentTimeMillis(),
+)
+
+@Serializable
+data class CloudServerProfile(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String = "",
+    val host: String = "",
+    val port: Int = 22,
+    val username: String = "",
+    @SerialName("start_directory") val startDirectory: String = "~",
+    @SerialName("host_key_algorithm") val hostKeyAlgorithm: String? = null,
+    @SerialName("host_key_base64") val hostKeyBase64: String? = null,
+    @SerialName("host_key_fingerprint") val hostKeyFingerprint: String? = null,
+    @SerialName("max_concurrent_tasks") val maxConcurrentTasks: Int = 2,
+    @SerialName("default_timeout_minutes") val defaultTimeoutMinutes: Int = 60,
+    @SerialName("key_configured") val keyConfigured: Boolean = false,
+    @SerialName("created_at") val createdAt: Long = System.currentTimeMillis(),
+    @SerialName("updated_at") val updatedAt: Long = System.currentTimeMillis(),
+)
+
+@Serializable
+enum class CloudMcpTransport { STDIO, STREAMABLE_HTTP }
+
+@Serializable
+data class CloudMcpServer(
+    val id: String = UUID.randomUUID().toString(),
+    @SerialName("cloud_server_id") val cloudServerId: String,
+    val name: String = "",
+    val transport: CloudMcpTransport = CloudMcpTransport.STDIO,
+    val command: String = "",
+    val arguments: List<String> = emptyList(),
+    @SerialName("working_directory") val workingDirectory: String = "",
+    val url: String = "",
+    @SerialName("environment_names") val environmentNames: List<String> = emptyList(),
+    @SerialName("header_names") val headerNames: List<String> = emptyList(),
+    @SerialName("secrets_configured") val secretsConfigured: Boolean = false,
+    @SerialName("created_at") val createdAt: Long = System.currentTimeMillis(),
+    @SerialName("updated_at") val updatedAt: Long = System.currentTimeMillis(),
+)
+
+@Serializable
+enum class CloudTaskStatus { QUEUED, RUNNING, SUCCEEDED, FAILED, CANCELLED, TIMED_OUT, UNKNOWN }
+
+@Serializable
+data class CloudTask(
+    val id: String = UUID.randomUUID().toString(),
+    @SerialName("cloud_server_id") val cloudServerId: String? = null,
+    @SerialName("server_name") val serverName: String,
+    @SerialName("conversation_id") val conversationId: String? = null,
+    @SerialName("request_id") val requestId: String? = null,
+    val kind: String,
+    val summary: String = "",
+    val status: CloudTaskStatus = CloudTaskStatus.UNKNOWN,
+    @SerialName("remote_directory") val remoteDirectory: String = "",
+    @SerialName("exit_code") val exitCode: Int? = null,
+    val error: String = "",
+    @SerialName("artifact_paths") val artifactPaths: List<String> = emptyList(),
+    @SerialName("created_at") val createdAt: Long = System.currentTimeMillis(),
+    @SerialName("started_at") val startedAt: Long? = null,
+    @SerialName("finished_at") val finishedAt: Long? = null,
+    @SerialName("updated_at") val updatedAt: Long = System.currentTimeMillis(),
+)
+
+@Serializable
+enum class CloudArtifactSourceType { REMOTE, MCP }
+
+@Serializable
+enum class CloudArtifactDeliveryStatus { PENDING, FAILED, DELIVERED }
+
+@Serializable
+data class CloudArtifactDelivery(
+    val id: String = UUID.randomUUID().toString(),
+    @SerialName("request_id") val requestId: String? = null,
+    @SerialName("message_id") val messageId: String,
+    @SerialName("task_id") val taskId: String? = null,
+    @SerialName("cloud_server_id") val cloudServerId: String? = null,
+    @SerialName("source_type") val sourceType: CloudArtifactSourceType,
+    @SerialName("source_identity") val sourceIdentity: String,
+    @SerialName("remote_path") val remotePath: String? = null,
+    @SerialName("local_cache_path") val localCachePath: String? = null,
+    @SerialName("display_name") val displayName: String,
+    @SerialName("mime_type") val mimeType: String = "application/octet-stream",
+    val status: CloudArtifactDeliveryStatus = CloudArtifactDeliveryStatus.PENDING,
+    @SerialName("attachment_id") val attachmentId: String = UUID.randomUUID().toString(),
+    val error: String = "",
+    @SerialName("retry_count") val retryCount: Int = 0,
+    @SerialName("created_at") val createdAt: Long = System.currentTimeMillis(),
+    @SerialName("updated_at") val updatedAt: Long = System.currentTimeMillis(),
+    @SerialName("delivered_at") val deliveredAt: Long? = null,
 )
 
 @Serializable
@@ -348,11 +448,25 @@ data class UserMessageMetadata(
     @SerialName("vision_descriptions") val visionDescriptions: List<String> = emptyList(),
 )
 
+@Serializable
+data class RemoteAttachmentMapping(
+    @SerialName("attachment_id") val attachmentId: String,
+    @SerialName("display_name") val displayName: String,
+    @SerialName("remote_path") val remotePath: String,
+)
+
 data class ToolOptions(
     val enableSearch: Boolean,
     val enableRead: Boolean,
     val enableKnowledge: Boolean = false,
     val urlReaderBackend: UrlReaderBackend = UrlReaderBackend.BUILT_IN,
+    val enableInfiniteCloud: Boolean = false,
+    val cloudServerId: String? = null,
+    val conversationId: String? = null,
+    val requestId: String = "",
+    val messageId: String = "",
+    val allowCloudTaskCreation: Boolean = false,
+    val remoteAttachments: List<RemoteAttachmentMapping> = emptyList(),
 )
 
 data class UrlReadDiagnostic(

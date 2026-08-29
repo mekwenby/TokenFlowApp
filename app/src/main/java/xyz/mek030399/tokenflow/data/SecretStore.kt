@@ -10,6 +10,8 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
+class SecretStoreSnapshot internal constructor(internal val values: Map<String, String?>)
+
 class SecretStore(context: Context) {
     private val appContext = context.applicationContext
     private val preferences = appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
@@ -45,6 +47,27 @@ class SecretStore(context: Context) {
         check(editor.commit()) { "Unable to persist encrypted secrets" }
     }
 
+    @Synchronized
+    fun replaceWithSnapshot(
+        clearNames: Set<String> = emptySet(),
+        clearPrefixes: Set<String> = emptySet(),
+        updates: Map<String, String?> = emptyMap(),
+    ): SecretStoreSnapshot {
+        require(clearNames.none(String::isBlank) && clearPrefixes.none(String::isBlank))
+        val matchingNames = preferences.all.keys.filterTo(mutableSetOf()) { name ->
+            clearPrefixes.any(name::startsWith)
+        }
+        val affectedNames = matchingNames + clearNames + updates.keys
+        val previous = affectedNames.associateWith(::read)
+        writeAll(affectedNames.associateWith { null as String? } + updates)
+        return SecretStoreSnapshot(previous)
+    }
+
+    @Synchronized
+    fun restore(snapshot: SecretStoreSnapshot) {
+        writeAll(snapshot.values)
+    }
+
     private fun encrypt(value: String): String {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key())
@@ -58,6 +81,12 @@ class SecretStore(context: Context) {
     }
 
     fun providerKeyName(providerId: String) = "provider:$providerId"
+    fun cloudPrivateKeyName(serverId: String) = "cloud-private-key:$serverId"
+    fun cloudPrivateKeyPassphraseName(serverId: String) = "cloud-private-key-passphrase:$serverId"
+    fun cloudMcpEnvironmentPrefix(mcpServerId: String) = "cloud-mcp-env:$mcpServerId:"
+    fun cloudMcpHeaderPrefix(mcpServerId: String) = "cloud-mcp-header:$mcpServerId:"
+    fun cloudMcpEnvironmentName(mcpServerId: String, name: String) = "cloud-mcp-env:$mcpServerId:$name"
+    fun cloudMcpHeaderName(mcpServerId: String, name: String) = "cloud-mcp-header:$mcpServerId:$name"
 
     fun clearLegacyMobileToken() {
         appContext.getSharedPreferences("tokenflow_auth", Context.MODE_PRIVATE).edit().clear().apply()

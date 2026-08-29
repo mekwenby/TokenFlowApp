@@ -79,6 +79,12 @@ import xyz.mek030399.tokenflow.data.ChatDataSource
 import xyz.mek030399.tokenflow.data.ChatDisplayPreferences
 import xyz.mek030399.tokenflow.data.ChatEvent
 import xyz.mek030399.tokenflow.data.ChatMessage
+import xyz.mek030399.tokenflow.data.CloudServerProfile
+import xyz.mek030399.tokenflow.data.CloudArtifactDelivery
+import xyz.mek030399.tokenflow.data.CloudArtifactDeliveryStatus
+import xyz.mek030399.tokenflow.data.CloudArtifactSourceType
+import xyz.mek030399.tokenflow.data.CloudTask
+import xyz.mek030399.tokenflow.data.CloudTaskStatus
 import xyz.mek030399.tokenflow.data.AssistantIdentitySnapshot
 import xyz.mek030399.tokenflow.data.AssistantMetadata
 import xyz.mek030399.tokenflow.data.CONTEXT_BOUNDARY_ROLE
@@ -132,6 +138,112 @@ import kotlin.math.roundToInt
 class TokenFlowAppTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun infiniteCloudServerCardExpandsWithoutRiskNotice() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val server = CloudServerProfile(
+            id = "cloud-1",
+            name = "Build server",
+            host = "build.example.com",
+            port = 2222,
+            username = "runner",
+            startDirectory = "/srv/build",
+            hostKeyFingerprint = "SHA256:abcdefghijklmnopqrstuvwxyz",
+            keyConfigured = true,
+        )
+        val viewModel = AppViewModel(UiFakeDataSource(withModel = true))
+        composeRule.setContent {
+            TokenFlowTheme {
+                InfiniteCloudScreen(
+                    state = AppUiState(cloudServers = listOf(server)),
+                    viewModel = viewModel,
+                    showBack = true,
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Infinite Cloud").assertIsDisplayed()
+        composeRule.onNodeWithText("Build server").assertIsDisplayed()
+        composeRule.onNodeWithText("runner@build.example.com:2222").assertIsDisplayed()
+        composeRule.onAllNodesWithText("High risk: when enabled, the model can perform any operation allowed by the SSH account. Attachments are uploaded automatically.").assertCountEquals(0)
+        composeRule.onAllNodesWithText("高风险：启用后，模型可执行 SSH 账号允许的任意操作，附件也会自动上传。").assertCountEquals(0)
+
+        composeRule.onNodeWithContentDescription(context.getString(xyz.mek030399.tokenflow.R.string.cloud_server_details)).performClick()
+        composeRule.onNodeWithText("/srv/build").assertIsDisplayed()
+        composeRule.onNodeWithText("SHA256:abcdefghijklmnopqrstuvwxyz").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription(context.getString(xyz.mek030399.tokenflow.R.string.cloud_copy_fingerprint)).assertIsDisplayed()
+        composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.cloud_test_connection)).assertIsDisplayed()
+    }
+
+    @Test
+    fun infiniteCloudTasksSupportMultiSelectAndDeleteConfirmation() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val completed = CloudTask(
+            id = "completed",
+            serverName = "Build server",
+            kind = "shell",
+            summary = "Completed export",
+            status = CloudTaskStatus.SUCCEEDED,
+        )
+        val running = CloudTask(
+            id = "running",
+            serverName = "Build server",
+            kind = "python",
+            summary = "Running worker",
+            status = CloudTaskStatus.RUNNING,
+        )
+        val configuredServer = CloudServerProfile(
+            id = "configured-server",
+            name = "Configured server",
+            host = "configured.example.com",
+            username = "runner",
+            hostKeyFingerprint = "SHA256:configured",
+            keyConfigured = true,
+        )
+        val failedArtifact = CloudArtifactDelivery(
+            id = "failed-artifact",
+            messageId = "assistant-message",
+            taskId = completed.id,
+            sourceType = CloudArtifactSourceType.REMOTE,
+            sourceIdentity = "configured-server:/srv/result.zip",
+            displayName = "result.zip",
+            status = CloudArtifactDeliveryStatus.FAILED,
+            error = "Remote artifact is temporarily unavailable",
+        )
+        val viewModel = AppViewModel(UiFakeDataSource(withModel = true))
+        composeRule.setContent {
+            TokenFlowTheme {
+                InfiniteCloudScreen(
+                    state = AppUiState(
+                        cloudTasks = listOf(completed, running),
+                        cloudArtifactDeliveries = listOf(failedArtifact),
+                        cloudServers = listOf(configuredServer),
+                        cloud = CloudWorkspaceUiState(section = CloudSection.TASKS),
+                    ),
+                    viewModel = viewModel,
+                    showBack = true,
+                )
+            }
+        }
+
+        composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.cloud_all_servers)).assertIsDisplayed()
+        composeRule.onNodeWithText("Completed export").assertIsDisplayed()
+        composeRule.onNodeWithText("result.zip").assertIsDisplayed()
+        composeRule.onNodeWithText("Remote artifact is temporarily unavailable").assertIsDisplayed()
+        composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.retry)).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription(context.getString(xyz.mek030399.tokenflow.R.string.cloud_select_tasks)).performClick()
+        composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.selected_items, 0)).assertIsDisplayed()
+        composeRule.onNodeWithTag("cloud_task_completed").performClick()
+        composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.selected_items, 1)).assertIsDisplayed()
+        composeRule.onNodeWithTag("cloud_task_running").performClick()
+        composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.selected_items, 1)).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription(context.getString(xyz.mek030399.tokenflow.R.string.delete)).performClick()
+        composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.cloud_delete_tasks_title)).assertIsDisplayed()
+        composeRule.onNodeWithText(
+            context.resources.getQuantityString(xyz.mek030399.tokenflow.R.plurals.cloud_delete_tasks_detail, 1, 1),
+        ).assertIsDisplayed()
+    }
 
     @Test
     fun firstLaunchShowsProviderSetupWithoutLogin() {

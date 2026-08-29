@@ -13,6 +13,7 @@ class AppContainer(context: Context) {
     internal val noteMarkdownFiles: NoteMarkdownFileAccess = NoteMarkdownFileStore(context)
     private val exaClient = ExaClient(json)
     private val builtInUrlReader = UrlReader(context, json)
+    private val infiniteCloud = InfiniteCloudManager(context, database.localDao(), secrets, json)
     private val webTools = WebToolExecutor(
         secretStore = secrets,
         exaClient = exaClient,
@@ -20,6 +21,8 @@ class AppContainer(context: Context) {
         json = json,
         infoFlowReader = InfoFlowUrlReader(builtIn = builtInUrlReader, json = json),
         knowledgeStore = knowledgeStore,
+        infiniteCloudTools = InfiniteCloudToolExecutor(infiniteCloud, json),
+        infiniteCloudMcp = InfiniteCloudMcpExecutor(infiniteCloud, json),
     )
     private val engine = DirectChatEngine(gateway, webTools)
     val repository: ChatDataSource = ChatRepository(
@@ -35,5 +38,6 @@ class AppContainer(context: Context) {
         attachmentStore = AttachmentStore(context, database.localDao()),
         mimoTtsClient = MimoTtsClient(context, secrets, json),
         infoFlowReader = InfoFlowUrlReader(builtIn = builtInUrlReader, json = json),
+        infiniteCloud = infiniteCloud,
     )
 }

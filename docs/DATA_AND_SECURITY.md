@@ -16,11 +16,12 @@ App 是本地 BYOK 客户端，但“本地”不表示所有内容只留在设�
 ## Room 数据库
 
 - 文件名：`tokenflow-local.db`
-- 当前 schema：v6
+- 当前 schema：v7
 - `exportSchema = true`
-- 显式迁移：`1 -> 2 -> 3 -> 4 -> 5 -> 6`
+- 显式迁移：`1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7`
+- 兼容迁移：曾安装预发布 v8 构建时，若数据库结构经完整校验仍等同 v7，则无损回落到 v7；不匹配时拒绝启动，不做破坏性降级
 - 不使用 destructive fallback
-- schema 快照：`app/schemas/xyz.mek030399.tokenflow.data.TokenFlowDatabase/{3,4,5,6}.json`
+- schema 快照：`app/schemas/xyz.mek030399.tokenflow.data.TokenFlowDatabase/{3,4,5,6,7}.json`
 
 当前表：
 
@@ -38,6 +39,10 @@ App 是本地 BYOK 客户端，但“本地”不表示所有内容只留在设�
 | `knowledge_documents` | 知识文件索引、状态和可选 `sourceNoteId` |
 | `knowledge_chunks` | 文档分块正文和位置 |
 | `knowledge_chunks_fts` | 本地全文检索索引 |
+| `cloud_servers` | SSH 地址、固定主机指纹和任务限制，不含私钥 |
+| `cloud_mcp_servers` | stdio/HTTP MCP 非敏感定义，不含环境值或请求头值 |
+| `cloud_tasks` | 远端任务状态、路径、退出码和产物索引 |
+| `cloud_artifact_deliveries` | 产物投递状态、远端/本地缓存路径和错误摘要，不含产物正文 |
 
 ### 外键与删除语义
 
@@ -47,6 +52,7 @@ App 是本地 BYOK 客户端，但“本地”不表示所有内容只留在设�
 - 删除 knowledge document 会级联删除 chunks 和对应 FTS 数据。
 - note 的 `sourceMessageId` 不是外键；删除会话不会删除已创建的笔记。
 - knowledge document 的 `sourceNoteId` 是可空唯一索引，不是外键。笔记导入知识库后是独立快照，编辑或删除笔记不影响副本；删除副本后可从原笔记重新导入。
+- 删除 cloud server 会删除其 MCP 定义和本地凭据、解绑会话/智能体；任务历史保留服务器名称快照，远端文件和任务目录不会被删除。
 
 ### 消息 metadata
 
@@ -83,7 +89,7 @@ Room 数据库、附件正文、知识文件、头像和普通偏好没有额外
 
 ## 凭据存储
 
-供应商 API Key、Exa Key 和 MiMo Key 由 [`SecretStore`](../app/src/main/java/xyz/mek030399/tokenflow/data/SecretStore.kt) 管理：
+供应商 API Key、Exa Key、MiMo Key、Infinite Cloud SSH 私钥与口令，以及 MCP 环境变量值和 HTTP 请求头值均由 [`SecretStore`](../app/src/main/java/xyz/mek030399/tokenflow/data/SecretStore.kt) 管理：
 
 - 密文存放于私有 SharedPreferences `tokenflow_secrets_v2`。
 - AES 密钥由 Android Keystore 提供，alias 为 `tokenflow_local_secrets_v2`。
@@ -103,7 +109,9 @@ Android Keystore 只保护 App 内凭据，不是 APK 发布签名 keystore。�
 - AAD 完整性绑定
 - 最短 10 字符密码
 
-归档包括供应商及其 API Key、模型、默认模型、视觉状态/兜底、Exa/MiMo Key、MiMo 音色、全局助手昵称、全局系统提示词、URL Reader 和智能体。
+归档包括供应商及其 API Key、模型、默认模型、视觉状态/兜底、Exa/MiMo Key、MiMo 音色、全局助手昵称、全局系统提示词、URL Reader、智能体，以及非敏感的 Infinite Cloud 服务器/MCP 定义和已固定主机指纹。
+
+Infinite Cloud SSH 私钥与口令、MCP 环境变量值和 HTTP 请求头值绝不进入 `.tfcfg`。导入后的服务器和 MCP 配置会明确标记为需要重新填写凭据。
 
 归档不包括会话、消息、附件、收藏、笔记、知识文件、头像、Chat 字体/字间距/行间距或其他 UI 偏好。旧格式的 InfoFlow Key 字段只为读取兼容保留，当前不会导出或应用。
 
@@ -115,7 +123,7 @@ Android Keystore 只保护 App 内凭据，不是 APK 发布签名 keystore。�
 
 - 相机声明为非必需 feature，拍照交给外部相机应用。
 - `FileProvider` 不导出，只临时授权相机草稿 URI。
-- `android:usesCleartextTraffic="false"` 禁止明文 HTTP。
+- `android:usesCleartextTraffic="false"` 默认禁止明文 HTTP；network security config 仅允许 SSH 本地端口转发使用的 loopback 明文连接。
 - `android:allowBackup="false"`，并通过 data extraction rules 排除 SharedPreferences、files 和 database 的云备份与设备迁移。
 - 不申请 CAMERA、广泛存储或位置权限。
 - 笔记 `.md` 导入导出使用系统 Storage Access Framework 的临时 URI 授权，无需存储权限。
@@ -142,6 +150,14 @@ URL Reader 面对模型或网页提供的任意 URL，边界更严格：
 
 不要把 Provider Base URL 的“干净 HTTPS”校验当成 URL Reader 的 SSRF 防护，也不要为了兼容私网供应商而放宽 Reader。
 
+### Infinite Cloud
+
+- SSH 只接受导入的 OpenSSH 私钥认证。首次连接在认证前显示 SHA-256 主机指纹；确认后严格固定，主机密钥变化会阻断连接。
+- 远端 helper 不监听网络端口。Shell、Python、JavaScript、SFTP 和 stdio MCP 控制流量均通过已验证的 SSH 会话。
+- Streamable HTTP MCP 经 SSH 本地端口转发访问。明文 HTTP 只允许从 App 连接 loopback 隧道端口；HTTPS 保留原始主机名校验。
+- 启用后模型无需逐次确认即可执行该 Unix 账号允许的任意命令、联网、文件操作或 `sudo`。App 不提供命令黑名单、目录沙箱或额外权限边界，UI 必须持续明确提示该风险。
+- 每次生成前，本次消息的全部附件都会上传到远端请求目录。上传失败会中止生成，不会静默改用本地路径。
+
 ## 数据外发清单
 
 | 操作 | 可能发送的数据 | 接收方 |
@@ -152,6 +168,8 @@ URL Reader 面对模型或网页提供的任意 URL，边界更严格：
 | 内置 URL 读取 | 目标 URL、标准 HTTP 请求信息 | 目标网站及网络基础设施 |
 | InfoFlow URL 读取 | 目标 URL | 公开 InfoFlow 服务及目标网站 |
 | MiMo TTS | 需要合成的 Assistant 文本和音色参数 | Xiaomi MiMo |
+| Infinite Cloud | 附件、脚本、命令、文件内容、任务参数与日志 | 用户配置并确认主机指纹的 Linux 服务器 |
+| 远端 MCP | MCP 工具参数、文本/结构化结果，以及配置的环境变量或 HTTP 请求头 | 用户配置的远端 MCP 进程或 HTTP endpoint |
 
 App 不需要 TokenFlow 账号，也不会为了对话自动把内容发送到仓库中的 Go 服务。第三方的日志、保留、训练、地域和计费政策不由本 App 控制，取决于用户配置的服务。
 
@@ -165,7 +183,7 @@ App 不需要 TokenFlow 账号，也不会为了对话自动把内容发送到�
 
 ## 开发与发布守则
 
-- 不记录 API Key、签名密码、keystore 内容或完整私钥。
+- 不记录 API Key、签名密码、keystore 内容、SSH 私钥/口令或 MCP secret 值。
 - 错误日志中避免输出完整请求 body、附件正文、知识片段和 `.tfcfg` 解密内容。
 - 数据库升级必须保留旧 schema 快照并提供 migration 测试。
 - 新增第三方服务时同步更新本页的数据外发清单、App 内用户协议和依赖清单。

@@ -102,6 +102,7 @@ import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.Straighten
@@ -199,6 +200,9 @@ import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import xyz.mek030399.tokenflow.R
 import xyz.mek030399.tokenflow.data.ChatDisplayPreferences
 import xyz.mek030399.tokenflow.data.ChatMessage
@@ -390,6 +394,7 @@ private fun TokenFlowAppContent(
     onThemeSelected: (AppTheme) -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -411,6 +416,14 @@ private fun TokenFlowAppContent(
     val avatarError = stringResource(R.string.avatar_save_failed)
     val fileError = stringResource(R.string.file_operation_failed)
     val exportContent = state.transfer.exportContent
+
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.onAppResumed()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val createConfig = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         val content = exportContent
@@ -570,7 +583,7 @@ private fun TokenFlowAppContent(
                     onExport = { showExportPassword = true },
                     onImport = selectImportFile,
                 ) }
-                AppScreen.BOOKMARKS, AppScreen.NOTES, AppScreen.AGENTS, AppScreen.KNOWLEDGE, AppScreen.ABOUT ->
+                AppScreen.BOOKMARKS, AppScreen.NOTES, AppScreen.AGENTS, AppScreen.KNOWLEDGE, AppScreen.INFINITE_CLOUD, AppScreen.ABOUT ->
                     WorkspaceScreen(state, viewModel)
             }
         }
@@ -1546,6 +1559,7 @@ private fun ConversationSidebar(
                 item(key = AppScreen.NOTES) { SidebarDestination(AppScreen.NOTES, Icons.Outlined.NoteAlt, stringResource(R.string.notes)) { viewModel.openScreen(AppScreen.NOTES) } }
                 item(key = AppScreen.AGENTS) { SidebarDestination(AppScreen.AGENTS, Icons.Outlined.SmartToy, stringResource(R.string.agents)) { viewModel.openScreen(AppScreen.AGENTS) } }
                 item(key = AppScreen.KNOWLEDGE) { SidebarDestination(AppScreen.KNOWLEDGE, Icons.Outlined.FolderOpen, stringResource(R.string.knowledge)) { viewModel.openScreen(AppScreen.KNOWLEDGE) } }
+                item(key = AppScreen.INFINITE_CLOUD) { SidebarDestination(AppScreen.INFINITE_CLOUD, Icons.Outlined.Cloud, stringResource(R.string.infinite_cloud)) { viewModel.openScreen(AppScreen.INFINITE_CLOUD) } }
                 item(key = AppScreen.GLOBAL_SETTINGS) { SidebarDestination(AppScreen.GLOBAL_SETTINGS, Icons.Outlined.Settings, stringResource(R.string.global_settings)) { viewModel.openScreen(AppScreen.GLOBAL_SETTINGS) } }
                 item(key = AppScreen.PROVIDERS) { SidebarDestination(AppScreen.PROVIDERS, Icons.Outlined.Hub, stringResource(R.string.providers_models)) { viewModel.openScreen(AppScreen.PROVIDERS) } }
                 item(key = AppScreen.EXA) { SidebarDestination(AppScreen.EXA, Icons.Outlined.Search, stringResource(R.string.exa_search)) { viewModel.openScreen(AppScreen.EXA) } }
@@ -1812,11 +1826,15 @@ private fun ChatPane(
             onAttachments = viewModel::addAttachments,
             onRemoveAttachment = viewModel::removeAttachment,
             onCameraFailure = viewModel::reportCameraCaptureFailure,
+            onDraftRecoveryConsumed = viewModel::consumeComposerDraftRecovery,
             onSend = viewModel::send,
             onStop = viewModel::stopGeneration,
         )
     }
-    if (tools) ToolsDialog(state, { tools = false }) { search, read, knowledge, process -> viewModel.setTools(search, read, process, knowledge); tools = false }
+    if (tools) ToolsDialog(state, { tools = false }) { search, read, knowledge, process, cloud, serverId ->
+        viewModel.saveToolSettings(search, read, knowledge, process, cloud, serverId)
+        tools = false
+    }
     if (settings) SettingsDialog(
         state = state,
         initial = state.config,
@@ -2661,6 +2679,7 @@ private fun Composer(
     onAttachments: (List<PendingAttachment>) -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onCameraFailure: () -> Unit,
+    onDraftRecoveryConsumed: (String) -> Unit,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
 ) {
@@ -2674,6 +2693,15 @@ private fun Composer(
     val scope = rememberCoroutineScope()
     val cameraStore = remember(context.applicationContext) { CameraCaptureStore(context.applicationContext) }
     val generating = state.activeGeneration?.active == true
+    val draftRecovery = state.composerDraftRecovery
+    LaunchedEffect(draftRecovery?.requestId, state.activeConversationId) {
+        if (draftRecovery != null) {
+            if (draftRecovery.conversationId == state.activeConversationId && value.isEmpty()) {
+                value = draftRecovery.content
+            }
+            onDraftRecoveryConsumed(draftRecovery.requestId)
+        }
+    }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(5)) { uris ->
         onAttachments(uris.mapNotNull { pendingAttachment(context, it) })
     }
@@ -2920,11 +2948,23 @@ private fun formatBytes(value: Long): String = when {
 }
 
 @Composable
-private fun ToolsDialog(state: AppUiState, onDismiss: () -> Unit, onSave: (Boolean, Boolean, Boolean, Boolean) -> Unit) {
+private fun ToolsDialog(
+    state: AppUiState,
+    onDismiss: () -> Unit,
+    onSave: (Boolean, Boolean, Boolean, Boolean, Boolean, String?) -> Unit,
+) {
+    val readyCloudServers = state.cloudServers.filter { it.keyConfigured && it.hostKeyFingerprint != null }
     var search by remember { mutableStateOf(state.enableSearch) }
     var read by remember { mutableStateOf(state.enableRead) }
     var knowledge by remember { mutableStateOf(state.enableKnowledge) }
     var process by remember { mutableStateOf(state.showProcess) }
+    var cloud by remember { mutableStateOf(state.config.enableInfiniteCloud && readyCloudServers.isNotEmpty()) }
+    var cloudServerId by remember {
+        mutableStateOf(
+            state.config.cloudServerId?.takeIf { configured -> readyCloudServers.any { it.id == configured } }
+                ?: readyCloudServers.firstOrNull()?.id,
+        )
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.tools)) },
@@ -2935,9 +2975,29 @@ private fun ToolsDialog(state: AppUiState, onDismiss: () -> Unit, onSave: (Boole
                 ToggleRow(stringResource(R.string.read_web), read, true) { read = it }
                 ToggleRow(stringResource(R.string.enable_knowledge), knowledge, state.knowledgeDocuments.any { it.status == "ready" }) { knowledge = it }
                 ToggleRow(stringResource(R.string.expand_process_default), process, true) { process = it }
+                ToggleRow(stringResource(R.string.infinite_cloud), cloud, readyCloudServers.isNotEmpty()) { enabled ->
+                    cloud = enabled
+                    if (enabled && cloudServerId == null) cloudServerId = readyCloudServers.firstOrNull()?.id
+                }
+                if (cloud) {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        readyCloudServers.forEach { server ->
+                            FilterChip(
+                                selected = cloudServerId == server.id,
+                                onClick = { cloudServerId = server.id },
+                                label = { Text(server.name) },
+                            )
+                        }
+                    }
+                }
             }
         },
-        confirmButton = { Button(onClick = { onSave(search, read, knowledge, process) }) { Text(stringResource(R.string.save)) } },
+        confirmButton = {
+            Button(
+                onClick = { onSave(search, read, knowledge, process, cloud, cloudServerId) },
+                enabled = !cloud || readyCloudServers.any { it.id == cloudServerId },
+            ) { Text(stringResource(R.string.save)) }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }

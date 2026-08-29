@@ -17,6 +17,7 @@ import androidx.room.migration.Migration
 import androidx.room.Transaction
 import androidx.room.Upsert
 import androidx.sqlite.db.SupportSQLiteDatabase
+import kotlinx.serialization.encodeToString
 
 @Entity(tableName = "providers")
 data class ProviderEntity(
@@ -81,6 +82,8 @@ data class ConversationEntity(
     @ColumnInfo(defaultValue = "1") val enableSearch: Boolean,
     @ColumnInfo(defaultValue = "1") val enableRead: Boolean,
     @ColumnInfo(defaultValue = "0") val enableKnowledge: Boolean,
+    @ColumnInfo(defaultValue = "0") val enableInfiniteCloud: Boolean,
+    val cloudServerId: String?,
     val pinnedAt: Long?,
     val archivedAt: Long?,
     val branchedFromConversationId: String?,
@@ -203,6 +206,8 @@ data class AgentEntity(
     val enableSearch: Boolean,
     val enableRead: Boolean,
     val enableKnowledge: Boolean,
+    @ColumnInfo(defaultValue = "0") val enableInfiniteCloud: Boolean,
+    val cloudServerId: String?,
     val createdAt: Long,
     val updatedAt: Long,
 )
@@ -250,8 +255,331 @@ data class KnowledgeChunkFts(
     val searchText: String,
 )
 
+@Entity(tableName = "cloud_servers", indices = [Index(value = ["name"]), Index(value = ["host", "port", "username"])])
+data class CloudServerEntity(
+    @androidx.room.PrimaryKey val id: String,
+    val name: String,
+    val host: String,
+    val port: Int,
+    val username: String,
+    val startDirectory: String,
+    val hostKeyAlgorithm: String?,
+    val hostKeyBase64: String?,
+    val hostKeyFingerprint: String?,
+    val maxConcurrentTasks: Int,
+    val defaultTimeoutMinutes: Int,
+    val createdAt: Long,
+    val updatedAt: Long,
+)
+
+@Entity(
+    tableName = "cloud_mcp_servers",
+    foreignKeys = [ForeignKey(
+        entity = CloudServerEntity::class,
+        parentColumns = ["id"],
+        childColumns = ["cloudServerId"],
+        onDelete = ForeignKey.CASCADE,
+    )],
+    indices = [Index("cloudServerId"), Index(value = ["cloudServerId", "name"], unique = true)],
+)
+data class CloudMcpServerEntity(
+    @androidx.room.PrimaryKey val id: String,
+    val cloudServerId: String,
+    val name: String,
+    val transport: String,
+    val command: String,
+    val argumentsJson: String,
+    val workingDirectory: String,
+    val url: String,
+    val environmentNamesJson: String,
+    val headerNamesJson: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+)
+
+@Entity(
+    tableName = "cloud_tasks",
+    foreignKeys = [ForeignKey(
+        entity = CloudServerEntity::class,
+        parentColumns = ["id"],
+        childColumns = ["cloudServerId"],
+        onDelete = ForeignKey.SET_NULL,
+    )],
+    indices = [Index("cloudServerId"), Index("conversationId"), Index("updatedAt")],
+)
+data class CloudTaskEntity(
+    @androidx.room.PrimaryKey val id: String,
+    val cloudServerId: String?,
+    val serverName: String,
+    val conversationId: String?,
+    val requestId: String?,
+    val kind: String,
+    val summary: String,
+    val status: String,
+    val remoteDirectory: String,
+    val exitCode: Int?,
+    val error: String,
+    val artifactPathsJson: String,
+    val createdAt: Long,
+    val startedAt: Long?,
+    val finishedAt: Long?,
+    val updatedAt: Long,
+)
+
+@Entity(
+    tableName = "cloud_artifact_deliveries",
+    foreignKeys = [
+        ForeignKey(
+            entity = MessageEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["messageId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+        ForeignKey(
+            entity = CloudTaskEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["taskId"],
+            onDelete = ForeignKey.SET_NULL,
+        ),
+        ForeignKey(
+            entity = CloudServerEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["cloudServerId"],
+            onDelete = ForeignKey.SET_NULL,
+        ),
+    ],
+    indices = [
+        Index("messageId"),
+        Index("taskId"),
+        Index("cloudServerId"),
+        Index("status"),
+        Index("updatedAt"),
+        Index(value = ["sourceIdentity"], unique = true),
+    ],
+)
+data class CloudArtifactDeliveryEntity(
+    @androidx.room.PrimaryKey val id: String,
+    val requestId: String?,
+    val messageId: String,
+    val taskId: String?,
+    val cloudServerId: String?,
+    val sourceType: String,
+    val sourceIdentity: String,
+    val remotePath: String?,
+    val localCachePath: String?,
+    val displayName: String,
+    val mimeType: String,
+    val status: String,
+    val attachmentId: String,
+    val error: String,
+    val retryCount: Int,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val deliveredAt: Long?,
+)
+
+private fun cloudTaskStatusRank(status: String): Int = when (status) {
+    CloudTaskStatus.UNKNOWN.name -> 0
+    CloudTaskStatus.QUEUED.name -> 1
+    CloudTaskStatus.RUNNING.name -> 2
+    CloudTaskStatus.SUCCEEDED.name,
+    CloudTaskStatus.FAILED.name,
+    CloudTaskStatus.CANCELLED.name,
+    CloudTaskStatus.TIMED_OUT.name,
+    -> 3
+    else -> throw IllegalArgumentException("Unknown cloud task status: $status")
+}
+
+internal fun mergeCloudTaskEntity(
+    existing: CloudTaskEntity,
+    incoming: CloudTaskEntity,
+): CloudTaskEntity {
+    require(existing.id == incoming.id) { "Cloud task identity does not match" }
+    val existingRank = cloudTaskStatusRank(existing.status)
+    val incomingRank = cloudTaskStatusRank(incoming.status)
+    val existingIsTerminal = existingRank == 3
+    val incomingIsTerminal = incomingRank == 3
+    val acceptIncoming = when {
+        existingIsTerminal -> incomingIsTerminal &&
+            incoming.status == existing.status &&
+            incoming.updatedAt >= existing.updatedAt
+        incomingIsTerminal -> true
+        incomingRank < existingRank -> false
+        incomingRank == existingRank -> incoming.updatedAt >= existing.updatedAt
+        else -> true
+    }
+    if (!acceptIncoming) return existing
+    return incoming.copy(
+        createdAt = existing.createdAt,
+        updatedAt = maxOf(existing.updatedAt, incoming.updatedAt),
+    )
+}
+
+private fun cloudArtifactDeliveryStatusRank(status: String): Int = when (status) {
+    CloudArtifactDeliveryStatus.PENDING.name -> 0
+    CloudArtifactDeliveryStatus.FAILED.name -> 1
+    CloudArtifactDeliveryStatus.DELIVERED.name -> 2
+    else -> throw IllegalArgumentException("Unknown cloud artifact delivery status: $status")
+}
+
+internal fun mergeCloudArtifactDeliveryEntity(
+    existing: CloudArtifactDeliveryEntity,
+    incoming: CloudArtifactDeliveryEntity,
+): CloudArtifactDeliveryEntity {
+    require(existing.sourceIdentity == incoming.sourceIdentity) { "Cloud artifact source identity does not match" }
+    require(existing.messageId == incoming.messageId) { "Cloud artifact target message does not match" }
+    val existingRank = cloudArtifactDeliveryStatusRank(existing.status)
+    val incomingRank = cloudArtifactDeliveryStatusRank(incoming.status)
+    val useIncomingState = incomingRank > existingRank ||
+        (incomingRank == existingRank && incoming.retryCount > existing.retryCount)
+    val state = if (useIncomingState) incoming else existing
+    val merged = state.copy(
+        id = existing.id,
+        requestId = existing.requestId ?: incoming.requestId,
+        messageId = existing.messageId,
+        taskId = existing.taskId ?: incoming.taskId,
+        cloudServerId = existing.cloudServerId,
+        sourceType = existing.sourceType,
+        sourceIdentity = existing.sourceIdentity,
+        remotePath = existing.remotePath ?: incoming.remotePath,
+        displayName = existing.displayName,
+        mimeType = existing.mimeType,
+        attachmentId = existing.attachmentId,
+        createdAt = existing.createdAt,
+    )
+    return if (merged == existing) existing else merged.copy(updatedAt = maxOf(existing.updatedAt, incoming.updatedAt))
+}
+
 @Dao
 interface LocalDao {
+    @Query("SELECT * FROM cloud_servers ORDER BY name COLLATE NOCASE, createdAt")
+    suspend fun cloudServers(): List<CloudServerEntity>
+
+    @Query("SELECT * FROM cloud_servers WHERE id = :id")
+    suspend fun cloudServer(id: String): CloudServerEntity?
+
+    @Upsert
+    suspend fun putCloudServer(server: CloudServerEntity)
+
+    @Query("DELETE FROM cloud_servers WHERE id = :id")
+    suspend fun deleteCloudServer(id: String)
+
+    @Query("SELECT COUNT(*) FROM cloud_tasks WHERE cloudServerId = :serverId AND status IN ('UNKNOWN', 'QUEUED', 'RUNNING')")
+    suspend fun activeCloudTaskCount(serverId: String): Int
+
+    @Query("UPDATE conversations SET enableInfiniteCloud = 0, cloudServerId = NULL WHERE cloudServerId = :serverId")
+    suspend fun unbindCloudConversations(serverId: String)
+
+    @Query("UPDATE agents SET enableInfiniteCloud = 0, cloudServerId = NULL WHERE cloudServerId = :serverId")
+    suspend fun unbindCloudAgents(serverId: String)
+
+    @Transaction
+    suspend fun deleteCloudServerIfInactive(serverId: String): Boolean {
+        if (activeCloudTaskCount(serverId) > 0) return false
+        unbindCloudConversations(serverId)
+        unbindCloudAgents(serverId)
+        deleteCloudServer(serverId)
+        return true
+    }
+
+    @Query(
+        """
+        UPDATE cloud_servers
+        SET hostKeyAlgorithm = :algorithm,
+            hostKeyBase64 = :keyBase64,
+            hostKeyFingerprint = :fingerprint,
+            updatedAt = :updatedAt
+        WHERE id = :id AND hostKeyBase64 = :expectedKeyBase64
+        """,
+    )
+    suspend fun replaceCloudHostKey(
+        id: String,
+        expectedKeyBase64: String,
+        algorithm: String,
+        keyBase64: String,
+        fingerprint: String,
+        updatedAt: Long,
+    ): Int
+
+    @Query("SELECT * FROM cloud_mcp_servers ORDER BY name COLLATE NOCASE")
+    suspend fun cloudMcpServers(): List<CloudMcpServerEntity>
+
+    @Query("SELECT * FROM cloud_mcp_servers WHERE cloudServerId = :serverId ORDER BY name COLLATE NOCASE")
+    suspend fun cloudMcpServers(serverId: String): List<CloudMcpServerEntity>
+
+    @Upsert
+    suspend fun putCloudMcpServer(server: CloudMcpServerEntity)
+
+    @Query("DELETE FROM cloud_mcp_servers WHERE id = :id")
+    suspend fun deleteCloudMcpServer(id: String)
+
+    @Query("SELECT * FROM cloud_tasks ORDER BY updatedAt DESC")
+    suspend fun cloudTasks(): List<CloudTaskEntity>
+
+    @Query("SELECT * FROM cloud_tasks WHERE id = :id")
+    suspend fun cloudTask(id: String): CloudTaskEntity?
+
+    @Upsert
+    suspend fun upsertCloudTask(task: CloudTaskEntity)
+
+    @Transaction
+    suspend fun putCloudTaskMonotonic(task: CloudTaskEntity): CloudTaskEntity {
+        val existing = cloudTask(task.id)
+        val merged = existing?.let { mergeCloudTaskEntity(it, task) } ?: task
+        if (existing == null || merged != existing) upsertCloudTask(merged)
+        return merged
+    }
+
+    @Query("DELETE FROM cloud_tasks WHERE id IN (:ids)")
+    suspend fun deleteCloudTasks(ids: List<String>)
+
+    @Query("SELECT * FROM cloud_artifact_deliveries ORDER BY updatedAt DESC")
+    suspend fun cloudArtifactDeliveries(): List<CloudArtifactDeliveryEntity>
+
+    @Query("SELECT * FROM cloud_artifact_deliveries WHERE id = :id")
+    suspend fun cloudArtifactDelivery(id: String): CloudArtifactDeliveryEntity?
+
+    @Query("SELECT * FROM cloud_artifact_deliveries WHERE sourceIdentity = :sourceIdentity LIMIT 1")
+    suspend fun cloudArtifactDeliveryBySourceIdentity(sourceIdentity: String): CloudArtifactDeliveryEntity?
+
+    @Query("SELECT * FROM cloud_artifact_deliveries WHERE status IN ('PENDING', 'FAILED') ORDER BY createdAt, id")
+    suspend fun pendingCloudArtifactDeliveries(): List<CloudArtifactDeliveryEntity>
+
+    @Query("SELECT * FROM cloud_artifact_deliveries WHERE taskId = :taskId ORDER BY createdAt, id")
+    suspend fun cloudArtifactDeliveriesForTask(taskId: String): List<CloudArtifactDeliveryEntity>
+
+    @Query("SELECT * FROM cloud_artifact_deliveries WHERE messageId = :messageId ORDER BY createdAt, id")
+    suspend fun cloudArtifactDeliveriesForMessage(messageId: String): List<CloudArtifactDeliveryEntity>
+
+    @Upsert
+    suspend fun upsertCloudArtifactDelivery(delivery: CloudArtifactDeliveryEntity)
+
+    @Transaction
+    suspend fun putCloudArtifactDelivery(delivery: CloudArtifactDeliveryEntity): CloudArtifactDeliveryEntity {
+        val deliveryWithCurrentReferences = delivery.copy(
+            taskId = delivery.taskId?.takeIf { cloudTask(it) != null },
+            cloudServerId = delivery.cloudServerId?.takeIf { cloudServer(it) != null },
+        )
+        cloudArtifactDeliveryBySourceIdentity(delivery.sourceIdentity)?.let { existing ->
+            val merged = mergeCloudArtifactDeliveryEntity(existing, deliveryWithCurrentReferences)
+            if (merged != existing) upsertCloudArtifactDelivery(merged)
+            return merged
+        }
+        val usedNames = buildSet {
+            cloudArtifactDeliveriesForMessage(deliveryWithCurrentReferences.messageId).forEach { add(it.displayName) }
+            attachmentsForMessage(deliveryWithCurrentReferences.messageId).forEach { add(it.fileName) }
+        }
+        val named = deliveryWithCurrentReferences.copy(
+            displayName = allocateCloudArtifactDisplayName(
+                deliveryWithCurrentReferences.displayName,
+                deliveryWithCurrentReferences.sourceIdentity,
+                usedNames,
+            ),
+        )
+        upsertCloudArtifactDelivery(named)
+        return named
+    }
+
     @Query("SELECT * FROM app_settings WHERE id = 1")
     suspend fun appSettings(): AppSettingsEntity?
 
@@ -328,6 +656,9 @@ interface LocalDao {
 
     @Query("SELECT * FROM message_attachments WHERE messageId = :messageId ORDER BY createdAt, id")
     suspend fun attachmentsForMessage(messageId: String): List<MessageAttachmentEntity>
+
+    @Query("SELECT * FROM message_attachments WHERE id = :id")
+    suspend fun attachment(id: String): MessageAttachmentEntity?
 
     @Upsert
     suspend fun putAttachments(attachments: List<MessageAttachmentEntity>)
@@ -510,12 +841,16 @@ interface LocalDao {
         defaultModelId: String?,
         settings: AppSettingsEntity? = null,
         agents: List<AgentEntity> = emptyList(),
+        cloudServers: List<CloudServerEntity> = emptyList(),
+        cloudMcpServers: List<CloudMcpServerEntity> = emptyList(),
     ) {
         putProviders(providers)
         putModels(models)
         defaultModelId?.let { setDefaultModel(it) }
         settings?.let { putAppSettings(it) }
         if (agents.isNotEmpty()) putAgents(agents)
+        cloudServers.forEach { putCloudServer(it) }
+        cloudMcpServers.forEach { putCloudMcpServer(it) }
     }
 }
 
@@ -533,8 +868,12 @@ interface LocalDao {
         KnowledgeDocumentEntity::class,
         KnowledgeChunkEntity::class,
         KnowledgeChunkFts::class,
+        CloudServerEntity::class,
+        CloudMcpServerEntity::class,
+        CloudTaskEntity::class,
+        CloudArtifactDeliveryEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 abstract class TokenFlowDatabase : RoomDatabase() {
@@ -545,7 +884,15 @@ abstract class TokenFlowDatabase : RoomDatabase() {
             context.applicationContext,
             TokenFlowDatabase::class.java,
             "tokenflow-local.db",
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6).build()
+        ).addMigrations(
+            MIGRATION_1_2,
+            MIGRATION_2_3,
+            MIGRATION_3_4,
+            MIGRATION_4_5,
+            MIGRATION_5_6,
+            MIGRATION_6_7,
+            PRE_RELEASE_DOWNGRADE_8_7,
+        ).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -655,6 +1002,39 @@ abstract class TokenFlowDatabase : RoomDatabase() {
                 )
             }
         }
+
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE conversations ADD COLUMN enableInfiniteCloud INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE conversations ADD COLUMN cloudServerId TEXT")
+                db.execSQL("ALTER TABLE agents ADD COLUMN enableInfiniteCloud INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE agents ADD COLUMN cloudServerId TEXT")
+                db.execSQL("CREATE TABLE IF NOT EXISTS cloud_servers (id TEXT NOT NULL, name TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, username TEXT NOT NULL, startDirectory TEXT NOT NULL, hostKeyAlgorithm TEXT, hostKeyBase64 TEXT, hostKeyFingerprint TEXT, maxConcurrentTasks INTEGER NOT NULL, defaultTimeoutMinutes INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cloud_servers_name ON cloud_servers(name)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cloud_servers_host_port_username ON cloud_servers(host, port, username)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS cloud_mcp_servers (id TEXT NOT NULL, cloudServerId TEXT NOT NULL, name TEXT NOT NULL, transport TEXT NOT NULL, command TEXT NOT NULL, argumentsJson TEXT NOT NULL, workingDirectory TEXT NOT NULL, url TEXT NOT NULL, environmentNamesJson TEXT NOT NULL, headerNamesJson TEXT NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id), FOREIGN KEY(cloudServerId) REFERENCES cloud_servers(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cloud_mcp_servers_cloudServerId ON cloud_mcp_servers(cloudServerId)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_cloud_mcp_servers_cloudServerId_name ON cloud_mcp_servers(cloudServerId, name)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS cloud_tasks (id TEXT NOT NULL, cloudServerId TEXT, serverName TEXT NOT NULL, conversationId TEXT, requestId TEXT, kind TEXT NOT NULL, summary TEXT NOT NULL, status TEXT NOT NULL, remoteDirectory TEXT NOT NULL, exitCode INTEGER, error TEXT NOT NULL, artifactPathsJson TEXT NOT NULL, createdAt INTEGER NOT NULL, startedAt INTEGER, finishedAt INTEGER, updatedAt INTEGER NOT NULL, PRIMARY KEY(id), FOREIGN KEY(cloudServerId) REFERENCES cloud_servers(id) ON UPDATE NO ACTION ON DELETE SET NULL)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cloud_tasks_cloudServerId ON cloud_tasks(cloudServerId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cloud_tasks_conversationId ON cloud_tasks(conversationId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cloud_tasks_updatedAt ON cloud_tasks(updatedAt)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS cloud_artifact_deliveries (id TEXT NOT NULL, requestId TEXT, messageId TEXT NOT NULL, taskId TEXT, cloudServerId TEXT, sourceType TEXT NOT NULL, sourceIdentity TEXT NOT NULL, remotePath TEXT, localCachePath TEXT, displayName TEXT NOT NULL, mimeType TEXT NOT NULL, status TEXT NOT NULL, attachmentId TEXT NOT NULL, error TEXT NOT NULL, retryCount INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, deliveredAt INTEGER, PRIMARY KEY(id), FOREIGN KEY(messageId) REFERENCES messages(id) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(taskId) REFERENCES cloud_tasks(id) ON UPDATE NO ACTION ON DELETE SET NULL, FOREIGN KEY(cloudServerId) REFERENCES cloud_servers(id) ON UPDATE NO ACTION ON DELETE SET NULL)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cloud_artifact_deliveries_messageId ON cloud_artifact_deliveries(messageId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cloud_artifact_deliveries_taskId ON cloud_artifact_deliveries(taskId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cloud_artifact_deliveries_cloudServerId ON cloud_artifact_deliveries(cloudServerId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cloud_artifact_deliveries_status ON cloud_artifact_deliveries(status)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cloud_artifact_deliveries_updatedAt ON cloud_artifact_deliveries(updatedAt)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_cloud_artifact_deliveries_sourceIdentity ON cloud_artifact_deliveries(sourceIdentity)")
+            }
+        }
+
+        val PRE_RELEASE_DOWNGRADE_8_7 = object : Migration(8, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // A pre-release build labeled the unchanged v7 schema as v8.
+                // Room validates the complete v7 schema after this compatibility bridge.
+            }
+        }
     }
 }
 
@@ -700,6 +1080,8 @@ fun ConversationEntity.toDomain() = Conversation(
     enableSearch = enableSearch,
     enableRead = enableRead,
     enableKnowledge = enableKnowledge,
+    enableInfiniteCloud = enableInfiniteCloud,
+    cloudServerId = cloudServerId,
     pinnedAt = pinnedAt,
     archivedAt = archivedAt,
     branchedFromConversationId = branchedFromConversationId,
@@ -731,6 +1113,8 @@ fun Conversation.toEntity() = ConversationEntity(
     enableSearch = enableSearch,
     enableRead = enableRead,
     enableKnowledge = enableKnowledge,
+    enableInfiniteCloud = enableInfiniteCloud,
+    cloudServerId = cloudServerId,
     pinnedAt = pinnedAt,
     archivedAt = archivedAt,
     branchedFromConversationId = branchedFromConversationId,
@@ -764,13 +1148,87 @@ fun NoteEntity.toDomain() = Note(id, title, body, sourceMessageId, sourceConvers
 fun Note.toEntity() = NoteEntity(id, title, body, sourceMessageId, sourceConversationId, createdAt, updatedAt)
 
 fun AgentEntity.toDomain() = AgentProfile(
-    id, name, description, modelId, systemPrompt, thinkingEffort, maxToolCalls,
-    enableSearch, enableRead, enableKnowledge, createdAt, updatedAt,
+    id = id, name = name, description = description, modelId = modelId, systemPrompt = systemPrompt,
+    thinkingEffort = thinkingEffort, maxToolCalls = maxToolCalls, enableSearch = enableSearch,
+    enableRead = enableRead, enableKnowledge = enableKnowledge, enableInfiniteCloud = enableInfiniteCloud,
+    cloudServerId = cloudServerId, createdAt = createdAt, updatedAt = updatedAt,
 )
 
 fun AgentProfile.toEntity() = AgentEntity(
     id, name, description, modelId, systemPrompt, thinkingEffort, maxToolCalls,
-    enableSearch, enableRead, enableKnowledge, createdAt, updatedAt,
+    enableSearch, enableRead, enableKnowledge, enableInfiniteCloud, cloudServerId, createdAt, updatedAt,
+)
+
+fun CloudServerEntity.toDomain(keyConfigured: Boolean) = CloudServerProfile(
+    id, name, host, port, username, startDirectory, hostKeyAlgorithm, hostKeyBase64,
+    hostKeyFingerprint, maxConcurrentTasks, defaultTimeoutMinutes, keyConfigured, createdAt, updatedAt,
+)
+
+fun CloudServerProfile.toEntity() = CloudServerEntity(
+    id, name, host, port, username, startDirectory, hostKeyAlgorithm, hostKeyBase64,
+    hostKeyFingerprint, maxConcurrentTasks, defaultTimeoutMinutes, createdAt, updatedAt,
+)
+
+fun CloudMcpServerEntity.toDomain(secretsConfigured: Boolean) = CloudMcpServer(
+    id = id,
+    cloudServerId = cloudServerId,
+    name = name,
+    transport = CloudMcpTransport.valueOf(transport),
+    command = command,
+    arguments = ConfigArchiveCodec.defaultJson.decodeFromString(argumentsJson),
+    workingDirectory = workingDirectory,
+    url = url,
+    environmentNames = ConfigArchiveCodec.defaultJson.decodeFromString(environmentNamesJson),
+    headerNames = ConfigArchiveCodec.defaultJson.decodeFromString(headerNamesJson),
+    secretsConfigured = secretsConfigured,
+    createdAt = createdAt,
+    updatedAt = updatedAt,
+)
+
+fun CloudMcpServer.toEntity() = CloudMcpServerEntity(
+    id, cloudServerId, name, transport.name, command,
+    ConfigArchiveCodec.defaultJson.encodeToString(arguments), workingDirectory, url,
+    ConfigArchiveCodec.defaultJson.encodeToString(environmentNames),
+    ConfigArchiveCodec.defaultJson.encodeToString(headerNames), createdAt, updatedAt,
+)
+
+fun CloudTaskEntity.toDomain() = CloudTask(
+    id, cloudServerId, serverName, conversationId, requestId, kind, summary,
+    CloudTaskStatus.valueOf(status), remoteDirectory, exitCode, error,
+    ConfigArchiveCodec.defaultJson.decodeFromString(artifactPathsJson), createdAt, startedAt, finishedAt, updatedAt,
+)
+
+fun CloudTask.toEntity() = CloudTaskEntity(
+    id, cloudServerId, serverName, conversationId, requestId, kind, summary, status.name,
+    remoteDirectory, exitCode, error, ConfigArchiveCodec.defaultJson.encodeToString(artifactPaths),
+    createdAt, startedAt, finishedAt, updatedAt,
+)
+
+fun CloudArtifactDeliveryEntity.toDomain() = CloudArtifactDelivery(
+    id = id,
+    requestId = requestId,
+    messageId = messageId,
+    taskId = taskId,
+    cloudServerId = cloudServerId,
+    sourceType = CloudArtifactSourceType.valueOf(sourceType),
+    sourceIdentity = sourceIdentity,
+    remotePath = remotePath,
+    localCachePath = localCachePath,
+    displayName = displayName,
+    mimeType = mimeType,
+    status = CloudArtifactDeliveryStatus.valueOf(status),
+    attachmentId = attachmentId,
+    error = error,
+    retryCount = retryCount,
+    createdAt = createdAt,
+    updatedAt = updatedAt,
+    deliveredAt = deliveredAt,
+)
+
+fun CloudArtifactDelivery.toEntity() = CloudArtifactDeliveryEntity(
+    id, requestId, messageId, taskId, cloudServerId, sourceType.name, sourceIdentity,
+    remotePath, localCachePath, displayName, mimeType, status.name, attachmentId, error,
+    retryCount, createdAt, updatedAt, deliveredAt,
 )
 
 fun KnowledgeDocumentEntity.toDomain() = KnowledgeDocument(

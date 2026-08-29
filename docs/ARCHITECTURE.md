@@ -9,7 +9,7 @@ flowchart LR
     UI["Jetpack Compose UI"] --> VM["AppViewModel\nStateFlow + generation jobs"]
     VM --> DS["ChatDataSource"]
     DS --> Repo["ChatRepository"]
-    Repo --> DB["Room v6"]
+    Repo --> DB["Room v7"]
     Repo --> Files["App private files"]
     Repo --> Engine["DirectChatEngine"]
     Engine --> Gateway["ModelGateway adapters"]
@@ -19,6 +19,7 @@ flowchart LR
     Tools --> KB["Local knowledge FTS"]
     Tools --> Exa["Exa search"]
     Tools --> Reader["URL reader / InfoFlow"]
+    Tools --> Cloud["Infinite Cloud\nSSH / SFTP / MCP"]
     Repo --> Secrets["SecretStore\nAndroid Keystore"]
     Repo --> TTS["MiMo TTS"]
 ```
@@ -43,7 +44,7 @@ flowchart LR
 | 本地数据 | `LocalDatabase.kt` | Room 实体、DAO、事务、外键和显式迁移 |
 | 文件与知识 | `AttachmentStore.kt`、`KnowledgeStore.kt`、`LocalAvatarStore.kt` | 私有文件生命周期、文档提取、分块、FTS、图片处理和头像 |
 | 安全与归档 | `SecretStore.kt`、`ConfigArchive.kt` | 凭据加密、加密配置导入导出 |
-| 模型与可选工具 | `OfflineCalculationTools.kt`、`WebTools.kt`、`MimoTtsClient.kt` | 本地计算与单位换算、Exa、URL 读取、InfoFlow、本地知识工具和语音生成 |
+| 模型与可选工具 | `OfflineCalculationTools.kt`、`WebTools.kt`、`InfiniteCloud.kt`、`MimoTtsClient.kt` | 本地计算、联网工具、SSH/SFTP、远端任务、MCP 和语音生成 |
 
 ## 消息生成数据流
 
@@ -53,7 +54,7 @@ flowchart LR
 4. 用户消息及其 metadata 先写入 Room；metadata 固定本轮知识片段 ID 和视觉描述，保证重试、历史重载和分支一致。
 5. Repository 根据最近一次“清空上下文”边界构造历史，注入系统提示词、本地知识和附件内容。
 6. `DirectChatEngine` 调用选定协议的 `ModelGateway`，把不同供应商事件统一为文本、思考、工具、usage 和完成/错误事件。
-7. 工具调用由 `WebToolExecutor` 统一分派：计算与单位换算在设备内执行，知识、搜索和网页读取按各自边界运行；结果回送给模型，过程事件持续合并到当前 Assistant metadata。
+7. 工具调用由 `WebToolExecutor` 统一分派。每次生成创建独立且可关闭的 `ToolSession`：本地/网页工具按既有边界运行；会话启用 Infinite Cloud 时，附件先上传，普通脚本通过不落任务表的即时协议执行。只有当前用户消息明确要求后台任务时才暴露持久任务工具。远端 MCP tools 只发现一次，并在该 session 内复用已验证的 SSH/MCP channel。结果回送给模型，初始化警告和过程事件持续合并到当前 Assistant metadata，结束或取消时统一释放 channel。
 8. 流式正文和状态实时更新 UI；完成、失败或中断时都持久化最终正文、过程、Token usage、知识引用以及生成时的助手昵称和模型身份快照。
 
 生成中的消息在进程恢复时会被标记为中断，而不是伪装成成功完成。
@@ -83,7 +84,8 @@ flowchart LR
 
 ## 持久化边界
 
-- 结构化数据存放于 Room v6。
+- 结构化数据存放于 Room v7。
+- Infinite Cloud 私钥、口令、MCP 环境值和 HTTP 请求头值只进入 `SecretStore`；Room 保存服务器、固定指纹、非敏感 MCP 定义和任务索引。
 - Assistant/User 扩展信息存放在消息行内 JSON metadata；可选字段使用默认值兼容旧记录，通常不需要修改 Room 表。
 - 附件、知识原文件和头像放在 App 私有文件目录；Room 只保存索引和路径。
 - API Key 不存入 Room，由 `SecretStore` 使用 Android Keystore 加密后写入私有 SharedPreferences。

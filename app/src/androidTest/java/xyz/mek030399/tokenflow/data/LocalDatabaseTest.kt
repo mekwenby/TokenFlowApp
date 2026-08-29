@@ -1,6 +1,7 @@
 package xyz.mek030399.tokenflow.data
 
 import androidx.room.Room
+import androidx.room.testing.MigrationTestHelper
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
@@ -13,9 +14,16 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 
 class LocalDatabaseTest {
+    @get:Rule
+    val migrationHelper = MigrationTestHelper(
+        InstrumentationRegistry.getInstrumentation(),
+        TokenFlowDatabase::class.java,
+    )
+
     private lateinit var database: TokenFlowDatabase
     private lateinit var dao: LocalDao
 
@@ -338,7 +346,7 @@ class LocalDatabaseTest {
     }
 
     @Test
-    fun migrationOneToSixPreservesMessagesAndAddsMultimodalColumns() = runBlocking {
+    fun migrationOneToSevenPreservesMessagesAndAddsCloudTables() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val name = "migration-${System.nanoTime()}.db"
         context.deleteDatabase(name)
@@ -380,6 +388,7 @@ class LocalDatabaseTest {
                 TokenFlowDatabase.MIGRATION_3_4,
                 TokenFlowDatabase.MIGRATION_4_5,
                 TokenFlowDatabase.MIGRATION_5_6,
+                TokenFlowDatabase.MIGRATION_6_7,
             )
             .build()
         try {
@@ -399,10 +408,412 @@ class LocalDatabaseTest {
             assertEquals("mimo_default", migratedDao.appSettings()?.mimoTtsVoice)
             assertEquals(DEFAULT_ASSISTANT_NICKNAME, migratedDao.appSettings()?.assistantNickname)
             assertTrue(migratedDao.attachmentsForMessage("m").isEmpty())
+            assertTrue(migratedDao.conversation("override")?.enableInfiniteCloud == false)
+            assertTrue(migratedDao.cloudServers().isEmpty())
+            assertTrue(migratedDao.cloudMcpServers().isEmpty())
+            assertTrue(migratedDao.cloudTasks().isEmpty())
+            assertTrue(migratedDao.cloudArtifactDeliveries().isEmpty())
         } finally {
             migrated.close()
             context.deleteDatabase(name)
         }
+    }
+
+    @Test
+    fun deletingCloudServerUnbindsProfilesAndPreservesTaskHistory() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val secrets = SecretStore(context)
+        val server = CloudServerProfile(id = "cloud-delete", name = "Deleted host", host = "host.example", username = "runner")
+        dao.putCloudServer(server.toEntity())
+        dao.putCloudMcpServer(CloudMcpServer(id = "mcp-delete", cloudServerId = server.id, name = "Tools", command = "tool").toEntity())
+        dao.putConversation(Conversation(id = "cloud-conversation", enableInfiniteCloud = true, cloudServerId = server.id).toEntity())
+        dao.putAgent(AgentProfile(id = "cloud-agent", name = "Cloud agent", enableInfiniteCloud = true, cloudServerId = server.id).toEntity())
+        dao.putCloudTaskMonotonic(CloudTask(
+            id = "cloud-task-history",
+            cloudServerId = server.id,
+            serverName = server.name,
+            kind = "python",
+            status = CloudTaskStatus.SUCCEEDED,
+        ).toEntity())
+        val gateway = ModelGateway()
+        val cloud = InfiniteCloudManager(context, dao, secrets)
+        val repository = ChatRepository(
+            dao = dao,
+            secretStore = secrets,
+            gateway = gateway,
+            engine = DirectChatEngine(gateway, WebToolExecutor(secrets, ExaClient(), UrlReader(context))),
+            archive = ConfigArchiveCodec(),
+            infiniteCloud = cloud,
+        )
+
+        repository.deleteCloudServer(server.id)
+
+        assertNull(dao.cloudServer(server.id))
+        assertTrue(dao.cloudMcpServers(server.id).isEmpty())
+        assertFalse(dao.conversation("cloud-conversation")!!.enableInfiniteCloud)
+        assertNull(dao.conversation("cloud-conversation")!!.cloudServerId)
+        assertFalse(dao.agent("cloud-agent")!!.enableInfiniteCloud)
+        assertNull(dao.agent("cloud-agent")!!.cloudServerId)
+        val history = dao.cloudTask("cloud-task-history")!!
+        assertNull(history.cloudServerId)
+        assertEquals("Deleted host", history.serverName)
+    }
+
+    @Test
+    fun deletingCloudServerIsBlockedByUnknownTask() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val server = CloudServerProfile(id = "cloud-active", name = "Active host", host = "host.example", username = "runner")
+        dao.putCloudServer(server.toEntity())
+        dao.putCloudTaskMonotonic(CloudTask(
+            id = "cloud-task-unknown",
+            cloudServerId = server.id,
+            serverName = server.name,
+            kind = "shell",
+            status = CloudTaskStatus.UNKNOWN,
+        ).toEntity())
+        val secrets = SecretStore(context)
+        val gateway = ModelGateway()
+        val repository = ChatRepository(
+            dao = dao,
+            secretStore = secrets,
+            gateway = gateway,
+            engine = DirectChatEngine(gateway, WebToolExecutor(secrets, ExaClient(), UrlReader(context))),
+            archive = ConfigArchiveCodec(),
+            infiniteCloud = InfiniteCloudManager(context, dao, secrets),
+        )
+
+        assertTrue(runCatching { repository.deleteCloudServer(server.id) }.isFailure)
+        assertTrue(dao.cloudServer(server.id) != null)
+    }
+
+    @Test
+    fun cloudTaskWritesAdvanceMonotonically() = runBlocking {
+        val unknown = CloudTask(
+            id = "cloud-task-monotonic",
+            serverName = "Server",
+            kind = "shell",
+            summary = "pending",
+            status = CloudTaskStatus.UNKNOWN,
+            createdAt = 1,
+            updatedAt = 100,
+        ).toEntity()
+        dao.putCloudTaskMonotonic(unknown)
+
+        val running = dao.putCloudTaskMonotonic(
+            unknown.copy(
+                summary = "running",
+                status = CloudTaskStatus.RUNNING.name,
+                updatedAt = 20,
+            ),
+        )
+        val cancelled = dao.putCloudTaskMonotonic(
+            running.copy(
+                summary = "cancelled",
+                status = CloudTaskStatus.CANCELLED.name,
+                updatedAt = 30,
+            ),
+        )
+        dao.putCloudTaskMonotonic(
+            cancelled.copy(
+                summary = "late running",
+                status = CloudTaskStatus.RUNNING.name,
+                updatedAt = 200,
+            ),
+        )
+
+        val stored = dao.cloudTask(unknown.id)!!
+        assertEquals(CloudTaskStatus.CANCELLED.name, stored.status)
+        assertEquals("cancelled", stored.summary)
+        assertEquals(100L, stored.updatedAt)
+    }
+
+    @Test
+    fun deletingCloudTaskHistoryIsBatchableAndRejectsActiveTasks() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        listOf(
+            CloudTask(id = "task-complete", serverName = "Server", kind = "shell", status = CloudTaskStatus.SUCCEEDED),
+            CloudTask(id = "task-failed", serverName = "Server", kind = "python", status = CloudTaskStatus.FAILED),
+            CloudTask(id = "task-running", serverName = "Server", kind = "javascript", status = CloudTaskStatus.RUNNING),
+            CloudTask(id = "task-unknown", serverName = "Server", kind = "shell", status = CloudTaskStatus.UNKNOWN),
+        ).forEach { dao.putCloudTaskMonotonic(it.toEntity()) }
+        val secrets = SecretStore(context)
+        val gateway = ModelGateway()
+        val repository = ChatRepository(
+            dao = dao,
+            secretStore = secrets,
+            gateway = gateway,
+            engine = DirectChatEngine(gateway, WebToolExecutor(secrets, ExaClient(), UrlReader(context))),
+            archive = ConfigArchiveCodec(),
+        )
+
+        repository.deleteCloudTasks(setOf("task-complete", "task-failed"))
+
+        assertNull(dao.cloudTask("task-complete"))
+        assertNull(dao.cloudTask("task-failed"))
+        assertTrue(dao.cloudTask("task-running") != null)
+        assertTrue(runCatching { repository.deleteCloudTasks(setOf("task-running")) }.isFailure)
+        assertTrue(runCatching { repository.deleteCloudTasks(setOf("task-unknown")) }.isFailure)
+        assertTrue(dao.cloudTask("task-running") != null)
+        assertTrue(dao.cloudTask("task-unknown") != null)
+    }
+
+    @Test
+    fun deletingCompletedTaskQueuesItsArtifactsBeforeRemovingHistory() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val server = CloudServerProfile(
+            id = "artifact-history-server",
+            name = "Artifact server",
+            host = "host.example",
+            username = "runner",
+        )
+        val conversation = Conversation(id = "artifact-history-conversation")
+        val message = ChatMessage(
+            id = "artifact-history-message",
+            conversationId = conversation.id,
+            requestId = "artifact-history-request",
+            role = "assistant",
+        )
+        val task = CloudTask(
+            id = "artifact-history-task",
+            cloudServerId = server.id,
+            serverName = server.name,
+            conversationId = conversation.id,
+            requestId = message.requestId,
+            kind = "python",
+            status = CloudTaskStatus.SUCCEEDED,
+            artifactPaths = listOf("/workspace/one/result.txt", "/workspace/two/result.txt"),
+        )
+        dao.putCloudServer(server.toEntity())
+        dao.putConversation(conversation.toEntity())
+        dao.putMessages(listOf(message.toEntity()))
+        dao.putCloudTaskMonotonic(task.toEntity())
+        val secrets = SecretStore(context)
+        val gateway = ModelGateway()
+        val repository = ChatRepository(
+            dao = dao,
+            secretStore = secrets,
+            gateway = gateway,
+            engine = DirectChatEngine(gateway, WebToolExecutor(secrets, ExaClient(), UrlReader(context))),
+            archive = ConfigArchiveCodec(),
+        )
+
+        repository.deleteCloudTasks(setOf(task.id))
+
+        assertNull(dao.cloudTask(task.id))
+        val deliveries = dao.cloudArtifactDeliveriesForMessage(message.id)
+        assertEquals(2, deliveries.size)
+        assertTrue(deliveries.all { it.status == CloudArtifactDeliveryStatus.PENDING.name })
+        assertTrue(deliveries.all { it.taskId == null })
+        assertEquals(2, deliveries.map(CloudArtifactDeliveryEntity::displayName).distinct().size)
+    }
+
+    @Test
+    fun cloudArtifactQueueUpsertIsMonotonicAndAllocatesNamesAtomically() = runBlocking {
+        val conversation = Conversation(id = "artifact-upsert-conversation")
+        val message = ChatMessage(id = "artifact-upsert-message", conversationId = conversation.id, role = "assistant")
+        dao.putConversation(conversation.toEntity())
+        dao.putMessages(listOf(message.toEntity()))
+        val first = CloudArtifactDelivery(
+            id = "artifact-upsert-first",
+            messageId = message.id,
+            sourceType = CloudArtifactSourceType.MCP,
+            sourceIdentity = "artifact-upsert-source-one",
+            localCachePath = "/private/one/result.txt",
+            displayName = "result.txt",
+            attachmentId = "artifact-upsert-attachment-one",
+        ).toEntity()
+        val second = first.copy(
+            id = "artifact-upsert-second",
+            sourceIdentity = "artifact-upsert-source-two",
+            localCachePath = "/private/two/result.txt",
+            attachmentId = "artifact-upsert-attachment-two",
+        )
+
+        val queued = dao.putCloudArtifactDelivery(first)
+        val delivered = dao.putCloudArtifactDelivery(
+            queued.copy(
+                status = CloudArtifactDeliveryStatus.DELIVERED.name,
+                localCachePath = null,
+                deliveredAt = 20,
+                updatedAt = 20,
+            ),
+        )
+        val stale = dao.putCloudArtifactDelivery(first.copy(updatedAt = 30))
+        val disambiguated = dao.putCloudArtifactDelivery(second)
+
+        assertEquals(CloudArtifactDeliveryStatus.DELIVERED.name, delivered.status)
+        assertEquals(CloudArtifactDeliveryStatus.DELIVERED.name, stale.status)
+        assertEquals("result.txt", queued.displayName)
+        assertTrue(disambiguated.displayName.startsWith("result-"))
+        assertTrue(disambiguated.displayName.endsWith(".txt"))
+    }
+
+    @Test
+    fun cloudArtifactDeliveryPersistsAndKeepsStableAttachmentIdentity() = runBlocking {
+        val conversation = Conversation(id = "artifact-conversation")
+        val message = ChatMessage(id = "artifact-message", conversationId = conversation.id, role = "assistant")
+        dao.putConversation(conversation.toEntity())
+        dao.putMessages(listOf(message.toEntity()))
+        val delivery = CloudArtifactDelivery(
+            id = "artifact-delivery",
+            requestId = "request",
+            messageId = message.id,
+            sourceType = CloudArtifactSourceType.MCP,
+            sourceIdentity = "mcp-source",
+            localCachePath = "/private/cache/artifact.bin",
+            displayName = "artifact.bin",
+            attachmentId = "artifact-attachment",
+        )
+
+        dao.putCloudArtifactDelivery(delivery.toEntity())
+
+        assertEquals(delivery, dao.cloudArtifactDelivery(delivery.id)?.toDomain())
+        assertEquals(delivery, dao.pendingCloudArtifactDeliveries().single().toDomain())
+        dao.deleteMessage(message.id)
+        assertNull(dao.cloudArtifactDelivery(delivery.id))
+    }
+
+    @Test
+    fun immediateArtifactIsQueuedBeforeGenerationFinalization() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val conversation = Conversation(id = "immediate-artifact-conversation")
+        val message = ChatMessage(
+            id = "immediate-artifact-message",
+            conversationId = conversation.id,
+            requestId = "immediate-artifact-request",
+            role = "assistant",
+        )
+        dao.putConversation(conversation.toEntity())
+        dao.putMessages(listOf(message.toEntity()))
+        dao.putCloudServer(
+            CloudServerProfile(
+                id = "immediate-artifact-server",
+                name = "Immediate artifact server",
+                host = "host.example",
+                username = "runner",
+            ).toEntity(),
+        )
+        val cloud = InfiniteCloudManager(context, dao, SecretStore(context))
+
+        cloud.registerResponseArtifact(
+            serverId = "immediate-artifact-server",
+            requestId = message.requestId,
+            messageId = message.id,
+            path = "/workspace/first/result.txt",
+            resolve = false,
+        )
+
+        val queued = dao.pendingCloudArtifactDeliveries().single().toDomain()
+        assertEquals(CloudArtifactDeliveryStatus.PENDING, queued.status)
+        assertEquals("immediate-artifact-server", queued.cloudServerId)
+        assertEquals("/workspace/first/result.txt", queued.remotePath)
+        assertEquals(message.id, queued.messageId)
+    }
+
+    @Test
+    fun migrationSixToSevenMatchesExportedSchemaIncludingArtifactQueue() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "migration-cloud-six-seven-${System.nanoTime()}.db"
+        context.deleteDatabase(name)
+        migrationHelper.createDatabase(name, 6).close()
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            name,
+            7,
+            true,
+            TokenFlowDatabase.MIGRATION_6_7,
+        )
+        try {
+            migrated.query(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cloud_artifact_deliveries'",
+            ).use { cursor -> assertTrue(cursor.moveToFirst()) }
+        } finally {
+            migrated.close()
+            context.deleteDatabase(name)
+        }
+    }
+
+    @Test
+    fun preReleaseVersionEightHeaderDowngradesToSevenWithoutDataLoss() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "migration-pre-release-eight-seven-${System.nanoTime()}.db"
+        context.deleteDatabase(name)
+        migrationHelper.createDatabase(name, 7).apply {
+            execSQL(
+                "INSERT INTO providers " +
+                    "(id, name, baseUrl, protocol, createdAt, updatedAt) " +
+                    "VALUES ('compat-provider', 'Compatibility', 'https://api.example.com/v1', " +
+                    "'OPENAI_RESPONSES', 1, 1)",
+            )
+            execSQL("PRAGMA user_version = 8")
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            name,
+            7,
+            true,
+            TokenFlowDatabase.PRE_RELEASE_DOWNGRADE_8_7,
+        )
+        try {
+            migrated.query("PRAGMA user_version").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(7, cursor.getInt(0))
+            }
+            migrated.query(
+                "SELECT name FROM providers WHERE id = 'compat-provider'",
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("Compatibility", cursor.getString(0))
+            }
+        } finally {
+            migrated.close()
+            context.deleteDatabase(name)
+        }
+    }
+
+    @Test
+    fun failedMcpArtifactDeliveryRemainsRetryableUntilAttachmentIsPersisted() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val conversation = Conversation(id = "artifact-retry-conversation")
+        val message = ChatMessage(id = "artifact-retry-message", conversationId = conversation.id, role = "assistant")
+        dao.putConversation(conversation.toEntity())
+        dao.putMessages(listOf(message.toEntity()))
+        val cacheFile = File(context.cacheDir, "infinite_cloud_mcp_artifacts/retry-${System.nanoTime()}.bin")
+        cacheFile.parentFile?.mkdirs()
+        cacheFile.delete()
+        val delivery = CloudArtifactDelivery(
+            id = "artifact-retry-delivery",
+            requestId = "artifact-retry-request",
+            messageId = message.id,
+            sourceType = CloudArtifactSourceType.MCP,
+            sourceIdentity = "artifact-retry-source",
+            localCachePath = cacheFile.absolutePath,
+            displayName = "result.bin",
+            attachmentId = "artifact-retry-attachment",
+        )
+        dao.putCloudArtifactDelivery(delivery.toEntity())
+        val secrets = SecretStore(context)
+        val gateway = ModelGateway()
+        val repository = ChatRepository(
+            dao = dao,
+            secretStore = secrets,
+            gateway = gateway,
+            engine = DirectChatEngine(gateway, WebToolExecutor(secrets, ExaClient(), UrlReader(context))),
+            archive = ConfigArchiveCodec(),
+            attachmentStore = AttachmentStore(context, dao),
+        )
+
+        val failed = repository.retryCloudArtifactDelivery(delivery.id)
+        assertEquals(CloudArtifactDeliveryStatus.FAILED, failed.status)
+        assertEquals(1, failed.retryCount)
+        assertTrue(dao.cloudArtifactDelivery(delivery.id) != null)
+
+        cacheFile.writeBytes("artifact".encodeToByteArray())
+        val delivered = repository.retryCloudArtifactDelivery(delivery.id)
+        assertEquals(CloudArtifactDeliveryStatus.DELIVERED, delivered.status)
+        assertEquals(delivery.attachmentId, dao.attachment(delivery.attachmentId)?.id)
+        assertFalse(cacheFile.exists())
     }
 
     @Test

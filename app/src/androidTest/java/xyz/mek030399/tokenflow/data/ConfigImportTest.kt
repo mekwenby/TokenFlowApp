@@ -9,6 +9,104 @@ import org.junit.Test
 
 class ConfigImportTest {
     @Test
+    fun previewRejectsDuplicateMcpNamesForOneCloudServer() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val database = Room.inMemoryDatabaseBuilder(context, TokenFlowDatabase::class.java).build()
+        val dao = database.localDao()
+        val secrets = SecretStore(context)
+        val server = CloudServerProfile(id = "preview-cloud", name = "Cloud", host = "host.example", username = "runner")
+        val payload = ConfigArchivePayload(
+            createdAt = 1,
+            providers = emptyList(),
+            models = emptyList(),
+            cloudServers = listOf(server),
+            cloudMcpServers = listOf(
+                CloudMcpServer(id = "preview-mcp-1", cloudServerId = server.id, name = "Tools", command = "tool-a"),
+                CloudMcpServer(id = "preview-mcp-2", cloudServerId = server.id, name = "Tools", command = "tool-b"),
+            ),
+        )
+        val password = "archive-password".toCharArray()
+        val encoded = ConfigArchiveCodec().encode(payload, password)
+
+        try {
+            assertTrue(runCatching { repository(context, dao, secrets).previewImport(encoded, password) }.isFailure)
+        } finally {
+            database.close()
+        }
+    }
+
+    @Test
+    fun cloudImportUpdatesConfigurationAndRequiresCredentialsAgain() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val database = Room.inMemoryDatabaseBuilder(context, TokenFlowDatabase::class.java).build()
+        val dao = database.localDao()
+        val secrets = SecretStore(context)
+        val suffix = System.nanoTime()
+        val server = CloudServerProfile(
+            id = "cloud-import-$suffix",
+            name = "Imported cloud",
+            host = "old.example",
+            username = "runner",
+        )
+        val mcp = CloudMcpServer(
+            id = "mcp-import-$suffix",
+            cloudServerId = server.id,
+            name = "Tools",
+            command = "old-tool",
+            environmentNames = listOf("TOKEN"),
+        )
+        val omittedMcp = CloudMcpServer(
+            id = "mcp-omitted-$suffix",
+            cloudServerId = server.id,
+            name = "Existing tools",
+            command = "existing-tool",
+            environmentNames = listOf("OMITTED_TOKEN"),
+            headerNames = listOf("Authorization"),
+        )
+        dao.putCloudServer(server.toEntity())
+        dao.putCloudMcpServer(mcp.toEntity())
+        dao.putCloudMcpServer(omittedMcp.toEntity())
+        val privateKeyName = secrets.cloudPrivateKeyName(server.id)
+        val passphraseName = secrets.cloudPrivateKeyPassphraseName(server.id)
+        val environmentName = secrets.cloudMcpEnvironmentName(mcp.id, "TOKEN")
+        val omittedEnvironmentName = secrets.cloudMcpEnvironmentName(omittedMcp.id, "OMITTED_TOKEN")
+        val omittedHeaderName = secrets.cloudMcpHeaderName(omittedMcp.id, "Authorization")
+        secrets.writeAll(mapOf(
+            privateKeyName to "private",
+            passphraseName to "passphrase",
+            environmentName to "token",
+            omittedEnvironmentName to "omitted-token",
+            omittedHeaderName to "omitted-header",
+        ))
+
+        try {
+            repository(context, dao, secrets).applyImport(preview(ConfigArchivePayload(
+                createdAt = 1,
+                providers = emptyList(),
+                models = emptyList(),
+                cloudServers = listOf(server.copy(host = "new.example")),
+                cloudMcpServers = listOf(mcp.copy(command = "new-tool")),
+            )))
+
+            assertEquals("new.example", dao.cloudServer(server.id)?.host)
+            assertEquals("new-tool", dao.cloudMcpServers(server.id).first { it.id == mcp.id }.command)
+            assertEquals(null, secrets.read(privateKeyName))
+            assertEquals(null, secrets.read(passphraseName))
+            assertEquals(null, secrets.read(environmentName))
+            assertEquals("existing-tool", dao.cloudMcpServers(server.id).first { it.id == omittedMcp.id }.command)
+            assertEquals(null, secrets.read(omittedEnvironmentName))
+            assertEquals(null, secrets.read(omittedHeaderName))
+        } finally {
+            secrets.remove(privateKeyName)
+            secrets.remove(passphraseName)
+            secrets.remove(environmentName)
+            secrets.remove(omittedEnvironmentName)
+            secrets.remove(omittedHeaderName)
+            database.close()
+        }
+    }
+
+    @Test
     fun importChoosesFallbackThenExplicitDefaultAndMergesStableIds() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val database = Room.inMemoryDatabaseBuilder(context, TokenFlowDatabase::class.java).build()
@@ -107,6 +205,26 @@ class ConfigImportTest {
         val original = ProviderConfig(providerId, "Original", "https://api.example.com/v1", ProviderProtocol.OPENAI_RESPONSES)
         dao.putProvider(original.toEntity())
         secrets.write(keyName, "old-key")
+        val cloudServer = CloudServerProfile(
+            id = "import-cloud-$providerId",
+            name = "Cloud",
+            host = "old.example",
+            username = "runner",
+        )
+        val cloudMcp = CloudMcpServer(
+            id = "import-mcp-$providerId",
+            cloudServerId = cloudServer.id,
+            name = "Tools",
+            command = "old-tool",
+            environmentNames = listOf("TOKEN"),
+            headerNames = listOf("Authorization"),
+        )
+        dao.putCloudServer(cloudServer.toEntity())
+        dao.putCloudMcpServer(cloudMcp.toEntity())
+        val privateKeyName = secrets.cloudPrivateKeyName(cloudServer.id)
+        val environmentName = secrets.cloudMcpEnvironmentName(cloudMcp.id, "TOKEN")
+        val headerName = secrets.cloudMcpHeaderName(cloudMcp.id, "Authorization")
+        secrets.writeAll(mapOf(privateKeyName to "old-private-key", environmentName to "old-token", headerName to "old-header"))
         val gateway = ModelGateway()
         val webTools = WebToolExecutor(secrets, ExaClient(), UrlReader(context))
         val repository = ChatRepository(
@@ -120,6 +238,8 @@ class ConfigImportTest {
             createdAt = 1,
             providers = listOf(ConfigProviderRecord(original.copy(name = "Imported"), "new-key")),
             models = listOf(ModelProfile("invalid-model", "missing-provider", "model-a")),
+            cloudServers = listOf(cloudServer.copy(host = "new.example")),
+            cloudMcpServers = listOf(cloudMcp.copy(command = "new-tool")),
         )
         val preview = ImportPreview(
             payload = payload,
@@ -141,7 +261,15 @@ class ConfigImportTest {
         assertEquals("old-key", secrets.read(keyName))
         assertEquals("Original", dao.provider(providerId)?.name)
         assertEquals(null, dao.model("invalid-model"))
+        assertEquals("old.example", dao.cloudServer(cloudServer.id)?.host)
+        assertEquals("old-tool", dao.cloudMcpServers(cloudServer.id).single().command)
+        assertEquals("old-private-key", secrets.read(privateKeyName))
+        assertEquals("old-token", secrets.read(environmentName))
+        assertEquals("old-header", secrets.read(headerName))
         secrets.remove(keyName)
+        secrets.remove(privateKeyName)
+        secrets.remove(environmentName)
+        secrets.remove(headerName)
         database.close()
     }
 

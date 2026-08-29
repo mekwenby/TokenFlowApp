@@ -1,6 +1,6 @@
 # Third-party notices
 
-This document lists the resolved third-party runtime artifacts distributed with TokenFlow 2.4.8. Copyright remains with the respective owners. The license texts and attribution notices below are provided for offline review and do not replace the license files in the corresponding upstream source distributions.
+This document lists the resolved third-party runtime artifacts distributed with TokenFlow 2.5.1. Copyright remains with the respective owners. The license texts and attribution notices below are provided for offline review and do not replace the license files in the corresponding upstream source distributions.
 
 ## Apache License 2.0 components
 
@@ -78,7 +78,7 @@ This document lists the resolved third-party runtime artifacts distributed with 
 - `androidx.savedstate:savedstate-ktx:1.3.2`
 - `androidx.sqlite:sqlite-android:2.6.2`
 - `androidx.sqlite:sqlite-framework-android:2.6.2`
-- `androidx.startup:startup-runtime:1.1.1`
+- `androidx.startup:startup-runtime:1.2.0`
 - `androidx.tracing:tracing:1.2.0`
 - `androidx.transition:transition:1.6.0`
 - `androidx.versionedparcelable:versionedparcelable:1.1.1`
@@ -88,8 +88,26 @@ This document lists the resolved third-party runtime artifacts distributed with 
 - `com.google.guava:failureaccess:1.0.2`
 - `com.google.guava:guava:33.3.1-android`
 - `com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava`
-- `com.squareup.okhttp3:okhttp:4.12.0`
-- `com.squareup.okio:okio-jvm:3.6.0`
+- `com.squareup.okhttp3:okhttp-android:5.3.2`
+- `com.squareup.okio:okio-jvm:3.17.0`
+- `com.typesafe:config:1.4.9`
+- `io.github.oshai:kotlin-logging-android:8.0.4`
+- `io.ktor:ktor-client-core-jvm:3.5.1`
+- `io.ktor:ktor-client-okhttp-jvm:3.5.1`
+- `io.ktor:ktor-events-jvm:3.5.1`
+- `io.ktor:ktor-http-cio-jvm:3.5.1`
+- `io.ktor:ktor-http-jvm:3.5.1`
+- `io.ktor:ktor-io-jvm:3.5.1`
+- `io.ktor:ktor-network-jvm:3.5.1`
+- `io.ktor:ktor-serialization-jvm:3.5.1`
+- `io.ktor:ktor-server-core-jvm:3.5.1`
+- `io.ktor:ktor-server-websockets-jvm:3.5.1`
+- `io.ktor:ktor-sse-jvm:3.5.1`
+- `io.ktor:ktor-utils-jvm:3.5.1`
+- `io.ktor:ktor-websocket-serialization-jvm:3.5.1`
+- `io.ktor:ktor-websockets-jvm:3.5.1`
+- `io.modelcontextprotocol:kotlin-sdk-client-jvm:0.15.0`
+- `io.modelcontextprotocol:kotlin-sdk-core-jvm:0.15.0`
 - `com.tom-roush:pdfbox-android:2.0.27.0`
 - `com.zaxxer:SparseBitSet:1.3`
 - `commons-codec:commons-codec:1.18.0`
@@ -104,19 +122,23 @@ This document lists the resolved third-party runtime artifacts distributed with 
 - `org.apache.poi:poi-scratchpad:5.4.1`
 - `org.apache.poi:poi:5.4.1`
 - `org.apache.xmlbeans:xmlbeans:5.3.0`
-- `org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.9.10`
-- `org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.10`
-- `org.jetbrains.kotlin:kotlin-stdlib:2.3.10`
-- `org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2`
-- `org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.2`
-- `org.jetbrains.kotlinx:kotlinx-serialization-core-jvm:1.9.0`
-- `org.jetbrains.kotlinx:kotlinx-serialization-json-jvm:1.9.0`
+- `org.jetbrains.kotlin:kotlin-reflect:2.3.21`
+- `org.jetbrains.kotlin:kotlin-stdlib:2.4.0`
+- `org.jetbrains.kotlinx:kotlinx-collections-immutable-jvm:0.5.1`
+- `org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0`
+- `org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.11.0`
+- `org.jetbrains.kotlinx:kotlinx-coroutines-slf4j:1.11.0`
+- `org.jetbrains.kotlinx:kotlinx-io-bytestring-jvm:0.9.1`
+- `org.jetbrains.kotlinx:kotlinx-io-core-jvm:0.9.1`
+- `org.jetbrains.kotlinx:kotlinx-serialization-core-jvm:1.11.0`
+- `org.jetbrains.kotlinx:kotlinx-serialization-json-jvm:1.11.0`
+- `org.slf4j:slf4j-api:2.0.18`
 - `org.jetbrains:annotations:23.0.0`
 - `org.jspecify:jspecify:1.0.0`
 
 The complete Apache License 2.0 text appears below after the attribution notices.
 
-## BSD-3-Clause component
+## BSD-3-Clause component: curvesapi
 
 - `com.github.virtuald:curvesapi:1.08`
 
@@ -133,6 +155,37 @@ are met:
   this list of conditions and the following disclaimer in the documentation
   and/or other materials provided with the distribution.
 - Neither the name of Graph Builder nor the names of its contributors may be
+  used to endorse or promote products derived from this software without
+  specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## BSD-3-Clause component: mwiede JSch
+
+- `com.github.mwiede:jsch:2.28.0`
+
+Copyright (c) 2002-2015 Atsuhiko Yamanaka, JCraft, Inc.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+- Redistributions of source code must retain the above copyright notice,
+  this list of conditions and the following disclaimer.
+- Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+- Neither the name of JCraft, Inc. nor the names of its contributors may be
   used to endorse or promote products derived from this software without
   specific prior written permission.
 
@@ -232,11 +285,11 @@ SOFTWARE.
 
 ### Bouncy Castle
 
-- `org.bouncycastle:bcpkix-jdk15to18:1.72`
-- `org.bouncycastle:bcprov-jdk15to18:1.72`
-- `org.bouncycastle:bcutil-jdk15to18:1.72`
+- `org.bouncycastle:bcpkix-jdk18on:1.85`
+- `org.bouncycastle:bcprov-jdk18on:1.85.2`
+- `org.bouncycastle:bcutil-jdk18on:1.85`
 
-Copyright (c) 2000-2022 The Legion of the Bouncy Castle Inc. (<https://www.bouncycastle.org>)
+Copyright (c) 2000-2025 The Legion of the Bouncy Castle Inc. (<https://www.bouncycastle.org>)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
@@ -250,7 +303,7 @@ The following texts reproduce NOTICE material found in the exact cached artifact
 
 ### OkHttp Public Suffix List
 
-Applies to `com.squareup.okhttp3:okhttp:4.12.0`.
+Applies to `com.squareup.okhttp3:okhttp-android:5.3.2`.
 
 Note that `publicsuffixes.gz` is compiled from The Public Suffix List:
 <https://publicsuffix.org/list/public_suffix_list.dat>

@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -60,6 +61,7 @@ import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material.icons.outlined.Straighten
 import androidx.compose.material.icons.outlined.UploadFile
@@ -142,6 +144,7 @@ internal fun WorkspaceScreen(state: AppUiState, viewModel: AppViewModel) {
                     AppScreen.NOTES -> NotesScreen(state, viewModel, !persistent)
                     AppScreen.AGENTS -> AgentsScreen(state, viewModel, !persistent)
                     AppScreen.KNOWLEDGE -> KnowledgeScreen(state, viewModel, !persistent)
+                    AppScreen.INFINITE_CLOUD -> InfiniteCloudScreen(state, viewModel, !persistent)
                     AppScreen.ABOUT -> AboutScreen(viewModel, !persistent)
                     else -> Unit
                 }
@@ -180,6 +183,7 @@ private fun WorkspaceRail(selected: AppScreen, viewModel: AppViewModel, modifier
             Triple(AppScreen.NOTES, Icons.Outlined.NoteAlt, R.string.notes),
             Triple(AppScreen.AGENTS, Icons.Outlined.SmartToy, R.string.agents),
             Triple(AppScreen.KNOWLEDGE, Icons.Outlined.FolderOpen, R.string.knowledge),
+            Triple(AppScreen.INFINITE_CLOUD, Icons.Outlined.Cloud, R.string.infinite_cloud),
             Triple(AppScreen.GLOBAL_SETTINGS, Icons.Outlined.Settings, R.string.global_settings),
             Triple(AppScreen.PROVIDERS, Icons.Outlined.Hub, R.string.providers_models),
             Triple(AppScreen.EXA, Icons.Outlined.Search, R.string.exa_search),
@@ -732,6 +736,8 @@ private fun AgentsScreen(state: AppUiState, viewModel: AppViewModel, showBack: B
 private fun AgentEditor(agent: AgentProfile, state: AppUiState, onClose: () -> Unit, onSave: (AgentProfile) -> Unit) {
     var draft by remember(agent.id) { mutableStateOf(agent) }
     var modelMenu by remember { mutableStateOf(false) }
+    val readyCloudServers = state.cloudServers.filter { it.keyConfigured && it.hostKeyFingerprint != null }
+    val cloudSelectionValid = !draft.enableInfiniteCloud || readyCloudServers.any { it.id == draft.cloudServerId }
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()).navigationBarsPadding(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.back)) }
@@ -750,13 +756,47 @@ private fun AgentEditor(agent: AgentProfile, state: AppUiState, onClose: () -> U
         AgentToggle(stringResource(R.string.search_web), draft.enableSearch) { draft = draft.copy(enableSearch = it) }
         AgentToggle(stringResource(R.string.read_web), draft.enableRead) { draft = draft.copy(enableRead = it) }
         AgentToggle(stringResource(R.string.enable_knowledge), draft.enableKnowledge) { draft = draft.copy(enableKnowledge = it) }
-        Button(onClick = { onSave(draft) }, enabled = draft.name.isNotBlank() && draft.modelId != null, modifier = Modifier.align(Alignment.End)) { Text(stringResource(R.string.save)) }
+        AgentToggle(
+            stringResource(R.string.infinite_cloud),
+            draft.enableInfiniteCloud,
+            enabled = readyCloudServers.isNotEmpty() || draft.enableInfiniteCloud,
+        ) {
+            draft = draft.copy(
+                enableInfiniteCloud = it,
+                cloudServerId = if (it) {
+                    draft.cloudServerId?.takeIf { configured -> readyCloudServers.any { server -> server.id == configured } }
+                        ?: readyCloudServers.firstOrNull()?.id
+                } else null,
+            )
+        }
+        if (draft.enableInfiniteCloud) {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                readyCloudServers.forEach { server ->
+                    FilterChip(
+                        selected = draft.cloudServerId == server.id,
+                        onClick = { draft = draft.copy(cloudServerId = server.id) },
+                        label = { Text(server.name) },
+                    )
+                }
+            }
+            if (!cloudSelectionValid) {
+                Text(stringResource(R.string.cloud_select_ready_server), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        Button(
+            onClick = { onSave(draft) },
+            enabled = draft.name.isNotBlank() && draft.modelId != null && cloudSelectionValid,
+            modifier = Modifier.align(Alignment.End),
+        ) { Text(stringResource(R.string.save)) }
     }
 }
 
 @Composable
-private fun AgentToggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Text(label, Modifier.weight(1f)); Switch(checked, onChange) }
+private fun AgentToggle(label: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f))
+        Switch(checked, onChange, enabled = enabled)
+    }
 }
 
 @Composable

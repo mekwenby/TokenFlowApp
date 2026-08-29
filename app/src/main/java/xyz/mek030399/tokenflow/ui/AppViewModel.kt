@@ -41,7 +41,17 @@ import xyz.mek030399.tokenflow.data.MessageAttachment
 import xyz.mek030399.tokenflow.data.PendingAttachment
 import xyz.mek030399.tokenflow.data.UrlReadDiagnostic
 import xyz.mek030399.tokenflow.data.VisionStatus
+import xyz.mek030399.tokenflow.data.CloudServerProfile
+import xyz.mek030399.tokenflow.data.CloudServerDraft
+import xyz.mek030399.tokenflow.data.CloudConnectionProbe
+import xyz.mek030399.tokenflow.data.CloudArtifactDelivery
+import xyz.mek030399.tokenflow.data.CloudFileEntry
+import xyz.mek030399.tokenflow.data.CloudMcpServer
+import xyz.mek030399.tokenflow.data.CloudTask
+import java.io.InputStream
 import java.io.IOException
+import java.io.OutputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.TimeZone
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -56,9 +66,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 enum class AppPhase { LOADING, SETUP, READY }
-enum class AppScreen { CHAT, BOOKMARKS, NOTES, AGENTS, KNOWLEDGE, GLOBAL_SETTINGS, PROVIDERS, EXA, TRANSFER, ABOUT }
+enum class AppScreen { CHAT, BOOKMARKS, NOTES, AGENTS, KNOWLEDGE, INFINITE_CLOUD, GLOBAL_SETTINGS, PROVIDERS, EXA, TRANSFER, ABOUT }
+enum class CloudSection { SERVERS, TASKS, FILES, MCP }
 
 sealed interface UiText {
     data class Resource(@param:StringRes val id: Int, val args: List<Any> = emptyList()) : UiText
@@ -84,6 +97,49 @@ data class ConversationConfig(
     val enableSearch: Boolean = true,
     val enableRead: Boolean = true,
     val enableKnowledge: Boolean = false,
+    val enableInfiniteCloud: Boolean = false,
+    val cloudServerId: String? = null,
+)
+
+data class CloudWorkspaceUiState(
+    val section: CloudSection = CloudSection.SERVERS,
+    val selectedServerId: String? = null,
+    val taskServerFilterId: String? = null,
+    val currentPath: String = "~",
+    val files: List<CloudFileEntry> = emptyList(),
+    val textServerId: String? = null,
+    val textPath: String? = null,
+    val textContent: String = "",
+    val taskLogId: String? = null,
+    val taskLog: String = "",
+    val pendingTrustServerId: String? = null,
+    val pendingProbe: CloudConnectionProbe? = null,
+    val pendingHostKeyReplacement: CloudHostKeyReplacement? = null,
+    val probingServerId: String? = null,
+    val serverDiagnostics: Map<String, CloudServerDiagnostic> = emptyMap(),
+    val busy: Boolean = false,
+    val mutatingServerIds: Set<String> = emptySet(),
+    val mutatingMcpServerIds: Set<String> = emptySet(),
+    val savingText: Boolean = false,
+    val testingMcpServerId: String? = null,
+    val mcpTestName: String? = null,
+    val mcpTestTools: List<String> = emptyList(),
+    val mcpTestCloudServerId: String? = null,
+    val mcpTestServerId: String? = null,
+    val mcpTestServerUpdatedAt: Long? = null,
+    val retryingArtifactDeliveryIds: Set<String> = emptySet(),
+)
+
+data class CloudHostKeyReplacement(
+    val serverId: String,
+    val expectedHostKeyBase64: String,
+    val oldFingerprint: String,
+    val probe: CloudConnectionProbe,
+)
+
+data class CloudServerDiagnostic(
+    val probe: CloudConnectionProbe? = null,
+    val error: String? = null,
 )
 
 data class GenerationState(
@@ -128,6 +184,12 @@ data class SpeechAutoPlayRequest(
     val target: SpeechAutoPlayTarget,
 )
 
+data class ComposerDraftRecovery(
+    val requestId: String,
+    val conversationId: String?,
+    val content: String,
+)
+
 sealed interface KnowledgePreviewState {
     data object Closed : KnowledgePreviewState
     data class Loading(val document: KnowledgeDocument) : KnowledgePreviewState
@@ -153,6 +215,7 @@ data class AppUiState(
     val messages: Map<String, List<ChatMessage>> = emptyMap(),
     val attachments: Map<String, List<MessageAttachment>> = emptyMap(),
     val pendingAttachments: List<PendingAttachment> = emptyList(),
+    val composerDraftRecovery: ComposerDraftRecovery? = null,
     val config: ConversationConfig = ConversationConfig(),
     val conversationSearch: String = "",
     val enableSearch: Boolean = true,
@@ -179,6 +242,11 @@ data class AppUiState(
     val knowledgeResults: List<KnowledgeSnippet> = emptyList(),
     val pendingKnowledgeChunkIds: List<Long> = emptyList(),
     val knowledgeSourcePreview: KnowledgeSnippet? = null,
+    val cloudServers: List<CloudServerProfile> = emptyList(),
+    val cloudMcpServers: List<CloudMcpServer> = emptyList(),
+    val cloudTasks: List<CloudTask> = emptyList(),
+    val cloudArtifactDeliveries: List<CloudArtifactDelivery> = emptyList(),
+    val cloud: CloudWorkspaceUiState = CloudWorkspaceUiState(),
     val scrollToMessageId: String? = null,
     val notice: UiText? = null,
     val visionTestingModelId: String? = null,
@@ -204,35 +272,815 @@ class AppViewModel internal constructor(
     private val generationJobs = mutableMapOf<String, Job>()
     private var ttsJob: Job? = null
     private var knowledgePreviewJob: Job? = null
+    private var cloudSyncJob: Job? = null
+    private var cloudFilesJob: Job? = null
+    private var cloudTextJob: Job? = null
+    private var cloudTaskLogJob: Job? = null
+    private var cloudMcpTestJob: Job? = null
+    private val cloudServerMutationLocks = ConcurrentHashMap<String, Mutex>()
+    private val cloudMcpMutationLocks = ConcurrentHashMap<String, Mutex>()
+    private val cloudTextWriteLock = Mutex()
+    private val toolSettingsJobs = mutableMapOf<String, Job>()
+    private val toolSettingsGenerations = mutableMapOf<String, Long>()
     private var knowledgePreviewGeneration = 0L
+    private var cloudFileGeneration = 0L
+    private var cloudServerSelectionGeneration = 0L
+    private var cloudTaskLogGeneration = 0L
+    private var cloudMcpTestGeneration = 0L
+    private var cloudTextSaveGeneration = 0L
     private val noteSavingMessageIds = mutableSetOf<String>()
     private var pendingMarkdownExport: Note? = null
     private var workspaceLoadVersion = 0L
+    private var workspaceReady = false
 
     init {
         observeKnowledgePreviewScreen()
         bootstrap()
     }
 
-    fun retryLoad() = loadWorkspace()
+    fun retryLoad() = loadWorkspace(onLoaded = ::onInitialWorkspaceLoaded)
 
     fun openScreen(screen: AppScreen) {
         if (screen == AppScreen.CHAT && mutableState.value.models.isEmpty()) return
         val leavingKnowledge = mutableState.value.screen == AppScreen.KNOWLEDGE && screen != AppScreen.KNOWLEDGE
+        val leavingCloudFiles = mutableState.value.screen == AppScreen.INFINITE_CLOUD &&
+            mutableState.value.cloud.section == CloudSection.FILES && screen != AppScreen.INFINITE_CLOUD
+        val leavingCloudTasks = mutableState.value.screen == AppScreen.INFINITE_CLOUD &&
+            mutableState.value.cloud.section == CloudSection.TASKS && screen != AppScreen.INFINITE_CLOUD
+        val leavingCloudMcp = mutableState.value.screen == AppScreen.INFINITE_CLOUD &&
+            mutableState.value.cloud.section == CloudSection.MCP && screen != AppScreen.INFINITE_CLOUD
         if (leavingKnowledge) invalidateKnowledgePreviewRequest()
+        if (leavingCloudFiles) invalidateCloudFileRequests()
+        if (leavingCloudTasks) invalidateCloudTaskLogRequest()
+        if (leavingCloudMcp) invalidateCloudMcpTestRequest()
         mutableState.update {
             it.copy(
                 screen = screen,
                 providerEditor = null,
                 knowledgePreview = if (leavingKnowledge) KnowledgePreviewState.Closed else it.knowledgePreview,
+                cloud = if (leavingCloudFiles) it.cloud.copy(
+                    busy = false,
+                    textServerId = null,
+                    textPath = null,
+                    textContent = "",
+                    savingText = false,
+                ) else if (leavingCloudTasks) it.cloud.copy(
+                    taskLogId = null,
+                    taskLog = "",
+                ) else if (leavingCloudMcp) it.cloud.copy(
+                    testingMcpServerId = null,
+                    mcpTestName = null,
+                    mcpTestTools = emptyList(),
+                    mcpTestCloudServerId = null,
+                    mcpTestServerId = null,
+                    mcpTestServerUpdatedAt = null,
+                ) else it.cloud,
             )
+        }
+        if (screen == AppScreen.INFINITE_CLOUD) {
+            syncCloudTasks()
+            val state = mutableState.value
+            if (state.cloud.section == CloudSection.FILES) {
+                val server = state.cloudServers.firstOrNull { it.id == state.cloud.selectedServerId }
+                if (server != null) loadCloudFiles(state.cloud.currentPath.ifBlank { server.startDirectory })
+            }
         }
     }
 
     fun clearNotice() = mutableState.update { it.copy(notice = null) }
 
+    fun selectCloudSection(section: CloudSection) {
+        val previous = mutableState.value.cloud.section
+        val leavingFiles = previous == CloudSection.FILES && section != CloudSection.FILES
+        val leavingTasks = previous == CloudSection.TASKS && section != CloudSection.TASKS
+        val leavingMcp = previous == CloudSection.MCP && section != CloudSection.MCP
+        if (leavingFiles) invalidateCloudFileRequests()
+        if (leavingTasks) invalidateCloudTaskLogRequest()
+        if (leavingMcp) invalidateCloudMcpTestRequest()
+        mutableState.update {
+            it.copy(cloud = it.cloud.copy(
+                section = section,
+                busy = if (leavingFiles) false else it.cloud.busy,
+                textServerId = if (leavingFiles) null else it.cloud.textServerId,
+                textPath = if (leavingFiles) null else it.cloud.textPath,
+                textContent = if (leavingFiles) "" else it.cloud.textContent,
+                savingText = if (leavingFiles) false else it.cloud.savingText,
+                taskLogId = if (leavingTasks) null else it.cloud.taskLogId,
+                taskLog = if (leavingTasks) "" else it.cloud.taskLog,
+                testingMcpServerId = if (leavingMcp) null else it.cloud.testingMcpServerId,
+                mcpTestName = if (leavingMcp) null else it.cloud.mcpTestName,
+                mcpTestTools = if (leavingMcp) emptyList() else it.cloud.mcpTestTools,
+                mcpTestCloudServerId = if (leavingMcp) null else it.cloud.mcpTestCloudServerId,
+                mcpTestServerId = if (leavingMcp) null else it.cloud.mcpTestServerId,
+                mcpTestServerUpdatedAt = if (leavingMcp) null else it.cloud.mcpTestServerUpdatedAt,
+            ))
+        }
+        if (section == CloudSection.TASKS) syncCloudTasks()
+        if (section == CloudSection.FILES && previous != CloudSection.FILES) {
+            val state = mutableState.value
+            val server = state.cloudServers.firstOrNull { it.id == state.cloud.selectedServerId }
+            if (server != null) loadCloudFiles(state.cloud.currentPath.ifBlank { server.startDirectory })
+        }
+    }
+
+    fun onAppResumed() {
+        if (workspaceReady) syncCloudTasks()
+    }
+
+    private fun syncCloudTasks() {
+        if (cloudSyncJob?.isActive == true) return
+        cloudSyncJob = viewModelScope.launch {
+            try {
+                repository.syncCloudTasks()
+                loadWorkspace()
+                mutableState.value.activeConversationId?.let { loadConversation(it) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                loadWorkspace()
+                handleError(error)
+            } finally {
+                cloudSyncJob = null
+            }
+        }
+    }
+
+    fun selectCloudServer(id: String) {
+        val server = mutableState.value.cloudServers.firstOrNull { it.id == id } ?: return
+        val serverChanged = mutableState.value.cloud.selectedServerId != id
+        if (serverChanged) {
+            cloudServerSelectionGeneration += 1
+            invalidateCloudMcpTestRequest()
+        }
+        invalidateCloudFileRequests()
+        mutableState.update {
+            it.copy(cloud = it.cloud.copy(
+                selectedServerId = id,
+                currentPath = server.startDirectory,
+                files = emptyList(),
+                textServerId = null,
+                textPath = null,
+                textContent = "",
+                savingText = false,
+                busy = false,
+                testingMcpServerId = if (serverChanged) null else it.cloud.testingMcpServerId,
+                mcpTestName = if (serverChanged) null else it.cloud.mcpTestName,
+                mcpTestTools = if (serverChanged) emptyList() else it.cloud.mcpTestTools,
+                mcpTestCloudServerId = if (serverChanged) null else it.cloud.mcpTestCloudServerId,
+                mcpTestServerId = if (serverChanged) null else it.cloud.mcpTestServerId,
+                mcpTestServerUpdatedAt = if (serverChanged) null else it.cloud.mcpTestServerUpdatedAt,
+            ))
+        }
+        if (mutableState.value.cloud.section == CloudSection.FILES) loadCloudFiles(server.startDirectory)
+    }
+
+    fun selectCloudTaskServerFilter(id: String?) {
+        val normalized = id?.takeIf { candidate -> mutableState.value.cloudServers.any { it.id == candidate } }
+        invalidateCloudTaskLogRequest()
+        mutableState.update { it.copy(cloud = it.cloud.copy(
+            taskServerFilterId = normalized,
+            taskLogId = null,
+            taskLog = "",
+        )) }
+    }
+
+    fun saveCloudServer(draft: CloudServerDraft) {
+        val initialState = mutableState.value
+        val serverId = draft.profile.id
+        val selectedServerIdAtStart = initialState.cloud.selectedServerId
+        val selectionGenerationAtStart = cloudServerSelectionGeneration
+        val previous = initialState.cloudServers.firstOrNull { it.id == serverId }
+        val isNewServer = previous == null
+        mutableState.update { it.copy(cloud = it.cloud.copy(
+            mutatingServerIds = it.cloud.mutatingServerIds + serverId,
+        )) }
+        viewModelScope.launch {
+            try {
+                val saved = cloudServerMutationLocks.computeIfAbsent(serverId) { Mutex() }
+                    .withLock { repository.saveCloudServer(draft) }
+                val current = mutableState.value
+                val selectionUnchanged = cloudServerSelectionGeneration == selectionGenerationAtStart &&
+                    current.cloud.selectedServerId == selectedServerIdAtStart
+                val shouldSelectSaved = isNewServer && selectionUnchanged &&
+                    current.screen == AppScreen.INFINITE_CLOUD && current.cloud.section == CloudSection.SERVERS
+                val connectionChanged = previous != null && !previous.hasSameCloudConnectionTarget(saved)
+                val shouldResetSavedContext = shouldSelectSaved ||
+                    (current.cloud.selectedServerId == saved.id && connectionChanged)
+                if (shouldSelectSaved) cloudServerSelectionGeneration += 1
+                if (shouldResetSavedContext) {
+                    invalidateCloudFileRequests()
+                    invalidateCloudMcpTestRequest()
+                }
+                mutableState.update { state ->
+                    val selectedServerId = if (shouldSelectSaved) saved.id else state.cloud.selectedServerId
+                    val servers = if (state.cloudServers.any { it.id == saved.id }) {
+                        state.cloudServers.map { if (it.id == saved.id) saved else it }
+                    } else state.cloudServers + saved
+                    state.copy(cloud = state.cloud.copy(
+                        selectedServerId = selectedServerId,
+                        currentPath = if (shouldResetSavedContext) saved.startDirectory else state.cloud.currentPath,
+                        files = if (shouldResetSavedContext) emptyList() else state.cloud.files,
+                        textServerId = if (shouldResetSavedContext) null else state.cloud.textServerId,
+                        textPath = if (shouldResetSavedContext) null else state.cloud.textPath,
+                        textContent = if (shouldResetSavedContext) "" else state.cloud.textContent,
+                        serverDiagnostics = state.cloud.serverDiagnostics - saved.id,
+                    ), cloudServers = servers)
+                }
+                val afterUpdate = mutableState.value
+                if (shouldResetSavedContext && afterUpdate.screen == AppScreen.INFINITE_CLOUD &&
+                    afterUpdate.cloud.section == CloudSection.FILES && afterUpdate.cloud.selectedServerId == saved.id
+                ) {
+                    loadCloudFiles(saved.startDirectory)
+                }
+                loadWorkspace()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                handleError(error)
+            } finally {
+                mutableState.update { state -> state.copy(cloud = state.cloud.copy(
+                    mutatingServerIds = state.cloud.mutatingServerIds - serverId,
+                )) }
+            }
+        }
+    }
+
+    fun deleteCloudServer(id: String) {
+        mutableState.update { it.copy(cloud = it.cloud.copy(
+            mutatingServerIds = it.cloud.mutatingServerIds + id,
+        )) }
+        viewModelScope.launch {
+            try {
+                cloudServerMutationLocks.computeIfAbsent(id) { Mutex() }.withLock {
+                    repository.deleteCloudServer(id)
+                }
+                if (mutableState.value.cloud.selectedServerId == id) {
+                    cloudServerSelectionGeneration += 1
+                    invalidateCloudFileRequests()
+                    invalidateCloudMcpTestRequest()
+                }
+                loadWorkspace()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                handleError(error)
+            } finally {
+                mutableState.update { state -> state.copy(cloud = state.cloud.copy(
+                    mutatingServerIds = state.cloud.mutatingServerIds - id,
+                )) }
+            }
+        }
+    }
+
+    fun probeCloudServer(id: String) {
+        val profile = mutableState.value.cloudServers.firstOrNull { it.id == id } ?: return
+        startCloudServerProbe(profile)
+    }
+
+    private fun startCloudServerProbe(profile: CloudServerProfile) {
+        if (mutableState.value.cloud.probingServerId != null) return
+        mutableState.update { it.copy(cloud = it.cloud.copy(probingServerId = profile.id)) }
+        viewModelScope.launch { performCloudServerProbe(profile) }
+    }
+
+    private suspend fun performCloudServerProbe(profile: CloudServerProfile) {
+        val id = profile.id
+        mutableState.update { it.copy(cloud = it.cloud.copy(probingServerId = id)) }
+        try {
+            val probe = repository.probeCloudServer(profile)
+            mutableState.update { state ->
+                val current = state.cloudServers.firstOrNull { it.id == id }
+                if (current == null || !current.hasSameCloudProbeConfiguration(profile)) {
+                    state.copy(cloud = state.cloud.copy(probingServerId = null))
+                }
+                else state.copy(
+                    cloud = state.cloud.copy(
+                        probingServerId = null,
+                        pendingTrustServerId = id.takeUnless { probe.trusted },
+                        pendingProbe = probe.takeUnless { probe.trusted },
+                        serverDiagnostics = if (probe.trusted) {
+                            state.cloud.serverDiagnostics + (id to CloudServerDiagnostic(probe = probe))
+                        } else state.cloud.serverDiagnostics,
+                    ),
+                    notice = if (probe.trusted) UiText.Dynamic("Infinite Cloud connection succeeded") else state.notice,
+                )
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            mutableState.update { state ->
+                val current = state.cloudServers.firstOrNull { it.id == id }
+                state.copy(cloud = state.cloud.copy(
+                    probingServerId = null,
+                    serverDiagnostics = if (current?.hasSameCloudProbeConfiguration(profile) == true) {
+                        state.cloud.serverDiagnostics +
+                            (id to CloudServerDiagnostic(error = error.message ?: "Infinite Cloud connection failed"))
+                    } else state.cloud.serverDiagnostics,
+                ))
+            }
+            if (mutableState.value.cloudServers.firstOrNull { it.id == id }?.hasSameCloudProbeConfiguration(profile) == true) {
+                handleError(error)
+            }
+        }
+    }
+
+    private fun CloudServerProfile.hasSameCloudConnectionTarget(other: CloudServerProfile): Boolean =
+        host == other.host && port == other.port && username == other.username && hostKeyBase64 == other.hostKeyBase64
+
+    private fun CloudServerProfile.hasSameCloudProbeConfiguration(other: CloudServerProfile): Boolean =
+        updatedAt == other.updatedAt && hasSameCloudConnectionTarget(other)
+
+    fun trustPendingCloudHost() {
+        val cloud = mutableState.value.cloud
+        val id = cloud.pendingTrustServerId ?: return
+        val probe = cloud.pendingProbe ?: return
+        if (cloud.probingServerId != null) return
+        mutableState.update { it.copy(cloud = it.cloud.copy(probingServerId = id)) }
+        viewModelScope.launch {
+            try {
+                val trusted = repository.trustCloudHostKey(id, probe)
+                mutableState.update { state ->
+                    state.copy(
+                        cloudServers = state.cloudServers.map { if (it.id == trusted.id) trusted else it },
+                        cloud = state.cloud.copy(pendingTrustServerId = null, pendingProbe = null),
+                    )
+                }
+                performCloudServerProbe(trusted)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                mutableState.update { it.copy(cloud = it.cloud.copy(probingServerId = null)) }
+                handleError(error)
+            }
+        }
+    }
+
+    fun dismissCloudHostTrust() = mutableState.update {
+        it.copy(cloud = it.cloud.copy(pendingTrustServerId = null, pendingProbe = null))
+    }
+
+    fun probeCloudHostReplacement(id: String) {
+        val profile = mutableState.value.cloudServers.firstOrNull { it.id == id } ?: return
+        val expectedKey = profile.hostKeyBase64 ?: return
+        val oldFingerprint = profile.hostKeyFingerprint ?: return
+        if (mutableState.value.cloud.probingServerId != null) return
+        mutableState.update { it.copy(cloud = it.cloud.copy(probingServerId = id)) }
+        viewModelScope.launch {
+            try {
+                val probe = repository.probeCloudHostReplacement(id)
+                val current = mutableState.value.cloudServers.firstOrNull { it.id == id }
+                if (current?.hostKeyBase64 != expectedKey) {
+                    mutableState.update { it.copy(cloud = it.cloud.copy(probingServerId = null)) }
+                    return@launch
+                }
+                mutableState.update { state ->
+                    state.copy(cloud = state.cloud.copy(
+                        probingServerId = null,
+                        pendingHostKeyReplacement = if (probe.hostKeyBase64 == expectedKey) null else CloudHostKeyReplacement(
+                            serverId = id,
+                            expectedHostKeyBase64 = expectedKey,
+                            oldFingerprint = oldFingerprint,
+                            probe = probe,
+                        ),
+                    ), notice = if (probe.hostKeyBase64 == expectedKey) uiText(R.string.cloud_host_key_unchanged) else state.notice)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                mutableState.update { it.copy(cloud = it.cloud.copy(probingServerId = null)) }
+                handleError(error)
+            }
+        }
+    }
+
+    fun replacePendingCloudHostKey() {
+        val cloud = mutableState.value.cloud
+        val replacement = cloud.pendingHostKeyReplacement ?: return
+        if (cloud.probingServerId != null) return
+        mutableState.update { it.copy(cloud = it.cloud.copy(probingServerId = replacement.serverId)) }
+        viewModelScope.launch {
+            try {
+                val trusted = repository.replaceCloudHostKey(
+                    replacement.serverId,
+                    replacement.expectedHostKeyBase64,
+                    replacement.probe,
+                )
+                mutableState.update { state ->
+                    state.copy(
+                        cloudServers = state.cloudServers.map { if (it.id == trusted.id) trusted else it },
+                        cloud = state.cloud.copy(pendingHostKeyReplacement = null),
+                    )
+                }
+                performCloudServerProbe(trusted)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                mutableState.update { it.copy(cloud = it.cloud.copy(probingServerId = null)) }
+                handleError(error)
+            }
+        }
+    }
+
+    fun dismissCloudHostKeyReplacement() = mutableState.update {
+        it.copy(cloud = it.cloud.copy(pendingHostKeyReplacement = null))
+    }
+
+    fun loadCloudFiles(path: String = mutableState.value.cloud.currentPath) {
+        val state = mutableState.value
+        if (state.cloud.section != CloudSection.FILES) return
+        val id = state.cloud.selectedServerId ?: return
+        cloudFilesJob?.cancel()
+        cloudTextJob?.cancel()
+        val generation = ++cloudFileGeneration
+        mutableState.update {
+            it.copy(cloud = it.cloud.copy(
+                busy = true,
+                textServerId = null,
+                textPath = null,
+                textContent = "",
+            ))
+        }
+        cloudFilesJob = viewModelScope.launch {
+            try {
+                val (resolved, files) = repository.cloudFiles(id, path)
+                mutableState.update { current ->
+                    if (!isCurrentCloudFileRequest(current, id, generation)) current
+                    else current.copy(cloud = current.cloud.copy(currentPath = resolved, files = files, busy = false))
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (isCurrentCloudFileRequest(mutableState.value, id, generation)) {
+                    mutableState.update { it.copy(cloud = it.cloud.copy(busy = false)) }
+                    handleError(error)
+                }
+            } finally {
+                if (generation == cloudFileGeneration) cloudFilesJob = null
+            }
+        }
+    }
+
+    fun readCloudText(path: String) {
+        val state = mutableState.value
+        if (state.cloud.section != CloudSection.FILES) return
+        val id = state.cloud.selectedServerId ?: return
+        cloudTextJob?.cancel()
+        val generation = ++cloudFileGeneration
+        mutableState.update { it.copy(cloud = it.cloud.copy(busy = true, textServerId = null, textPath = null, textContent = "")) }
+        cloudTextJob = viewModelScope.launch {
+            try {
+                val content = repository.readCloudText(id, path)
+                mutableState.update { current ->
+                    if (!isCurrentCloudFileRequest(current, id, generation)) current
+                    else current.copy(cloud = current.cloud.copy(
+                        busy = false,
+                        textServerId = id,
+                        textPath = path,
+                        textContent = content,
+                    ))
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (isCurrentCloudFileRequest(mutableState.value, id, generation)) {
+                    mutableState.update { it.copy(cloud = it.cloud.copy(busy = false)) }
+                    handleError(error)
+                }
+            } finally {
+                if (generation == cloudFileGeneration) cloudTextJob = null
+            }
+        }
+    }
+
+    fun updateCloudText(value: String) = mutableState.update {
+        if (it.cloud.textServerId != it.cloud.selectedServerId) it
+        else it.copy(cloud = it.cloud.copy(textContent = value))
+    }
+
+    fun closeCloudText() {
+        cloudTextJob?.cancel()
+        cloudTextJob = null
+        cloudFileGeneration += 1
+        cloudTextSaveGeneration += 1
+        mutableState.update { it.copy(cloud = it.cloud.copy(
+            busy = false,
+            textServerId = null,
+            textPath = null,
+            textContent = "",
+            savingText = false,
+        )) }
+    }
+
+    private fun invalidateCloudFileRequests() {
+        cloudFilesJob?.cancel()
+        cloudTextJob?.cancel()
+        cloudFilesJob = null
+        cloudTextJob = null
+        cloudFileGeneration += 1
+        cloudTextSaveGeneration += 1
+    }
+
+    private fun isCurrentCloudFileRequest(state: AppUiState, serverId: String, generation: Long): Boolean =
+        generation == cloudFileGeneration &&
+            state.screen == AppScreen.INFINITE_CLOUD &&
+            state.cloud.section == CloudSection.FILES &&
+            state.cloud.selectedServerId == serverId
+
+    fun saveCloudText() {
+        val state = mutableState.value
+        val id = state.cloud.textServerId ?: return
+        if (id != state.cloud.selectedServerId) return
+        val path = state.cloud.textPath ?: return
+        val content = state.cloud.textContent
+        val generation = ++cloudTextSaveGeneration
+        mutableState.update { it.copy(cloud = it.cloud.copy(savingText = true)) }
+        viewModelScope.launch {
+            try {
+                cloudTextWriteLock.withLock { repository.writeCloudText(id, path, content) }
+                val current = mutableState.value
+                if (generation == cloudTextSaveGeneration && current.cloud.textServerId == id && current.cloud.textPath == path) {
+                    mutableState.update { it.copy(notice = UiText.Dynamic("Remote file saved")) }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (generation == cloudTextSaveGeneration) handleError(error)
+            } finally {
+                if (generation == cloudTextSaveGeneration) {
+                    mutableState.update { it.copy(cloud = it.cloud.copy(savingText = false)) }
+                }
+            }
+        }
+    }
+
+    fun cloudFileOperation(operation: String, values: Map<String, String>, expectedServerId: String? = null) = viewModelScope.launch {
+        val snapshot = mutableState.value
+        val id = expectedServerId ?: snapshot.cloud.selectedServerId ?: return@launch
+        if (snapshot.cloud.selectedServerId != id) return@launch
+        runCatching { repository.cloudFileOperation(id, operation, values) }
+            .onSuccess {
+                val current = mutableState.value
+                if (current.cloud.selectedServerId == id && current.cloud.section == CloudSection.FILES) loadCloudFiles()
+            }.onFailure(::handleError)
+    }
+
+    fun uploadCloudFile(
+        fileName: String,
+        input: InputStream,
+        expectedServerId: String? = null,
+        expectedDirectory: String? = null,
+    ) = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+        input.use { source ->
+            val state = mutableState.value
+            val id = expectedServerId ?: state.cloud.selectedServerId ?: return@use
+            if (state.cloud.selectedServerId != id) return@use
+            val directory = expectedDirectory ?: state.cloud.currentPath
+            val remote = directory.trimEnd('/') + "/" + fileName.replace('/', '_')
+            try {
+                repository.uploadCloudFile(id, remote, source)
+                val current = mutableState.value
+                if (current.cloud.selectedServerId == id && current.cloud.section == CloudSection.FILES) loadCloudFiles()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                handleError(error)
+            }
+        }
+    }
+
+    fun downloadCloudFile(path: String, output: OutputStream, expectedServerId: String? = null) = viewModelScope.launch {
+        output.use { target ->
+            val currentId = mutableState.value.cloud.selectedServerId
+            val id = expectedServerId ?: currentId ?: return@use
+            if (currentId != id) return@use
+            runCatching { repository.downloadCloudFileTo(id, path, target) }
+                .onSuccess { mutableState.update { it.copy(notice = uiText(R.string.cloud_download_complete)) } }
+                .onFailure(::handleError)
+        }
+    }
+
+    fun refreshCloudTask(id: String) = viewModelScope.launch {
+        runCatching { repository.refreshCloudTask(id) }.onSuccess { loadWorkspace() }.onFailure(::handleError)
+    }
+
+    fun loadCloudTaskLog(id: String) {
+        val snapshot = mutableState.value
+        if (snapshot.screen != AppScreen.INFINITE_CLOUD || snapshot.cloud.section != CloudSection.TASKS) return
+        if (snapshot.cloudTasks.none { it.id == id }) return
+        cloudTaskLogJob?.cancel()
+        val generation = ++cloudTaskLogGeneration
+        cloudTaskLogJob = viewModelScope.launch {
+            try {
+                val log = repository.cloudTaskLog(id)
+                val current = mutableState.value
+                if (generation == cloudTaskLogGeneration &&
+                    current.screen == AppScreen.INFINITE_CLOUD &&
+                    current.cloud.section == CloudSection.TASKS &&
+                    current.cloudTasks.any { it.id == id }
+                ) {
+                    mutableState.update { it.copy(cloud = it.cloud.copy(taskLogId = id, taskLog = log)) }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (generation == cloudTaskLogGeneration) handleError(error)
+            } finally {
+                if (generation == cloudTaskLogGeneration) cloudTaskLogJob = null
+            }
+        }
+    }
+
+    fun closeCloudTaskLog() {
+        invalidateCloudTaskLogRequest()
+        mutableState.update { it.copy(cloud = it.cloud.copy(taskLogId = null, taskLog = "")) }
+    }
+
+    private fun invalidateCloudTaskLogRequest() {
+        cloudTaskLogGeneration += 1
+        cloudTaskLogJob?.cancel()
+        cloudTaskLogJob = null
+    }
+    fun cancelCloudTask(id: String) = viewModelScope.launch {
+        runCatching { repository.cancelCloudTask(id) }.onSuccess { loadWorkspace() }.onFailure(::handleError)
+    }
+
+    fun deleteCloudTasks(ids: Set<String>) = refreshAfter { repository.deleteCloudTasks(ids) }
+
+    fun retryCloudArtifactDelivery(id: String) {
+        if (id in mutableState.value.cloud.retryingArtifactDeliveryIds) return
+        mutableState.update {
+            it.copy(cloud = it.cloud.copy(
+                retryingArtifactDeliveryIds = it.cloud.retryingArtifactDeliveryIds + id,
+            ))
+        }
+        viewModelScope.launch {
+            try {
+                val updated = repository.retryCloudArtifactDelivery(id)
+                mutableState.update { state ->
+                    state.copy(cloudArtifactDeliveries = state.cloudArtifactDeliveries.map {
+                        if (it.id == updated.id) updated else it
+                    })
+                }
+                loadWorkspace()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                handleError(error)
+            } finally {
+                mutableState.update {
+                    it.copy(cloud = it.cloud.copy(
+                        retryingArtifactDeliveryIds = it.cloud.retryingArtifactDeliveryIds - id,
+                    ))
+                }
+            }
+        }
+    }
+
+    fun saveCloudMcpServer(value: CloudMcpServer, environment: Map<String, String>, headers: Map<String, String>) {
+        if (mutableState.value.cloud.let { it.testingMcpServerId == value.id || it.mcpTestServerId == value.id }) {
+            invalidateCloudMcpTestRequest()
+            mutableState.update { it.copy(cloud = it.cloud.withoutMcpTest()) }
+        }
+        mutableState.update { it.copy(cloud = it.cloud.copy(
+            mutatingMcpServerIds = it.cloud.mutatingMcpServerIds + value.id,
+        )) }
+        viewModelScope.launch {
+            try {
+                cloudMcpMutationLocks.computeIfAbsent(value.id) { Mutex() }.withLock {
+                    repository.saveCloudMcpServer(value, environment, headers)
+                }
+                loadWorkspace()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                handleError(error)
+            } finally {
+                mutableState.update { state -> state.copy(cloud = state.cloud.copy(
+                    mutatingMcpServerIds = state.cloud.mutatingMcpServerIds - value.id,
+                )) }
+            }
+        }
+    }
+
+    fun deleteCloudMcpServer(id: String) {
+        if (mutableState.value.cloud.let { it.testingMcpServerId == id || it.mcpTestServerId == id }) {
+            invalidateCloudMcpTestRequest()
+            mutableState.update { it.copy(cloud = it.cloud.withoutMcpTest()) }
+        }
+        mutableState.update { it.copy(cloud = it.cloud.copy(
+            mutatingMcpServerIds = it.cloud.mutatingMcpServerIds + id,
+        )) }
+        viewModelScope.launch {
+            try {
+                cloudMcpMutationLocks.computeIfAbsent(id) { Mutex() }.withLock {
+                    repository.deleteCloudMcpServer(id)
+                }
+                loadWorkspace()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                handleError(error)
+            } finally {
+                mutableState.update { state -> state.copy(cloud = state.cloud.copy(
+                    mutatingMcpServerIds = state.cloud.mutatingMcpServerIds - id,
+                )) }
+            }
+        }
+    }
+
+    fun testCloudMcpServer(mcp: CloudMcpServer) {
+        val snapshot = mutableState.value
+        val serverId = snapshot.cloud.selectedServerId ?: return
+        if (snapshot.screen != AppScreen.INFINITE_CLOUD || snapshot.cloud.section != CloudSection.MCP) return
+        if (mcp.cloudServerId != serverId || snapshot.cloudMcpServers.none { it.id == mcp.id && it.cloudServerId == serverId }) return
+        cloudMcpTestJob?.cancel()
+        val generation = ++cloudMcpTestGeneration
+        mutableState.update { it.copy(cloud = it.cloud.copy(
+            testingMcpServerId = mcp.id,
+            mcpTestName = null,
+            mcpTestTools = emptyList(),
+            mcpTestCloudServerId = null,
+            mcpTestServerId = null,
+            mcpTestServerUpdatedAt = null,
+        )) }
+        cloudMcpTestJob = viewModelScope.launch {
+            try {
+                val tools = repository.testCloudMcpServer(mcp.id)
+                val current = mutableState.value
+                if (isCurrentCloudMcpTest(current, mcp, serverId, generation)) {
+                    mutableState.update { it.copy(cloud = it.cloud.copy(
+                        testingMcpServerId = null,
+                        mcpTestName = mcp.name,
+                        mcpTestTools = tools,
+                        mcpTestCloudServerId = serverId,
+                        mcpTestServerId = mcp.id,
+                        mcpTestServerUpdatedAt = mcp.updatedAt,
+                    )) }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (isCurrentCloudMcpTest(mutableState.value, mcp, serverId, generation)) {
+                    mutableState.update { it.copy(cloud = it.cloud.copy(testingMcpServerId = null)) }
+                    handleError(error)
+                }
+            } finally {
+                if (generation == cloudMcpTestGeneration) cloudMcpTestJob = null
+            }
+        }
+    }
+
+    fun closeCloudMcpTest() = mutableState.update { it.copy(cloud = it.cloud.withoutMcpTest()) }
+
+    private fun CloudWorkspaceUiState.withoutMcpTest() = copy(
+        testingMcpServerId = null,
+        mcpTestName = null,
+        mcpTestTools = emptyList(),
+        mcpTestCloudServerId = null,
+        mcpTestServerId = null,
+        mcpTestServerUpdatedAt = null,
+    )
+
+    private fun invalidateCloudMcpTestRequest() {
+        cloudMcpTestGeneration += 1
+        cloudMcpTestJob?.cancel()
+        cloudMcpTestJob = null
+    }
+
+    private fun isCurrentCloudMcpTest(
+        state: AppUiState,
+        mcp: CloudMcpServer,
+        serverId: String,
+        generation: Long,
+    ): Boolean = generation == cloudMcpTestGeneration &&
+        state.screen == AppScreen.INFINITE_CLOUD &&
+        state.cloud.section == CloudSection.MCP &&
+        state.cloud.selectedServerId == serverId &&
+        state.cloud.testingMcpServerId == mcp.id &&
+        mcp.cloudServerId == serverId &&
+        state.cloudMcpServers.any {
+            it.id == mcp.id && it.cloudServerId == serverId && it.updatedAt == mcp.updatedAt
+        }
+
+    fun setInfiniteCloud(enabled: Boolean, serverId: String?) {
+        val state = mutableState.value
+        saveToolSettings(
+            search = state.enableSearch,
+            read = state.enableRead,
+            knowledge = state.enableKnowledge,
+            process = state.showProcess,
+            cloud = enabled,
+            serverId = serverId,
+        )
+    }
+
     fun reportCameraCaptureFailure() = mutableState.update {
         it.copy(notice = uiText(R.string.camera_capture_failed))
+    }
+
+    fun reportCloudFileError(error: Throwable) = mutableState.update {
+        it.copy(notice = error.message?.takeIf(String::isNotBlank)?.let(UiText::Dynamic)
+            ?: uiText(R.string.file_operation_failed))
     }
 
     fun reportNoteMarkdownFileError(error: Throwable) {
@@ -265,15 +1113,119 @@ class AppViewModel internal constructor(
             )
         }
         val id = mutableState.value.activeConversationId ?: return
-        viewModelScope.launch {
-            runCatching {
-                repository.updateConversation(
-                    id,
-                    ConversationWriteRequest(enableSearch = search, enableRead = read, enableKnowledge = knowledge),
-                )
-            }.onSuccess { updated -> mutableState.update { it.copy(conversations = upsertConversation(it.conversations, updated)) } }
-                .onFailure(::handleError)
+        saveConversationToolSettings(
+            id,
+            ConversationWriteRequest(enableSearch = search, enableRead = read, enableKnowledge = knowledge),
+            applyResult = { updated ->
+                mutableState.update { it.copy(conversations = upsertConversation(it.conversations, updated)) }
+            },
+        )
+    }
+
+    fun saveToolSettings(
+        search: Boolean,
+        read: Boolean,
+        knowledge: Boolean,
+        process: Boolean,
+        cloud: Boolean,
+        serverId: String?,
+    ) {
+        val initialState = mutableState.value
+        val readyServerId = if (cloud) readyCloudServerId(serverId) else null
+        if (cloud && readyServerId == null) {
+            mutableState.update { it.copy(notice = uiText(R.string.cloud_select_ready_server)) }
+            return
         }
+        val cloudEnabled = cloud && readyServerId != null
+        mutableState.update {
+            it.copy(
+                enableSearch = search,
+                enableRead = read,
+                enableKnowledge = knowledge,
+                showProcess = process,
+                config = it.config.copy(
+                    enableSearch = search,
+                    enableRead = read,
+                    enableKnowledge = knowledge,
+                    enableInfiniteCloud = cloudEnabled,
+                    cloudServerId = readyServerId,
+                ),
+            )
+        }
+        val id = initialState.activeConversationId ?: return
+        val previousConversation = initialState.conversations.firstOrNull { it.id == id }
+        val applyPersisted: (Conversation) -> Unit = { updated ->
+            mutableState.update {
+                val conversations = upsertConversation(it.conversations, updated)
+                if (it.activeConversationId != id) it.copy(conversations = conversations)
+                else it.copy(
+                    conversations = conversations,
+                    config = updated.toConfig(),
+                    enableSearch = updated.enableSearch,
+                    enableRead = updated.enableRead,
+                    enableKnowledge = updated.enableKnowledge,
+                )
+            }
+        }
+        saveConversationToolSettings(
+            id,
+            ConversationWriteRequest(
+                enableSearch = search,
+                enableRead = read,
+                enableKnowledge = knowledge,
+                enableInfiniteCloud = cloudEnabled,
+                cloudServerId = readyServerId,
+                updateCloudServerId = true,
+            ),
+            failureFallback = previousConversation,
+            applyResult = applyPersisted,
+            applyFailure = applyPersisted,
+        )
+    }
+
+    private fun saveConversationToolSettings(
+        conversationId: String,
+        request: ConversationWriteRequest,
+        failureFallback: Conversation? = null,
+        applyResult: (Conversation) -> Unit,
+        applyFailure: (Conversation) -> Unit = applyResult,
+    ) {
+        val generation = (toolSettingsGenerations[conversationId] ?: 0L) + 1L
+        toolSettingsGenerations[conversationId] = generation
+        toolSettingsJobs.remove(conversationId)?.cancel()
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                val updated = repository.updateConversation(conversationId, request)
+                if (toolSettingsGenerations[conversationId] == generation) applyResult(updated)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (toolSettingsGenerations[conversationId] == generation) {
+                    val persisted = try {
+                        repository.conversation(conversationId).conversation
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Throwable) {
+                        failureFallback
+                    }
+                    if (toolSettingsGenerations[conversationId] == generation) {
+                        persisted?.let(applyFailure)
+                        handleError(error)
+                    }
+                }
+            } finally {
+                if (toolSettingsGenerations[conversationId] == generation) {
+                    toolSettingsJobs.remove(conversationId)
+                }
+            }
+        }
+        toolSettingsJobs[conversationId] = job
+        job.start()
+    }
+
+    private fun readyCloudServerId(serverId: String?): String? {
+        val ready = mutableState.value.cloudServers.filter { it.keyConfigured && it.hostKeyFingerprint != null }
+        return if (serverId == null) ready.firstOrNull()?.id else ready.firstOrNull { it.id == serverId }?.id
     }
 
     fun newConversation() {
@@ -633,7 +1585,19 @@ class AppViewModel internal constructor(
 
     fun deleteNotes(ids: Set<String>) = refreshAfter { repository.deleteNotes(ids) }
 
-    fun saveAgent(agent: AgentProfile) = refreshAfter { repository.saveAgent(agent) }
+    fun saveAgent(agent: AgentProfile) {
+        val serverId = if (agent.enableInfiniteCloud) readyCloudServerId(agent.cloudServerId) else null
+        if (agent.enableInfiniteCloud && serverId == null) {
+            mutableState.update { it.copy(notice = uiText(R.string.cloud_select_ready_server)) }
+            return
+        }
+        refreshAfter {
+            repository.saveAgent(agent.copy(
+                enableInfiniteCloud = agent.enableInfiniteCloud && serverId != null,
+                cloudServerId = serverId,
+            ))
+        }
+    }
 
     fun deleteAgent(id: String) = refreshAfter { repository.deleteAgent(id) }
 
@@ -763,6 +1727,7 @@ class AppViewModel internal constructor(
             state.copy(
                 pendingAttachments = state.pendingAttachments.filterNot { it.uri in transferredUris },
                 pendingKnowledgeChunkIds = emptyList(),
+                composerDraftRecovery = null,
             )
         }
         viewModelScope.launch {
@@ -770,6 +1735,7 @@ class AppViewModel internal constructor(
                 val created = runCatching { repository.createConversation(current.config.toRequest()) }
                     .getOrElse {
                         restoreOrDiscardTransferredAttachments(initialConversationId, transferredAttachments)
+                        restoreComposerDraft(initialConversationId, request.requestId, content)
                         handleError(it)
                         return@launch
                     }
@@ -786,10 +1752,19 @@ class AppViewModel internal constructor(
             }
             if (generationJobs[conversationId]?.isActive == true) {
                 restoreOrDiscardTransferredAttachments(conversationId, transferredAttachments)
+                restoreComposerDraft(conversationId, request.requestId, content)
                 return@launch
             }
-            launchGeneration(conversationId, transferredAttachments) { repository.sendMessage(conversationId, request) }
+            launchGeneration(
+                id = conversationId,
+                transferredAttachments = transferredAttachments,
+                transferredDraft = ComposerDraftRecovery(request.requestId, conversationId, content),
+            ) { repository.sendMessage(conversationId, request) }
         }
+    }
+
+    fun consumeComposerDraftRecovery(requestId: String) = mutableState.update { state ->
+        if (state.composerDraftRecovery?.requestId == requestId) state.copy(composerDraftRecovery = null) else state
     }
 
     fun regenerateLatest() {
@@ -1064,23 +2039,71 @@ class AppViewModel internal constructor(
     private fun bootstrap() {
         viewModelScope.launch {
             runCatching { repository.initialize() }
-                .onSuccess { loadWorkspace() }
+                .onSuccess { loadWorkspace(onLoaded = ::onInitialWorkspaceLoaded) }
                 .onFailure { error ->
                     mutableState.update { it.copy(phase = AppPhase.SETUP, screen = AppScreen.PROVIDERS, notice = readableError(error)) }
                 }
         }
     }
 
-    private fun loadWorkspace(openChatWhenReady: Boolean = false) {
+    private fun loadWorkspace(
+        openChatWhenReady: Boolean = false,
+        onLoaded: (() -> Unit)? = null,
+    ) {
         val loadVersion = ++workspaceLoadVersion
         viewModelScope.launch {
             mutableState.update { it.copy(loading = true) }
             runCatching { repository.workspace() }
                 .onSuccess { workspace ->
                     if (loadVersion != workspaceLoadVersion) return@onSuccess
+                    val currentState = mutableState.value
+                    val previousSelectedServerId = currentState.cloud.selectedServerId
+                    val selectedServerId = previousSelectedServerId
+                        ?.takeIf { selected -> workspace.cloudServers.any { it.id == selected } }
+                        ?: workspace.cloudServers.firstOrNull()?.id
+                    val previousSelectedServer = currentState.cloudServers.firstOrNull { it.id == previousSelectedServerId }
+                    val selectedServer = workspace.cloudServers.firstOrNull { it.id == selectedServerId }
+                    val selectedServerChanged = selectedServerId != previousSelectedServerId ||
+                        (previousSelectedServer != null && selectedServer != null &&
+                            !previousSelectedServer.hasSameCloudConnectionTarget(selectedServer))
+                    val runningMcpTestInvalid = currentState.cloud.testingMcpServerId?.let { id ->
+                        val previousMcp = currentState.cloudMcpServers.firstOrNull { it.id == id }
+                        val currentMcp = workspace.cloudMcpServers.firstOrNull {
+                            it.id == id && it.cloudServerId == selectedServerId
+                        }
+                        previousMcp == null || currentMcp == null || previousMcp.updatedAt != currentMcp.updatedAt
+                    } == true
+                    val displayedMcpTestInvalid = currentState.cloud.mcpTestServerId?.let { id ->
+                        val currentMcp = workspace.cloudMcpServers.firstOrNull {
+                            it.id == id && it.cloudServerId == selectedServerId
+                        }
+                        currentState.cloud.mcpTestCloudServerId != selectedServerId || currentMcp == null ||
+                            currentMcp.updatedAt != currentState.cloud.mcpTestServerUpdatedAt
+                    } == true
+                    val mcpTestInvalid = selectedServerChanged || runningMcpTestInvalid || displayedMcpTestInvalid
+                    val taskLogInvalid = currentState.cloud.taskLogId?.let { id ->
+                        workspace.cloudTasks.none { it.id == id }
+                    } == true
+                    if (selectedServerChanged) {
+                        cloudServerSelectionGeneration += 1
+                        invalidateCloudFileRequests()
+                    }
+                    if (mcpTestInvalid) invalidateCloudMcpTestRequest()
+                    if (taskLogInvalid) invalidateCloudTaskLogRequest()
                     mutableState.update { state ->
                         val hasModels = workspace.models.isNotEmpty()
                         val active = state.activeConversationId?.takeIf { id -> workspace.conversations.any { it.id == id } }
+                        val pendingTrustServerId = state.cloud.pendingTrustServerId?.takeIf { id ->
+                            val server = workspace.cloudServers.firstOrNull { it.id == id }
+                            val probe = state.cloud.pendingProbe
+                            server != null && probe != null && server.hostKeyBase64 == null &&
+                                probe.host == server.host && probe.port == server.port
+                        }
+                        val pendingReplacement = state.cloud.pendingHostKeyReplacement?.takeIf { replacement ->
+                            val server = workspace.cloudServers.firstOrNull { it.id == replacement.serverId }
+                            server != null && server.hostKeyBase64 == replacement.expectedHostKeyBase64 &&
+                                replacement.probe.host == server.host && replacement.probe.port == server.port
+                        }
                         state.copy(
                             phase = if (hasModels) AppPhase.READY else AppPhase.SETUP,
                             screen = if (!hasModels) AppScreen.PROVIDERS else if (openChatWhenReady) AppScreen.CHAT else state.screen,
@@ -1095,6 +2118,40 @@ class AppViewModel internal constructor(
                             notes = workspace.notes,
                             agents = workspace.agents,
                             knowledgeDocuments = workspace.knowledgeDocuments,
+                            cloudServers = workspace.cloudServers,
+                            cloudMcpServers = workspace.cloudMcpServers,
+                            cloudTasks = workspace.cloudTasks,
+                            cloudArtifactDeliveries = workspace.cloudArtifactDeliveries,
+                            cloud = state.cloud.copy(
+                                selectedServerId = selectedServerId,
+                                taskServerFilterId = state.cloud.taskServerFilterId
+                                    ?.takeIf { selected -> workspace.cloudServers.any { it.id == selected } },
+                                currentPath = if (selectedServerChanged) {
+                                    workspace.cloudServers.firstOrNull { it.id == selectedServerId }?.startDirectory ?: "~"
+                                } else state.cloud.currentPath,
+                                files = if (selectedServerChanged) emptyList() else state.cloud.files,
+                                textServerId = if (selectedServerChanged) null else state.cloud.textServerId,
+                                textPath = if (selectedServerChanged) null else state.cloud.textPath,
+                                textContent = if (selectedServerChanged) "" else state.cloud.textContent,
+                                savingText = if (selectedServerChanged) false else state.cloud.savingText,
+                                busy = if (selectedServerChanged) false else state.cloud.busy,
+                                taskLogId = if (taskLogInvalid) null else state.cloud.taskLogId,
+                                taskLog = if (taskLogInvalid) "" else state.cloud.taskLog,
+                                testingMcpServerId = if (mcpTestInvalid) null else state.cloud.testingMcpServerId,
+                                mcpTestName = if (mcpTestInvalid) null else state.cloud.mcpTestName,
+                                mcpTestTools = if (mcpTestInvalid) emptyList() else state.cloud.mcpTestTools,
+                                mcpTestCloudServerId = if (mcpTestInvalid) null else state.cloud.mcpTestCloudServerId,
+                                mcpTestServerId = if (mcpTestInvalid) null else state.cloud.mcpTestServerId,
+                                mcpTestServerUpdatedAt = if (mcpTestInvalid) null else state.cloud.mcpTestServerUpdatedAt,
+                                pendingTrustServerId = pendingTrustServerId,
+                                pendingProbe = state.cloud.pendingProbe.takeIf { pendingTrustServerId != null },
+                                pendingHostKeyReplacement = pendingReplacement,
+                                serverDiagnostics = state.cloud.serverDiagnostics.filterKeys { id ->
+                                    val old = state.cloudServers.firstOrNull { it.id == id }
+                                    val current = workspace.cloudServers.firstOrNull { it.id == id }
+                                    old != null && current != null && old.hasSameCloudProbeConfiguration(current)
+                                },
+                            ),
                             config = active?.let { id -> workspace.conversations.first { it.id == id }.toConfig() }
                                 ?: if (state.config.modelMode == SettingMode.INHERIT || state.config.model in workspace.models.map { it.id }) {
                                     state.config.copy(
@@ -1107,6 +2164,7 @@ class AppViewModel internal constructor(
                                 } else defaultConfig(workspace.models, workspace.globalSettings),
                         )
                     }
+                    onLoaded?.invoke()
                 }
                 .onFailure { error ->
                     if (loadVersion == workspaceLoadVersion) {
@@ -1114,6 +2172,11 @@ class AppViewModel internal constructor(
                     }
                 }
         }
+    }
+
+    private fun onInitialWorkspaceLoaded() {
+        workspaceReady = true
+        syncCloudTasks()
     }
 
     private suspend fun loadConversation(id: String) {
@@ -1135,6 +2198,7 @@ class AppViewModel internal constructor(
     private fun launchGeneration(
         id: String,
         transferredAttachments: List<PendingAttachment> = emptyList(),
+        transferredDraft: ComposerDraftRecovery? = null,
         stream: () -> kotlinx.coroutines.flow.Flow<ChatEvent>,
     ) {
         mutableState.update { state ->
@@ -1160,7 +2224,12 @@ class AppViewModel internal constructor(
                     )
                 }
             } finally {
-                if (!userMessageAccepted) restoreOrDiscardTransferredAttachments(id, transferredAttachments)
+                if (!userMessageAccepted) {
+                    restoreOrDiscardTransferredAttachments(id, transferredAttachments)
+                    transferredDraft?.let { draft ->
+                        restoreComposerDraft(draft.conversationId, draft.requestId, draft.content)
+                    }
+                }
                 generationJobs.remove(id)
                 loadConversation(id)
                 loadWorkspace()
@@ -1272,9 +2341,30 @@ class AppViewModel internal constructor(
         discardPendingAttachments(combined.drop(5))
     }
 
+    private fun restoreComposerDraft(
+        ownerConversationId: String?,
+        requestId: String,
+        content: String,
+    ) {
+        if (content.isEmpty()) return
+        mutableState.update { state ->
+            if (state.activeConversationId != ownerConversationId) state
+            else state.copy(
+                composerDraftRecovery = ComposerDraftRecovery(requestId, ownerConversationId, content),
+            )
+        }
+    }
+
     private fun refreshAfter(action: suspend () -> Unit) {
         viewModelScope.launch {
-            runCatching { action() }.onSuccess { loadWorkspace() }.onFailure(::handleError)
+            try {
+                action()
+                loadWorkspace()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                handleError(error)
+            }
         }
     }
 
@@ -1305,6 +2395,8 @@ private fun Conversation.toConfig() = ConversationConfig(
     enableSearch = enableSearch,
     enableRead = enableRead,
     enableKnowledge = enableKnowledge,
+    enableInfiniteCloud = enableInfiniteCloud,
+    cloudServerId = cloudServerId,
 )
 
 private fun ConversationConfig.toRequest() = ConversationWriteRequest(
@@ -1324,6 +2416,9 @@ private fun ConversationConfig.toRequest() = ConversationWriteRequest(
     enableSearch = enableSearch,
     enableRead = enableRead,
     enableKnowledge = enableKnowledge,
+    enableInfiniteCloud = enableInfiniteCloud,
+    cloudServerId = cloudServerId,
+    updateCloudServerId = true,
 )
 
 private fun defaultConfig(models: List<ModelProfile>, global: GlobalChatSettings = GlobalChatSettings()) = ConversationConfig(

@@ -23,10 +23,14 @@
 | AndroidX Lifecycle runtime/viewmodel Compose | 2.9.4 | 生命周期与 ViewModel | Apache-2.0 |
 | Compose UI / Material 3 / Material Icons Extended | BOM 管理 | UI、主题、图标 | Apache-2.0 |
 | Media3 ExoPlayer | 1.8.0 | MiMo WAV 播放与 Audio Focus | Apache-2.0 |
-| kotlinx-coroutines-android | 1.10.2 | coroutine、Flow、异步任务 | Apache-2.0 |
-| kotlinx-serialization-json | 1.9.0 | API、metadata、归档 JSON | Apache-2.0 |
+| kotlinx-coroutines-android | 1.10.2（解析为 1.11.0） | coroutine、Flow、异步任务 | Apache-2.0 |
+| kotlinx-serialization-json | 1.9.0（解析为 1.11.0） | API、metadata、归档 JSON | Apache-2.0 |
 | EvalEx | 3.7.0 | 设备内 BigDecimal 科学表达式求值 | Apache-2.0 |
-| OkHttp | 4.12.0 | 模型、工具和 TTS HTTP/SSE | Apache-2.0 |
+| OkHttp | 5.3.2 | 模型、工具、MCP 和 TTS HTTP/SSE | Apache-2.0 |
+| mwiede JSch | 2.28.0 | Infinite Cloud SSH、SFTP 和端口转发 | BSD-3-Clause |
+| Bouncy Castle Provider / PKIX | 1.85.2 / 1.85 | Android 上的现代 SSH 密钥与协商算法，并替代 PDFBox 的旧 BC 运行时 | Bouncy Castle License |
+| MCP Kotlin SDK Client | 0.15.0 | MCP 握手、工具发现、stdio 与 Streamable HTTP | Apache-2.0 |
+| Ktor Client OkHttp | 3.5.1 | MCP Streamable HTTP transport | Apache-2.0 |
 | AndroidX Room runtime/ktx/compiler | 2.8.4 | SQLite、DAO、Migration、KSP | Apache-2.0 |
 | AndroidX ExifInterface | 1.4.2 | 相机图片方向修正 | Apache-2.0 |
 | jsoup | 1.23.1 | HTML 解析与正文提取 | MIT |
@@ -44,7 +48,7 @@
 | --- | --- | --- |
 | JUnit 4 | 4.13.2 | JVM 单元测试 |
 | kotlinx-coroutines-test | 1.10.2 | coroutine/Flow 测试 |
-| OkHttp MockWebServer | 4.12.0 | 三协议和工具 HTTP 测试 |
+| OkHttp MockWebServer | 5.3.2 | 三协议和工具 HTTP 测试 |
 | AndroidX Test Ext JUnit | 1.2.1 | instrumentation runner 集成 |
 | Espresso Core | 3.6.1 | Android UI 交互 |
 | Room Testing | 2.8.4 | DAO、外键和 migration |

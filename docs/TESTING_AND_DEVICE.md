@@ -4,12 +4,7 @@
 
 ## 自动化测试概况
 
-截至 2026-08-17，源码中有：
-
-- 17 个 JVM 测试文件，136 个 `@Test`
-- 11 个 instrumentation 测试文件，61 个 `@Test`
-
-计数会随代码演进变化；是否通过以 Gradle 实际结果为准。
+测试数量会随代码演进变化；是否通过以 Gradle 实际结果为准。
 
 ### JVM 主要覆盖
 
@@ -19,10 +14,11 @@
 - `.tfcfg` 加密、归档校验和导入冲突策略
 - 知识自动检索、引用传播、伪造标记和 Markdown 安全
 - Token/排版、主题、笔记重写校验和工作区状态
+- Infinite Cloud 私钥拒绝规则、工具启用边界、MCP 名称规范化和云配置归档泄密边界
 
 ### Instrumentation 主要覆盖
 
-- Room 外键、级联删除和 `1 -> 5` / `4 -> 5` migration
+- Room 外键、级联删除和完整 `1 -> ... -> 7` migration
 - 配置原子合并、SecretStore 和回滚
 - 附件、相机 EXIF、头像和显示偏好
 - 知识预取、引用、笔记快照与并发幂等
@@ -147,8 +143,17 @@ $TokenFlowDebugApk = '.\app\build\outputs\apk\debug\app-debug.apk'
 | 生命周期 | 进程中断恢复、旋转、软键盘、切换会话继续生成 |
 | 外观 | 中英文、六主题、字体/字间距/行间距、头像裁剪 |
 | 语音 | 生成 -> 播放 -> 打开笔记/收藏 -> 返回 Chat，不自动重放 |
+| Infinite Cloud | 指纹首次确认/变化阻断、Python/Node/Shell、附件上传、Assistant 产物、后台恢复、文件 SAF、stdio/HTTP MCP |
 
-真实供应商限流、计费、协议兼容、在线 Exa/InfoFlow/MiMo 和正式签名覆盖升级仍需单独 E2E 验收，不能由 MockWebServer 或 JVM 测试证明。
+### Infinite Cloud 专用测试环境
+
+端到端验收必须使用专用低权限 Linux 测试账号，不得使用生产服务器或保存真实资料的账号。测试主机需要 POSIX shell、Python 3，并为 JavaScript 场景安装 Node.js；准备 Ed25519、ECDSA 和 RSA-SHA2 测试私钥，以及一个可替换主机密钥的隔离 SSH/SFTP 服务。
+
+stdio MCP fixture 应通过 SSH exec 启动并覆盖初始化、工具发现、调用和断线清理。Streamable HTTP fixture 应只从已验证 SSH 隧道访问，并同时覆盖 loopback HTTP 与保留原主机名校验的 HTTPS。验收结束后清理测试账号的 `~/.tokenflow/infinite-cloud/`；不要把测试凭据、远端日志或产物提交仓库。
+
+App 侧 instrumentation 仍只能在具有独立 boot ID 的 disposable AVD 执行。Linux fixture 与 AVD 缺少任一项时，构建通过不能替代真实 SSH/MCP E2E，发布记录必须明确标记未运行的场景。
+
+真实供应商限流、计费、协议兼容、在线 Exa/InfoFlow/MiMo、Infinite Cloud SSH/MCP 和正式签名覆盖升级仍需单独 E2E 验收，不能由 MockWebServer 或 JVM 测试证明。
 
 ## 测试失败记录
 

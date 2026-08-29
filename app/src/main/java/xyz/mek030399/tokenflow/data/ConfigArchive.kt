@@ -29,6 +29,8 @@ data class ConfigArchivePayload(
     val globalSystemPrompt: String? = null,
     val globalUrlReaderBackend: UrlReaderBackend? = null,
     val agents: List<AgentProfile> = emptyList(),
+    @SerialName("cloud_servers") val cloudServers: List<CloudServerProfile> = emptyList(),
+    @SerialName("cloud_mcp_servers") val cloudMcpServers: List<CloudMcpServer> = emptyList(),
     @SerialName("global_assistant_nickname") val globalAssistantNickname: String? = null,
 ) {
     companion object {

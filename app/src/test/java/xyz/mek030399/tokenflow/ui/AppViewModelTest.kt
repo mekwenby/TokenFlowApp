@@ -4,7 +4,17 @@ import xyz.mek030399.tokenflow.R
 import xyz.mek030399.tokenflow.data.ChatDataSource
 import xyz.mek030399.tokenflow.data.ChatEvent
 import xyz.mek030399.tokenflow.data.ChatMessage
+import xyz.mek030399.tokenflow.data.AgentProfile
 import xyz.mek030399.tokenflow.data.BookmarkedMessage
+import xyz.mek030399.tokenflow.data.CloudConnectionProbe
+import xyz.mek030399.tokenflow.data.CloudArtifactDelivery
+import xyz.mek030399.tokenflow.data.CloudArtifactDeliveryStatus
+import xyz.mek030399.tokenflow.data.CloudArtifactSourceType
+import xyz.mek030399.tokenflow.data.CloudFileEntry
+import xyz.mek030399.tokenflow.data.CloudMcpServer
+import xyz.mek030399.tokenflow.data.CloudServerDraft
+import xyz.mek030399.tokenflow.data.CloudServerProfile
+import xyz.mek030399.tokenflow.data.CloudTask
 import xyz.mek030399.tokenflow.data.ConfigArchivePayload
 import xyz.mek030399.tokenflow.data.ConfigProviderRecord
 import xyz.mek030399.tokenflow.data.Conversation
@@ -54,8 +64,11 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.InputStream
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -88,6 +101,179 @@ class AppViewModelTest {
         assertEquals(AppPhase.SETUP, viewModel.state.value.phase)
         assertEquals(AppScreen.PROVIDERS, viewModel.state.value.screen)
         assertFalse(viewModel.state.value.hasModels)
+    }
+
+    @Test
+    fun bootstrapShowsTheLocalWorkspaceBeforeCloudSynchronizationCompletes() = runTest(dispatcher) {
+        val synchronizationGate = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudSyncGate = synchronizationGate
+        }
+
+        val viewModel = AppViewModel(fake)
+        runCurrent()
+
+        assertEquals(AppPhase.READY, viewModel.state.value.phase)
+        assertFalse(viewModel.state.value.loading)
+        assertEquals(1, fake.cloudSyncCalls)
+        assertFalse(synchronizationGate.isCompleted)
+
+        synchronizationGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(AppPhase.READY, viewModel.state.value.phase)
+    }
+
+    @Test
+    fun resumeBeforeWorkspaceIsReadyDoesNotStartCloudSynchronization() = runTest(dispatcher) {
+        val initializationGate = CompletableDeferred<Unit>()
+        val synchronizationGate = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(withModel = true).apply {
+            this.initializationGate = initializationGate
+            cloudSyncGate = synchronizationGate
+        }
+        val viewModel = AppViewModel(fake)
+        runCurrent()
+
+        viewModel.onAppResumed()
+        runCurrent()
+
+        assertEquals(0, fake.cloudSyncCalls)
+        assertEquals(AppPhase.LOADING, viewModel.state.value.phase)
+
+        initializationGate.complete(Unit)
+        runCurrent()
+
+        assertEquals(AppPhase.READY, viewModel.state.value.phase)
+        assertEquals(1, fake.cloudSyncCalls)
+
+        synchronizationGate.complete(Unit)
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun failureBeforeUserMessageRestoresAndConsumesTheComposerDraft() = runTest(dispatcher) {
+        val conversation = Conversation(id = "conversation-draft", model = "model-1")
+        val fake = FakeChatDataSource(withModel = true).apply {
+            conversations += conversation
+            sendMessageFailureBeforeUser = IllegalStateException("cloud upload failed")
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openConversation(conversation.id)
+        advanceUntilIdle()
+
+        viewModel.send("  preserve this draft  ")
+        advanceUntilIdle()
+
+        val recovery = requireNotNull(viewModel.state.value.composerDraftRecovery)
+        assertEquals(conversation.id, recovery.conversationId)
+        assertEquals("  preserve this draft  ", recovery.content)
+        assertEquals(fake.sentRequest?.requestId, recovery.requestId)
+
+        viewModel.consumeComposerDraftRecovery(recovery.requestId)
+
+        assertEquals(null, viewModel.state.value.composerDraftRecovery)
+    }
+
+    @Test
+    fun conversationCreationFailureRestoresTheComposerDraft() = runTest(dispatcher) {
+        val fake = FakeChatDataSource(withModel = true).apply {
+            createConversationFailure = IllegalStateException("database unavailable")
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+
+        viewModel.send("new conversation draft")
+        advanceUntilIdle()
+
+        val recovery = requireNotNull(viewModel.state.value.composerDraftRecovery)
+        assertEquals(null, recovery.conversationId)
+        assertEquals("new conversation draft", recovery.content)
+    }
+
+    @Test
+    fun failureAfterUserMessageDoesNotRestoreTheComposerDraft() = runTest(dispatcher) {
+        val conversation = Conversation(id = "conversation-accepted", model = "model-1")
+        val fake = FakeChatDataSource(withModel = true).apply {
+            conversations += conversation
+            sendMessageFailureAfterUser = IllegalStateException("provider failed")
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openConversation(conversation.id)
+        advanceUntilIdle()
+
+        viewModel.send("accepted user message")
+        advanceUntilIdle()
+
+        assertEquals(null, viewModel.state.value.composerDraftRecovery)
+    }
+
+    @Test
+    fun cloudUploadStreamsTheInputAndViewModelAlwaysClosesIt() = runTest(dispatcher) {
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += cloudServer("server-a", "/workspace")
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        val bytes = ByteArray(32 * 1024) { index -> (index % 251).toByte() }
+        val input = CloseTrackingInputStream(bytes)
+
+        viewModel.uploadCloudFile("payload.bin", input)
+        advanceUntilIdle()
+
+        assertTrue(input.closed)
+        val upload = fake.cloudUploads.single()
+        assertEquals("server-a", upload.first)
+        assertEquals("/workspace/payload.bin", upload.second)
+        assertArrayEquals(bytes, upload.third)
+    }
+
+    @Test
+    fun rejectedCloudUploadStillClosesTheTransferredInput() = runTest(dispatcher) {
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += cloudServer("server-a", "/workspace")
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        val input = CloseTrackingInputStream(byteArrayOf(1, 2, 3))
+
+        viewModel.uploadCloudFile(
+            fileName = "ignored.bin",
+            input = input,
+            expectedServerId = "different-server",
+        )
+        advanceUntilIdle()
+
+        assertTrue(input.closed)
+        assertTrue(fake.cloudUploads.isEmpty())
+    }
+
+    @Test
+    fun cancellingCloudUploadClosesTheTransferredInput() = runTest(dispatcher) {
+        val uploadStarted = CompletableDeferred<Unit>()
+        val neverComplete = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += cloudServer("server-a", "/workspace")
+            cloudUploadHandler = { _, _, _ ->
+                uploadStarted.complete(Unit)
+                neverComplete.await()
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        val input = CloseTrackingInputStream(byteArrayOf(1, 2, 3))
+
+        val upload = viewModel.uploadCloudFile("payload.bin", input)
+        runCurrent()
+        assertTrue(uploadStarted.isCompleted)
+
+        upload.cancel()
+        advanceUntilIdle()
+
+        assertTrue(input.closed)
+        assertEquals(null, viewModel.state.value.notice)
     }
 
     @Test
@@ -871,6 +1057,577 @@ class AppViewModelTest {
     }
 
     @Test
+    fun cloudFilesLoadOnlyInFilesAndLateServerResponseCannotOverwriteSelection() = runTest(dispatcher) {
+        val serverA = cloudServer("server-a", "/a")
+        val serverB = cloudServer("server-b", "/b")
+        val pendingA = CompletableDeferred<Pair<String, List<CloudFileEntry>>>()
+        val pendingB = CompletableDeferred<Pair<String, List<CloudFileEntry>>>()
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += listOf(serverA, serverB)
+            cloudFilesHandler = { serverId, _ ->
+                withContext(NonCancellable) {
+                    if (serverId == serverA.id) pendingA.await() else pendingB.await()
+                }
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+
+        viewModel.selectCloudServer(serverB.id)
+        runCurrent()
+        assertTrue(fake.cloudFileCalls.isEmpty())
+
+        viewModel.openScreen(AppScreen.INFINITE_CLOUD)
+        viewModel.selectCloudServer(serverA.id)
+        viewModel.selectCloudSection(CloudSection.FILES)
+        runCurrent()
+        assertEquals(listOf(serverA.id), fake.cloudFileCalls.map { it.first })
+
+        viewModel.selectCloudServer(serverB.id)
+        runCurrent()
+        pendingB.complete("/b/resolved" to listOf(cloudFile("b.txt", "/b/resolved/b.txt")))
+        runCurrent()
+        pendingA.complete("/a/resolved" to listOf(cloudFile("a.txt", "/a/resolved/a.txt")))
+        advanceUntilIdle()
+
+        assertEquals(serverB.id, viewModel.state.value.cloud.selectedServerId)
+        assertEquals("/b/resolved", viewModel.state.value.cloud.currentPath)
+        assertEquals(listOf("b.txt"), viewModel.state.value.cloud.files.map { it.name })
+    }
+
+    @Test
+    fun changedServerConnectionResetsFilesWhenSelectedDuringSave() = runTest(dispatcher) {
+        val serverA = cloudServer("server-save-a", "/old-root")
+        val serverB = cloudServer("server-save-b", "/b")
+        val savedA = serverA.copy(
+            host = "new-server-save-a.example.com",
+            startDirectory = "/new-root",
+            updatedAt = serverA.updatedAt + 1,
+        )
+        val saveStarted = CompletableDeferred<Unit>()
+        val releaseSave = CompletableDeferred<Unit>()
+        var fileLoadCount = 0
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += listOf(serverA, serverB)
+            cloudServerSaveHandler = {
+                saveStarted.complete(Unit)
+                withContext(NonCancellable) { releaseSave.await() }
+                savedA
+            }
+            cloudFilesHandler = { _, path ->
+                fileLoadCount += 1
+                path to listOf(cloudFile(if (fileLoadCount == 1) "old.txt" else "new.txt", "$path/file.txt"))
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.INFINITE_CLOUD)
+        viewModel.selectCloudServer(serverB.id)
+
+        viewModel.saveCloudServer(CloudServerDraft(savedA))
+        runCurrent()
+        assertTrue(saveStarted.isCompleted)
+
+        viewModel.selectCloudServer(serverA.id)
+        viewModel.selectCloudSection(CloudSection.FILES)
+        runCurrent()
+        assertEquals(listOf("old.txt"), viewModel.state.value.cloud.files.map { it.name })
+
+        releaseSave.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(serverA.id, viewModel.state.value.cloud.selectedServerId)
+        assertEquals("/new-root", viewModel.state.value.cloud.currentPath)
+        assertEquals(listOf("new.txt"), viewModel.state.value.cloud.files.map { it.name })
+        assertEquals(2, fileLoadCount)
+    }
+
+    @Test
+    fun lateCloudTextCannotCrossServersAndSaveUsesTextOwner() = runTest(dispatcher) {
+        val serverA = cloudServer("server-a", "/a")
+        val serverB = cloudServer("server-b", "/b")
+        val pendingTextA = CompletableDeferred<String>()
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += listOf(serverA, serverB)
+            cloudFilesHandler = { _, path -> path to emptyList() }
+            cloudTextHandler = { serverId, _ ->
+                if (serverId == serverA.id) withContext(NonCancellable) { pendingTextA.await() } else "server B"
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.INFINITE_CLOUD)
+        viewModel.selectCloudSection(CloudSection.FILES)
+        advanceUntilIdle()
+
+        viewModel.readCloudText("/a/file.txt")
+        runCurrent()
+        viewModel.selectCloudServer(serverB.id)
+        advanceUntilIdle()
+        pendingTextA.complete("late server A")
+        advanceUntilIdle()
+        assertEquals(null, viewModel.state.value.cloud.textPath)
+
+        viewModel.readCloudText("/b/file.txt")
+        advanceUntilIdle()
+        assertEquals(serverB.id, viewModel.state.value.cloud.textServerId)
+        viewModel.updateCloudText("updated B")
+        viewModel.saveCloudText()
+        advanceUntilIdle()
+
+        assertEquals(listOf(Triple(serverB.id, "/b/file.txt", "updated B")), fake.cloudTextWrites)
+    }
+
+    @Test
+    fun consecutiveCloudTextSavesKeepBusyUntilLatestContentIsWritten() = runTest(dispatcher) {
+        val server = cloudServer("text-save-server", "/srv")
+        val firstWriteStarted = CompletableDeferred<Unit>()
+        val releaseFirstWrite = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += server
+            cloudFilesHandler = { _, path -> path to emptyList() }
+            cloudTextHandler = { _, _ -> "initial" }
+            cloudTextWriteHandler = { _, _, content ->
+                if (content == "first edit") {
+                    firstWriteStarted.complete(Unit)
+                    releaseFirstWrite.await()
+                }
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.INFINITE_CLOUD)
+        viewModel.selectCloudSection(CloudSection.FILES)
+        advanceUntilIdle()
+        viewModel.readCloudText("/srv/file.txt")
+        advanceUntilIdle()
+
+        viewModel.updateCloudText("first edit")
+        viewModel.saveCloudText()
+        runCurrent()
+        assertTrue(firstWriteStarted.isCompleted)
+        assertTrue(viewModel.state.value.cloud.savingText)
+
+        viewModel.updateCloudText("latest edit")
+        viewModel.saveCloudText()
+        runCurrent()
+        assertTrue(viewModel.state.value.cloud.savingText)
+        assertEquals(listOf(Triple(server.id, "/srv/file.txt", "first edit")), fake.cloudTextWrites)
+
+        releaseFirstWrite.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf(
+                Triple(server.id, "/srv/file.txt", "first edit"),
+                Triple(server.id, "/srv/file.txt", "latest edit"),
+            ),
+            fake.cloudTextWrites,
+        )
+        assertEquals("latest edit", viewModel.state.value.cloud.textContent)
+        assertFalse(viewModel.state.value.cloud.savingText)
+    }
+
+    @Test
+    fun cloudTaskLogsIgnoreOutOfOrderResultsAndErrorsAfterLeavingTasks() = runTest(dispatcher) {
+        val server = cloudServer("task-server", "/srv")
+        val taskA = cloudTask("task-a", server)
+        val taskB = cloudTask("task-b", server)
+        val taskC = cloudTask("task-c", server)
+        val pendingA = CompletableDeferred<String>()
+        val pendingB = CompletableDeferred<String>()
+        val pendingC = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += server
+            cloudTasks += listOf(taskA, taskB, taskC)
+            cloudTaskLogHandler = { id ->
+                when (id) {
+                    taskA.id -> withContext(NonCancellable) { pendingA.await() }
+                    taskB.id -> withContext(NonCancellable) { pendingB.await() }
+                    else -> {
+                        withContext(NonCancellable) { pendingC.await() }
+                        throw IllegalStateException("late task log failure")
+                    }
+                }
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.INFINITE_CLOUD)
+        viewModel.selectCloudSection(CloudSection.TASKS)
+        advanceUntilIdle()
+
+        viewModel.loadCloudTaskLog(taskA.id)
+        runCurrent()
+        viewModel.loadCloudTaskLog(taskB.id)
+        runCurrent()
+        pendingB.complete("log B")
+        runCurrent()
+        assertEquals(taskB.id, viewModel.state.value.cloud.taskLogId)
+        assertEquals("log B", viewModel.state.value.cloud.taskLog)
+
+        pendingA.complete("late log A")
+        advanceUntilIdle()
+        assertEquals(taskB.id, viewModel.state.value.cloud.taskLogId)
+        assertEquals("log B", viewModel.state.value.cloud.taskLog)
+
+        viewModel.clearNotice()
+        viewModel.loadCloudTaskLog(taskC.id)
+        runCurrent()
+        viewModel.selectCloudSection(CloudSection.SERVERS)
+        pendingC.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(null, viewModel.state.value.cloud.taskLogId)
+        assertEquals("", viewModel.state.value.cloud.taskLog)
+        assertEquals(null, viewModel.state.value.notice)
+    }
+
+    @Test
+    fun cloudMcpTestCannotWriteBackAfterNavigationOrConfigurationChange() = runTest(dispatcher) {
+        val serverA = cloudServer("mcp-server-a", "/a")
+        val serverB = cloudServer("mcp-server-b", "/b")
+        val mcp = cloudMcp("mcp-a", serverA.id, updatedAt = 1)
+        val pendingServerSwitch = CompletableDeferred<List<String>>()
+        val pendingSectionLeave = CompletableDeferred<List<String>>()
+        val pendingConfigurationChange = CompletableDeferred<List<String>>()
+        val pendingResults = mutableListOf(
+            pendingServerSwitch,
+            pendingSectionLeave,
+            pendingConfigurationChange,
+        )
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += listOf(serverA, serverB)
+            cloudMcpServers += mcp
+            cloudMcpTestHandler = {
+                val pending = pendingResults.removeAt(0)
+                withContext(NonCancellable) { pending.await() }
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.INFINITE_CLOUD)
+        viewModel.selectCloudSection(CloudSection.MCP)
+
+        viewModel.testCloudMcpServer(mcp)
+        runCurrent()
+        viewModel.selectCloudServer(serverB.id)
+        pendingServerSwitch.complete(listOf("stale-after-switch"))
+        advanceUntilIdle()
+        assertEquals(null, viewModel.state.value.cloud.mcpTestName)
+        assertTrue(viewModel.state.value.cloud.mcpTestTools.isEmpty())
+
+        viewModel.selectCloudServer(serverA.id)
+        viewModel.testCloudMcpServer(mcp)
+        runCurrent()
+        viewModel.selectCloudSection(CloudSection.SERVERS)
+        pendingSectionLeave.complete(listOf("stale-after-leave"))
+        advanceUntilIdle()
+        assertEquals(null, viewModel.state.value.cloud.mcpTestName)
+        assertTrue(viewModel.state.value.cloud.mcpTestTools.isEmpty())
+
+        viewModel.selectCloudSection(CloudSection.MCP)
+        viewModel.testCloudMcpServer(mcp)
+        runCurrent()
+        fake.cloudMcpServers[0] = mcp.copy(updatedAt = 2)
+        viewModel.retryLoad()
+        runCurrent()
+        assertEquals(2, viewModel.state.value.cloudMcpServers.single().updatedAt)
+        pendingConfigurationChange.complete(listOf("stale-after-edit"))
+        advanceUntilIdle()
+
+        assertEquals(null, viewModel.state.value.cloud.testingMcpServerId)
+        assertEquals(null, viewModel.state.value.cloud.mcpTestName)
+        assertTrue(viewModel.state.value.cloud.mcpTestTools.isEmpty())
+    }
+
+    @Test
+    fun completedCloudMcpTestIsClearedWhenConfigurationChanges() = runTest(dispatcher) {
+        val server = cloudServer("mcp-result-server", "/srv")
+        val mcp = cloudMcp("mcp-result", server.id, updatedAt = 1)
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += server
+            cloudMcpServers += mcp
+            cloudMcpTestHandler = { listOf("first_tool") }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.INFINITE_CLOUD)
+        viewModel.selectCloudSection(CloudSection.MCP)
+
+        viewModel.testCloudMcpServer(mcp)
+        advanceUntilIdle()
+
+        assertEquals(mcp.name, viewModel.state.value.cloud.mcpTestName)
+        assertEquals(listOf("first_tool"), viewModel.state.value.cloud.mcpTestTools)
+        assertEquals(mcp.id, viewModel.state.value.cloud.mcpTestServerId)
+        assertEquals(mcp.updatedAt, viewModel.state.value.cloud.mcpTestServerUpdatedAt)
+
+        fake.cloudMcpServers[0] = mcp.copy(updatedAt = 2)
+        viewModel.retryLoad()
+        advanceUntilIdle()
+
+        assertEquals(null, viewModel.state.value.cloud.mcpTestName)
+        assertTrue(viewModel.state.value.cloud.mcpTestTools.isEmpty())
+        assertEquals(null, viewModel.state.value.cloud.mcpTestServerId)
+        assertEquals(null, viewModel.state.value.cloud.mcpTestServerUpdatedAt)
+    }
+
+    @Test
+    fun toolDialogSettingsUseOneConversationWriteWithReadyServer() = runTest(dispatcher) {
+        val server = cloudServer("ready-server", "/srv")
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += server
+            conversations += Conversation(id = "conversation-cloud", model = model.id)
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openConversation("conversation-cloud")
+        advanceUntilIdle()
+        fake.conversationWrites.clear()
+
+        viewModel.saveToolSettings(
+            search = false,
+            read = true,
+            knowledge = true,
+            process = true,
+            cloud = true,
+            serverId = null,
+        )
+        advanceUntilIdle()
+
+        assertEquals(1, fake.conversationWrites.size)
+        val request = fake.conversationWrites.single()
+        assertEquals(false, request.enableSearch)
+        assertEquals(true, request.enableRead)
+        assertEquals(true, request.enableKnowledge)
+        assertEquals(true, request.enableInfiniteCloud)
+        assertEquals(server.id, request.cloudServerId)
+        assertTrue(request.updateCloudServerId)
+
+        fake.conversationWrites.clear()
+        viewModel.saveToolSettings(false, true, true, true, false, server.id)
+        advanceUntilIdle()
+        val disabled = fake.conversationWrites.single()
+        assertEquals(false, disabled.enableInfiniteCloud)
+        assertEquals(null, disabled.cloudServerId)
+        assertTrue(disabled.updateCloudServerId)
+    }
+
+    @Test
+    fun latestToolSettingsWinWhenAnOlderResponseReturnsLate() = runTest(dispatcher) {
+        val server = cloudServer("tool-race-server", "/srv")
+        val oldResponseStarted = CompletableDeferred<Unit>()
+        val releaseOldResponse = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += server
+            conversations += Conversation(id = "conversation-tool-race", model = model.id)
+            conversationUpdateAfterWrite = { request, _ ->
+                if (request.enableSearch == false) {
+                    oldResponseStarted.complete(Unit)
+                    withContext(NonCancellable) { releaseOldResponse.await() }
+                }
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openConversation("conversation-tool-race")
+        advanceUntilIdle()
+
+        viewModel.saveToolSettings(false, false, false, false, false, null)
+        runCurrent()
+        assertTrue(oldResponseStarted.isCompleted)
+        viewModel.saveToolSettings(true, true, true, true, true, server.id)
+        runCurrent()
+
+        val stored = fake.conversations.single()
+        assertTrue(stored.enableSearch)
+        assertTrue(stored.enableRead)
+        assertTrue(stored.enableKnowledge)
+        assertTrue(stored.enableInfiniteCloud)
+        assertEquals(server.id, stored.cloudServerId)
+        assertEquals(true, fake.conversationWrites.last().enableSearch)
+
+        releaseOldResponse.complete(Unit)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.enableSearch)
+        assertTrue(viewModel.state.value.enableRead)
+        assertTrue(viewModel.state.value.enableKnowledge)
+        assertTrue(viewModel.state.value.showProcess)
+        assertTrue(viewModel.state.value.config.enableInfiniteCloud)
+        assertEquals(server.id, viewModel.state.value.config.cloudServerId)
+        assertTrue(fake.conversations.single().enableInfiniteCloud)
+        assertEquals(server.id, fake.conversations.single().cloudServerId)
+    }
+
+    @Test
+    fun failedToolSettingsRestorePersistedConversation() = runTest(dispatcher) {
+        val server = cloudServer("tool-failure-server", "/srv")
+        val existing = Conversation(
+            id = "conversation-tool-failure",
+            model = "model-1",
+            enableSearch = true,
+            enableRead = true,
+            enableKnowledge = false,
+            enableInfiniteCloud = true,
+            cloudServerId = server.id,
+        )
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += server
+            conversations += existing
+            conversationUpdateBeforeWrite = { _, _ -> throw IllegalStateException("tool settings write failed") }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openConversation(existing.id)
+        advanceUntilIdle()
+
+        viewModel.saveToolSettings(false, false, true, true, false, null)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.enableSearch)
+        assertTrue(viewModel.state.value.enableRead)
+        assertFalse(viewModel.state.value.enableKnowledge)
+        assertTrue(viewModel.state.value.config.enableInfiniteCloud)
+        assertEquals(server.id, viewModel.state.value.config.cloudServerId)
+        assertEquals(existing, fake.conversations.single())
+        assertTrue(viewModel.state.value.notice != null)
+    }
+
+    @Test
+    fun staleToolSettingsFailureCannotRollbackNewerSuccess() = runTest(dispatcher) {
+        val server = cloudServer("tool-stale-failure-server", "/srv")
+        val oldWriteStarted = CompletableDeferred<Unit>()
+        val releaseOldWrite = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += server
+            conversations += Conversation(id = "conversation-tool-stale-failure", model = model.id)
+            conversationUpdateBeforeWrite = { request, _ ->
+                if (request.enableSearch == false) {
+                    withContext(NonCancellable) {
+                        oldWriteStarted.complete(Unit)
+                        releaseOldWrite.await()
+                        throw IllegalStateException("late tool settings failure")
+                    }
+                }
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openConversation("conversation-tool-stale-failure")
+        advanceUntilIdle()
+
+        viewModel.saveToolSettings(false, false, false, false, false, null)
+        runCurrent()
+        assertTrue(oldWriteStarted.isCompleted)
+        viewModel.saveToolSettings(true, true, true, true, true, server.id)
+        runCurrent()
+
+        releaseOldWrite.complete(Unit)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.enableSearch)
+        assertTrue(viewModel.state.value.enableRead)
+        assertTrue(viewModel.state.value.enableKnowledge)
+        assertTrue(viewModel.state.value.config.enableInfiniteCloud)
+        assertEquals(server.id, viewModel.state.value.config.cloudServerId)
+        assertTrue(fake.conversations.single().enableInfiniteCloud)
+        assertEquals(server.id, fake.conversations.single().cloudServerId)
+        assertEquals(null, viewModel.state.value.notice)
+    }
+
+    @Test
+    fun trustingHostImmediatelyProbesReturnedProfile() = runTest(dispatcher) {
+        val untrusted = cloudServer("trust-server", "/srv").copy(
+            hostKeyAlgorithm = null,
+            hostKeyBase64 = null,
+            hostKeyFingerprint = null,
+        )
+        val candidate = cloudProbe("candidate-key", "SHA256:candidate", trusted = false)
+        val trusted = untrusted.copy(
+            hostKeyAlgorithm = candidate.hostKeyAlgorithm,
+            hostKeyBase64 = candidate.hostKeyBase64,
+            hostKeyFingerprint = candidate.fingerprint,
+        )
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += untrusted
+            cloudProbeHandler = { profile ->
+                if (profile.hostKeyBase64 == null) candidate else cloudProbe(profile.hostKeyBase64, profile.hostKeyFingerprint!!, trusted = true)
+            }
+            trustedCloudServer = trusted
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+
+        viewModel.probeCloudServer(untrusted.id)
+        advanceUntilIdle()
+        viewModel.trustPendingCloudHost()
+        advanceUntilIdle()
+
+        assertEquals(listOf(null, candidate.hostKeyBase64), fake.probedCloudProfiles.map { it.hostKeyBase64 })
+        assertEquals(candidate.hostKeyBase64, viewModel.state.value.cloudServers.single().hostKeyBase64)
+        assertEquals(candidate.fingerprint, viewModel.state.value.cloud.serverDiagnostics[untrusted.id]?.probe?.fingerprint)
+    }
+
+    @Test
+    fun changedHostKeyRequiresOldAndNewFingerprintConfirmation() = runTest(dispatcher) {
+        val original = cloudServer("replace-server", "/srv")
+        val replacementProbe = cloudProbe("replacement-key", "SHA256:replacement", trusted = false)
+        val replacement = original.copy(
+            hostKeyBase64 = replacementProbe.hostKeyBase64,
+            hostKeyFingerprint = replacementProbe.fingerprint,
+        )
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += original
+            hostReplacementProbe = replacementProbe
+            replacementCloudServer = replacement
+            cloudProbeHandler = { profile ->
+                cloudProbe(profile.hostKeyBase64!!, profile.hostKeyFingerprint!!, trusted = true)
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+
+        viewModel.probeCloudHostReplacement(original.id)
+        advanceUntilIdle()
+        val pending = requireNotNull(viewModel.state.value.cloud.pendingHostKeyReplacement)
+        assertEquals(original.hostKeyFingerprint, pending.oldFingerprint)
+        assertEquals(replacementProbe.fingerprint, pending.probe.fingerprint)
+
+        viewModel.replacePendingCloudHostKey()
+        advanceUntilIdle()
+
+        assertEquals(listOf(original.hostKeyBase64), fake.replacedExpectedHostKeys)
+        assertEquals(replacementProbe.hostKeyBase64, viewModel.state.value.cloudServers.single().hostKeyBase64)
+        assertEquals(replacementProbe.fingerprint, viewModel.state.value.cloud.serverDiagnostics[original.id]?.probe?.fingerprint)
+    }
+
+    @Test
+    fun failedTaskArtifactCanBeRetriedAndWorkspaceIsRefreshed() = runTest(dispatcher) {
+        val delivery = CloudArtifactDelivery(
+            id = "delivery-1",
+            messageId = "assistant-1",
+            taskId = "task-1",
+            sourceType = CloudArtifactSourceType.REMOTE,
+            sourceIdentity = "server:/srv/result.txt",
+            displayName = "result.txt",
+            status = CloudArtifactDeliveryStatus.FAILED,
+            error = "offline",
+        )
+        val fake = FakeChatDataSource(withModel = true).apply { cloudArtifactDeliveries += delivery }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+
+        viewModel.retryCloudArtifactDelivery(delivery.id)
+        advanceUntilIdle()
+
+        assertEquals(listOf(delivery.id), fake.retriedArtifactDeliveries)
+        assertEquals(CloudArtifactDeliveryStatus.DELIVERED, viewModel.state.value.cloudArtifactDeliveries.single().status)
+        assertTrue(viewModel.state.value.cloud.retryingArtifactDeliveryIds.isEmpty())
+    }
+
+    @Test
     fun urlTestCancellationClearsBusyStateWithoutShowingAnError() = runTest(dispatcher) {
         val fake = FakeChatDataSource(withModel = true)
         val viewModel = AppViewModel(fake)
@@ -927,11 +1684,19 @@ private class FakeChatDataSource(withModel: Boolean) : ChatDataSource {
     val bookmarks = mutableListOf<BookmarkedMessage>()
     val notes = mutableListOf<Note>()
     val knowledgeDocuments = mutableListOf<KnowledgeDocument>()
+    val cloudServers = mutableListOf<CloudServerProfile>()
+    val cloudMcpServers = mutableListOf<CloudMcpServer>()
+    val cloudTasks = mutableListOf<CloudTask>()
+    val cloudArtifactDeliveries = mutableListOf<CloudArtifactDelivery>()
     val knowledgeSnippets = mutableListOf<KnowledgeSnippet>()
     val knowledgePreviewCalls = mutableListOf<String>()
     var knowledgePreviewHandler: suspend (String) -> KnowledgeDocumentPreview? = { null }
     var initialized = false
+    var initializationGate: CompletableDeferred<Unit>? = null
     var sentRequest: SendMessageRequest? = null
+    var createConversationFailure: Throwable? = null
+    var sendMessageFailureBeforeUser: Throwable? = null
+    var sendMessageFailureAfterUser: Throwable? = null
     var noteSummaryFailure: Throwable? = null
     var noteSummaryModelId: String? = null
     var noteSummaryPrompt: String? = null
@@ -946,10 +1711,38 @@ private class FakeChatDataSource(withModel: Boolean) : ChatDataSource {
     var appliedImport: ImportPreview? = null
     var previewImportFailure: Throwable? = null
     var applyImportFailure: Throwable? = null
+    val cloudFileCalls = mutableListOf<Pair<String, String>>()
+    var cloudFilesHandler: suspend (String, String) -> Pair<String, List<CloudFileEntry>> = { _, path -> path to emptyList() }
+    var cloudServerSaveHandler: suspend (CloudServerDraft) -> CloudServerProfile = { it.profile }
+    var cloudTextHandler: suspend (String, String) -> String = { _, _ -> "" }
+    var cloudTextWriteHandler: suspend (String, String, String) -> Unit = { _, _, _ -> }
+    val cloudTextWrites = mutableListOf<Triple<String, String, String>>()
+    var cloudTaskLogHandler: suspend (String) -> String = { "" }
+    var cloudSyncGate: CompletableDeferred<Unit>? = null
+    var cloudSyncCalls = 0
+    val cloudUploads = mutableListOf<Triple<String, String, ByteArray>>()
+    var cloudUploadHandler: suspend (String, String, InputStream) -> Unit = { serverId, remotePath, input ->
+        cloudUploads += Triple(serverId, remotePath, input.readBytes())
+    }
+    var cloudMcpTestHandler: suspend (String) -> List<String> = { emptyList() }
+    var cloudProbeHandler: suspend (CloudServerProfile) -> CloudConnectionProbe = {
+        cloudProbe(it.hostKeyBase64 ?: "key", it.hostKeyFingerprint ?: "SHA256:key", trusted = it.hostKeyBase64 != null)
+    }
+    val probedCloudProfiles = mutableListOf<CloudServerProfile>()
+    var trustedCloudServer: CloudServerProfile? = null
+    var hostReplacementProbe: CloudConnectionProbe? = null
+    var replacementCloudServer: CloudServerProfile? = null
+    val replacedExpectedHostKeys = mutableListOf<String>()
+    val conversationWrites = mutableListOf<ConversationWriteRequest>()
+    var conversationUpdateBeforeWrite: suspend (ConversationWriteRequest, Conversation) -> Unit = { _, _ -> }
+    var conversationUpdateAfterWrite: suspend (ConversationWriteRequest, Conversation) -> Unit = { _, _ -> }
+    var savedAgent: AgentProfile? = null
+    val retriedArtifactDeliveries = mutableListOf<String>()
     private var models = if (withModel) listOf(model) else emptyList()
 
     override suspend fun initialize() {
         initialized = true
+        initializationGate?.await()
     }
 
     override suspend fun workspace(): WorkspaceSnapshot {
@@ -962,6 +1755,10 @@ private class FakeChatDataSource(withModel: Boolean) : ChatDataSource {
             bookmarks = bookmarks.toList(),
             notes = notes.toList(),
             knowledgeDocuments = knowledgeDocuments.toList(),
+            cloudServers = cloudServers.toList(),
+            cloudMcpServers = cloudMcpServers.toList(),
+            cloudTasks = cloudTasks.toList(),
+            cloudArtifactDeliveries = cloudArtifactDeliveries.toList(),
         )
         workspaceGate?.await()
         return snapshot
@@ -1015,6 +1812,7 @@ private class FakeChatDataSource(withModel: Boolean) : ChatDataSource {
     }
 
     override suspend fun createConversation(request: ConversationWriteRequest): Conversation {
+        createConversationFailure?.let { throw it }
         val conversation = Conversation(
             id = "conversation-${conversations.size + 1}",
             model = request.model ?: model.id,
@@ -1040,15 +1838,30 @@ private class FakeChatDataSource(withModel: Boolean) : ChatDataSource {
     }
 
     override suspend fun updateConversation(id: String, request: ConversationWriteRequest): Conversation {
+        conversationWrites += request
         val index = conversations.indexOfFirst { it.id == id }
         val current = conversations[index]
+        conversationUpdateBeforeWrite(request, current)
         val updated = current.copy(
             title = request.title ?: current.title,
             model = request.model ?: current.model,
             systemPrompt = request.systemPrompt ?: current.systemPrompt,
+            enableSearch = request.enableSearch ?: current.enableSearch,
+            enableRead = request.enableRead ?: current.enableRead,
+            enableKnowledge = request.enableKnowledge ?: current.enableKnowledge,
+            enableInfiniteCloud = request.enableInfiniteCloud ?: current.enableInfiniteCloud,
+            cloudServerId = if (request.updateCloudServerId) request.cloudServerId else current.cloudServerId,
         )
         conversations[index] = updated
+        conversationUpdateAfterWrite(request, updated)
         return updated
+    }
+
+    override suspend fun saveCloudServer(draft: CloudServerDraft): CloudServerProfile {
+        val saved = cloudServerSaveHandler(draft)
+        val index = cloudServers.indexOfFirst { it.id == saved.id }
+        if (index >= 0) cloudServers[index] = saved else cloudServers += saved
+        return saved
     }
 
     override suspend fun deleteConversations(ids: Set<String>) {
@@ -1060,6 +1873,67 @@ private class FakeChatDataSource(withModel: Boolean) : ChatDataSource {
 
     override suspend fun discardPendingAttachments(attachments: List<PendingAttachment>) {
         discardedAttachments += attachments
+    }
+
+    override suspend fun saveAgent(agent: AgentProfile): AgentProfile {
+        savedAgent = agent
+        return agent
+    }
+
+    override suspend fun cloudFiles(serverId: String, path: String): Pair<String, List<CloudFileEntry>> {
+        cloudFileCalls += serverId to path
+        return cloudFilesHandler(serverId, path)
+    }
+
+    override suspend fun readCloudText(serverId: String, path: String): String = cloudTextHandler(serverId, path)
+
+    override suspend fun writeCloudText(serverId: String, path: String, content: String) {
+        cloudTextWrites += Triple(serverId, path, content)
+        cloudTextWriteHandler(serverId, path, content)
+    }
+
+    override suspend fun cloudTaskLog(id: String): String = cloudTaskLogHandler(id)
+
+    override suspend fun syncCloudTasks() {
+        cloudSyncCalls += 1
+        cloudSyncGate?.await()
+    }
+
+    override suspend fun uploadCloudFile(serverId: String, remotePath: String, input: InputStream) {
+        cloudUploadHandler(serverId, remotePath, input)
+    }
+
+    override suspend fun testCloudMcpServer(id: String): List<String> = cloudMcpTestHandler(id)
+
+    override suspend fun probeCloudServer(profile: CloudServerProfile): CloudConnectionProbe {
+        probedCloudProfiles += profile
+        return cloudProbeHandler(profile)
+    }
+
+    override suspend fun trustCloudHostKey(serverId: String, probe: CloudConnectionProbe): CloudServerProfile =
+        requireNotNull(trustedCloudServer)
+
+    override suspend fun probeCloudHostReplacement(serverId: String): CloudConnectionProbe =
+        requireNotNull(hostReplacementProbe)
+
+    override suspend fun replaceCloudHostKey(
+        serverId: String,
+        expectedHostKeyBase64: String,
+        probe: CloudConnectionProbe,
+    ): CloudServerProfile {
+        replacedExpectedHostKeys += expectedHostKeyBase64
+        return requireNotNull(replacementCloudServer)
+    }
+
+    override suspend fun retryCloudArtifactDelivery(id: String): CloudArtifactDelivery {
+        retriedArtifactDeliveries += id
+        val index = cloudArtifactDeliveries.indexOfFirst { it.id == id }
+        val updated = cloudArtifactDeliveries[index].copy(
+            status = CloudArtifactDeliveryStatus.DELIVERED,
+            error = "",
+        )
+        cloudArtifactDeliveries[index] = updated
+        return updated
     }
 
     override suspend fun saveNote(note: Note): Note {
@@ -1094,10 +1968,12 @@ private class FakeChatDataSource(withModel: Boolean) : ChatDataSource {
 
     override fun sendMessage(id: String, request: SendMessageRequest): Flow<ChatEvent> = flow {
         sentRequest = request
+        sendMessageFailureBeforeUser?.let { throw it }
         val user = ChatMessage("user-1", id, requestId = request.requestId, role = "user", content = request.content)
         val initial = ChatMessage("assistant-1", id, requestId = request.requestId, role = "assistant", status = "generating")
         val final = initial.copy(content = "Answer from provider", status = "completed")
         emit(ChatEvent.UserMessage(user))
+        sendMessageFailureAfterUser?.let { throw it }
         emit(ChatEvent.AssistantMessage(initial))
         emit(ChatEvent.Process(ProcessEvent(type = "thinking", id = "thinking-1", content = "summary")))
         emit(ChatEvent.Delta("Answer from provider"))
@@ -1116,6 +1992,16 @@ private class FakeChatDataSource(withModel: Boolean) : ChatDataSource {
         applyImportFailure?.let { throw it }
         appliedImport = preview
         models = preview.payload.models
+    }
+}
+
+private class CloseTrackingInputStream(bytes: ByteArray) : ByteArrayInputStream(bytes) {
+    var closed = false
+        private set
+
+    override fun close() {
+        closed = true
+        super.close()
     }
 }
 
@@ -1150,4 +2036,49 @@ private fun knowledgePreview(document: KnowledgeDocument, text: String) = Knowle
     extension = document.name.substringAfterLast('.'),
     text = text,
     truncated = false,
+)
+
+private fun cloudServer(id: String, startDirectory: String) = CloudServerProfile(
+    id = id,
+    name = id,
+    host = "$id.example.com",
+    username = "runner",
+    startDirectory = startDirectory,
+    hostKeyAlgorithm = "ssh-ed25519",
+    hostKeyBase64 = "$id-key",
+    hostKeyFingerprint = "SHA256:$id",
+    keyConfigured = true,
+)
+
+private fun cloudFile(name: String, path: String) = CloudFileEntry(
+    name = name,
+    path = path,
+    directory = false,
+    size = 4,
+    modifiedAt = 1,
+)
+
+private fun cloudTask(id: String, server: CloudServerProfile) = CloudTask(
+    id = id,
+    cloudServerId = server.id,
+    serverName = server.name,
+    kind = "shell",
+)
+
+private fun cloudMcp(id: String, serverId: String, updatedAt: Long) = CloudMcpServer(
+    id = id,
+    cloudServerId = serverId,
+    name = id,
+    command = "mcp-command",
+    updatedAt = updatedAt,
+)
+
+private fun cloudProbe(key: String, fingerprint: String, trusted: Boolean) = CloudConnectionProbe(
+    hostKeyAlgorithm = "ssh-ed25519",
+    hostKeyBase64 = key,
+    fingerprint = fingerprint,
+    trusted = trusted,
+    helperVersion = if (trusted) 3 else null,
+    pythonVersion = if (trusted) "Python 3.12" else null,
+    nodeAvailable = trusted,
 )

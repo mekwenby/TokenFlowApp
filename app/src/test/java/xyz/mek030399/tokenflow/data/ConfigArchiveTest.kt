@@ -25,6 +25,29 @@ class ConfigArchiveTest {
         globalSystemPrompt = "global prompt",
         globalUrlReaderBackend = UrlReaderBackend.INFOFLOW,
         agents = listOf(AgentProfile(id = "agent-1", name = "Reviewer", modelId = "model-1", systemPrompt = "Review code")),
+        cloudServers = listOf(
+            CloudServerProfile(
+                id = "cloud-1",
+                name = "Build host",
+                host = "build.example.com",
+                username = "runner",
+                hostKeyAlgorithm = "ssh-ed25519",
+                hostKeyBase64 = "AAAAC3NzaC1lZDI1NTE5AAAAITest",
+                hostKeyFingerprint = "SHA256:fixed",
+                keyConfigured = false,
+            ),
+        ),
+        cloudMcpServers = listOf(
+            CloudMcpServer(
+                id = "mcp-1",
+                cloudServerId = "cloud-1",
+                name = "Build tools",
+                command = "npx",
+                arguments = listOf("example-mcp"),
+                environmentNames = listOf("SERVICE_TOKEN"),
+                secretsConfigured = false,
+            ),
+        ),
         globalAssistantNickname = "Archive assistant",
     )
 
@@ -38,6 +61,12 @@ class ConfigArchiveTest {
         assertFalse(encoded.contains("infoflow-secret"))
         assertTrue(encoded.contains("PBKDF2-HMAC-SHA256"))
         assertTrue(serializedPayload.contains("\"global_assistant_nickname\":\"Archive assistant\""))
+        assertTrue(serializedPayload.contains("\"host_key_fingerprint\":\"SHA256:fixed\""))
+        assertFalse(serializedPayload.contains("private_key"))
+        assertFalse(serializedPayload.contains("passphrase"))
+        assertFalse(serializedPayload.contains("environment_values"))
+        assertFalse(serializedPayload.contains("header_values"))
+        assertFalse(serializedPayload.contains("SERVICE_TOKEN\":"))
         assertEquals(payload, codec.decode(encoded, "correct horse battery".toCharArray()))
     }
 

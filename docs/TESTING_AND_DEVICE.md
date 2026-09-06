@@ -10,6 +10,7 @@
 
 - OpenAI Chat、OpenAI Responses、Anthropic 请求、SSE、重放、工具和缓存 usage
 - 引擎重试/降级、上下文边界与 ViewModel 多会话并发
+- HTTP 等待响应头/流中停顿时取消、MiMo 响应体截断/超时、生成收尾防重及跨会话设置返回
 - Exa、URL Reader、InfoFlow、SSRF 校验和输出限制
 - `.tfcfg` 加密、归档校验和导入冲突策略
 - 知识自动检索、引用传播、伪造标记和 Markdown 安全
@@ -22,6 +23,7 @@
 - 配置原子合并、SecretStore 和回滚
 - 附件、相机 EXIF、头像和显示偏好
 - 知识预取、引用、笔记快照与并发幂等
+- 2 MiB 及已有更大笔记的分块读取、跨块 UTF-8/NUL、标题与编辑/删除竞争、生成状态与会话设置并发
 - Compose 主要工作流和 Media3 播放状态
 
 ## 本地门禁
@@ -36,14 +38,15 @@
 
 涉及 JSch、反射加载或 R8 规则时，还必须执行 `.\gradlew.bat -PfdroidBuild=true assembleRelease --no-configuration-cache`，并检查压缩后的未签名 APK。正式发布工作流会将 JSch 依赖 JAR 的完整类集合与 `mapping.txt` 比较，并用 `apkanalyzer` 验证最终 DEX；缺少或重命名任何运行时类都会阻止发布。
 
-完整仓库门禁还包括从仓库根目录执行：
+完整仓库门禁还包括远程 helper 文件操作测试，需要 Python 3 和标准库。从仓库根目录执行：
 
 ```powershell
-go test ./...
-npm test
+python -m unittest discover -s app/src/test/python -p 'test_*.py'
 ```
 
-Go 和网页测试不替代 Android 测试，Android 测试也不覆盖真实第三方供应商的在线行为。
+Linux/macOS 可使用 `python3`。测试只在临时目录内操作普通文件、目录和符号链接，验证删除链接不会删除目标、移动保留链接身份；不会连接 SSH 服务器。Windows 对不支持的符号链接场景显式跳过，Ubuntu CI 和正式发布工作流运行同一套测试。
+
+本仓库只有 Android App 与随包分发的 Python helper，不包含 Go 或网页测试。JVM/Python 测试、测试 APK 构建和现有设备覆盖安装后的冒烟均不能替代隔离 AVD 的 instrumentation；未运行设备自动化时必须在验证结果中注明。
 
 ## Instrumentation 只能使用隔离设备
 

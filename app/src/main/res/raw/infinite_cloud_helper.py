@@ -109,6 +109,13 @@ def update(task_id, **changes):
 def expanded(path):
     return pathlib.Path(os.path.expandvars(os.path.expanduser(path))).resolve()
 
+def expanded_entry(path):
+    entry = pathlib.Path(os.path.expandvars(os.path.expanduser(path)))
+    if entry.name in ("", ".", ".."):
+        return entry.resolve()
+    # File mutations follow parent directories, but act on the final link itself.
+    return entry.parent.resolve() / entry.name
+
 def command_for(request, directory):
     kind = request.get("kind", "shell")
     if kind == "shell":
@@ -508,10 +515,10 @@ def handle(request):
     if op == "mkdir":
         path = expanded(request["path"]); path.mkdir(parents=bool(request.get("parents", False)), exist_ok=False); return {"path": str(path)}
     if op == "move":
-        source = expanded(request["source"]); target = expanded(request["target"]); source.rename(target); return {"path": str(target)}
+        source = expanded_entry(request["source"]); target = expanded_entry(request["target"]); source.rename(target); return {"path": str(target)}
     if op == "delete":
-        path = expanded(request["path"])
-        shutil.rmtree(path) if path.is_dir() else path.unlink()
+        path = expanded_entry(request["path"])
+        path.unlink() if path.is_symlink() or not path.is_dir() else shutil.rmtree(path)
         return {"deleted": str(path)}
     raise ValueError("unknown operation")
 

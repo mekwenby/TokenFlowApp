@@ -11,6 +11,7 @@
 | Android SDK Platform | 36 | 对应 `compileSdk` 和 `targetSdk` |
 | Android Build Tools | 36.0.0 | 在 App 构建脚本中固定 |
 | Android Platform Tools | 可用的近期版本 | 提供 `adb`；仅构建 APK 时不是必需 |
+| Python | 3.x | 运行远程 helper 的标准库回归测试，不参与 APK 编译 |
 | 内存 | Gradle 最多 3 GiB | 由 `org.gradle.jvmargs=-Xmx3g` 配置 |
 
 Gradle Wrapper 固定为 `9.4.1`，并校验下载包 SHA-256：
@@ -112,6 +113,7 @@ cd C:\Users\Mek\Works\TokenFlowApp
 
 ```powershell
 .\gradlew.bat testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest verifyThirdPartyNotices
+python -m unittest discover -s app/src/test/python -p 'test_*.py'
 ```
 
 不要用裸 `assemble` 或 `build` 代替上述 Debug 任务。项目会把这两个任务视为包含 Release，并在签名参数缺失时立即失败。

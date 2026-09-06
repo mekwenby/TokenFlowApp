@@ -53,6 +53,7 @@
 | Espresso Core | 3.6.1 | Android UI 交互 |
 | Room Testing | 2.8.4 | DAO、外键和 migration |
 | Compose UI Test JUnit4 | BOM 管理 | Compose semantics/UI 测试 |
+| Python 标准库 unittest | Python 3 | 远程 helper 的本地文件与符号链接回归；不打包进 APK |
 
 Debug 变体还包含 Compose UI tooling 和 test manifest；这些组件不会作为 Release 运行时依赖打包。
 

@@ -5,6 +5,10 @@ build/
 **/build/
 local.properties
 
+# Python helper test caches
+__pycache__/
+*.pyc
+
 # Android Studio and editors
 .idea/
 .vscode/

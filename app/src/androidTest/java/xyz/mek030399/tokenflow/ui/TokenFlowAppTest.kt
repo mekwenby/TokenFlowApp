@@ -706,6 +706,61 @@ class TokenFlowAppTest {
     }
 
     @Test
+    fun visionConfigurationRoundTripRestoresTheComposerTextAndAttachment() {
+        val fake = UiFakeDataSource(withModel = true)
+        val viewModel = AppViewModel(fake)
+        composeRule.setContent { TokenFlowTheme { TokenFlowApp(viewModel) } }
+        composeRule.waitUntil(5_000) { viewModel.state.value.phase == AppPhase.READY }
+        val draft = "  Explain the attached diagram  "
+        composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).performTextInput(draft)
+        val attachment = PendingAttachment(
+            uri = "content://documents/diagram.png",
+            displayName = "diagram.png",
+            mimeType = "image/png",
+        )
+        composeRule.runOnIdle { viewModel.addAttachments(listOf(attachment)) }
+
+        composeRule.onNodeWithTag(UiTestTags.MESSAGE_ACTION).performClick()
+        composeRule.waitUntil(5_000) { viewModel.state.value.screen == AppScreen.GLOBAL_SETTINGS }
+        composeRule.onAllNodesWithTag(UiTestTags.MESSAGE_INPUT).assertCountEquals(0)
+        assertEquals(null, fake.sentRequest)
+        assertEquals(draft, viewModel.state.value.composerDraftRecovery?.content)
+
+        composeRule.runOnIdle { viewModel.openScreen(AppScreen.CHAT) }
+
+        composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).assertTextEquals(draft)
+        composeRule.onNodeWithText(attachment.displayName).assertIsDisplayed()
+        composeRule.waitUntil(5_000) { viewModel.state.value.composerDraftRecovery == null }
+        assertEquals(listOf(attachment), viewModel.state.value.pendingAttachments)
+    }
+
+    @Test
+    fun anotherConversationCannotConsumeAComposerRecoveryAfterSettingsNavigation() {
+        val source = Conversation(id = "recovery-source", model = "model-1")
+        val other = Conversation(id = "recovery-other", model = "model-1")
+        val fake = UiFakeDataSource(withModel = true).apply { conversations += listOf(source, other) }
+        val viewModel = AppViewModel(fake)
+        composeRule.setContent { TokenFlowTheme { TokenFlowApp(viewModel) } }
+        composeRule.waitUntil(5_000) { viewModel.state.value.phase == AppPhase.READY }
+        composeRule.runOnIdle { viewModel.openConversation(source.id) }
+        val draft = "Question for the source conversation"
+        composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).performTextInput(draft)
+        composeRule.runOnIdle {
+            viewModel.addAttachments(listOf(PendingAttachment("content://documents/image.png", "image.png", "image/png")))
+        }
+        composeRule.onNodeWithTag(UiTestTags.MESSAGE_ACTION).performClick()
+        composeRule.waitUntil(5_000) { viewModel.state.value.screen == AppScreen.GLOBAL_SETTINGS }
+
+        composeRule.runOnIdle { viewModel.openConversation(other.id) }
+        composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).assertTextEquals("")
+        assertEquals(source.id, viewModel.state.value.composerDraftRecovery?.conversationId)
+        composeRule.runOnIdle { viewModel.openConversation(source.id) }
+
+        composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).assertTextEquals(draft)
+        composeRule.waitUntil(5_000) { viewModel.state.value.composerDraftRecovery == null }
+    }
+
+    @Test
     fun configuredAppSendsAndCopiesProviderResponse() {
         val fake = UiFakeDataSource(withModel = true)
         val viewModel = AppViewModel(fake)

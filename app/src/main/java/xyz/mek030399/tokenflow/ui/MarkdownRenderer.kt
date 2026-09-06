@@ -102,6 +102,9 @@ import org.commonmark.node.StrongEmphasis
 import org.commonmark.node.Text as MarkdownText
 import org.commonmark.node.ThematicBreak
 import org.commonmark.parser.Parser
+import org.jsoup.Jsoup
+import org.jsoup.nodes.DocumentType
+import org.jsoup.parser.Parser as HtmlParser
 
 private val markdownParser: Parser = Parser.builder()
     .extensions(listOf(AutolinkExtension.create(), TablesExtension.create()))
@@ -1258,7 +1261,6 @@ internal fun isSafeHttpUrl(value: String): Boolean = runCatching {
     (uri.scheme == "https" || uri.scheme == "http") && !uri.host.isNullOrBlank()
 }.getOrDefault(false)
 
-@SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun HtmlPreviewDialog(source: String, onDismiss: () -> Unit) {
     val context = LocalContext.current
@@ -1268,29 +1270,7 @@ private fun HtmlPreviewDialog(source: String, onDismiss: () -> Unit) {
         WebView(context).apply {
             setBackgroundColor(AndroidColor.TRANSPARENT)
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = false
-            settings.allowFileAccess = false
-            settings.allowContentAccess = false
-            settings.allowFileAccessFromFileURLs = false
-            settings.allowUniversalAccessFromFileURLs = false
-            settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?) = true
-                @Deprecated("Deprecated in Android")
-                override fun shouldOverrideUrlLoading(view: WebView?, url: String?) = true
-                override fun onSafeBrowsingHit(view: WebView?, request: WebResourceRequest?, threatType: Int, callback: SafeBrowsingResponse?) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                        callback?.backToSafety(true)
-                    }
-                }
-                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                    if (request?.url?.scheme in setOf("file", "content")) {
-                        return WebResourceResponse("text/plain", "UTF-8", null)
-                    }
-                    return super.shouldInterceptRequest(view, request)
-                }
-            }
+            configureHtmlPreview(this)
         }
     }
     DisposableEffect(webView) {
@@ -1326,13 +1306,63 @@ private fun HtmlPreviewDialog(source: String, onDismiss: () -> Unit) {
 
 internal const val HTML_PREVIEW_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https:; img-src https: data: blob:; font-src https: data:; media-src https: data: blob:; connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
 
-internal fun previewDocument(source: String): String {
-    val metadata = "<meta http-equiv=\"Content-Security-Policy\" content=\"$HTML_PREVIEW_CSP\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-    val head = Regex("<head(?:\\s[^>]*)?>", RegexOption.IGNORE_CASE)
-    val html = Regex("<html(?:\\s[^>]*)?>", RegexOption.IGNORE_CASE)
-    return when {
-        head.containsMatchIn(source) -> head.find(source)!!.let { source.replaceRange(it.range, "${it.value}$metadata") }
-        html.containsMatchIn(source) -> html.find(source)!!.let { source.replaceRange(it.range, "${it.value}<head>$metadata</head>") }
-        else -> "<!doctype html><html><head>$metadata</head><body>${source.replace(Regex("^\\s*<!doctype[^>]*>", RegexOption.IGNORE_CASE), "")}</body></html>"
+@SuppressLint("SetJavaScriptEnabled")
+internal fun configureHtmlPreview(webView: WebView) {
+    webView.settings.apply {
+        javaScriptEnabled = true
+        domStorageEnabled = false
+        allowFileAccess = false
+        allowContentAccess = false
+        allowFileAccessFromFileURLs = false
+        allowUniversalAccessFromFileURLs = false
+        mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
     }
+    webView.webViewClient = HtmlPreviewWebViewClient()
+}
+
+internal open class HtmlPreviewWebViewClient : WebViewClient() {
+    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?) = true
+
+    @Deprecated("Deprecated in Android")
+    override fun shouldOverrideUrlLoading(view: WebView?, url: String?) = true
+
+    override fun onSafeBrowsingHit(view: WebView?, request: WebResourceRequest?, threatType: Int, callback: SafeBrowsingResponse?) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) callback?.backToSafety(true)
+    }
+
+    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? =
+        if (shouldBlockHtmlPreviewRequest(request?.url?.scheme, request?.isForMainFrame == true)) {
+            WebResourceResponse("text/plain", "UTF-8", null)
+        } else {
+            null
+        }
+}
+
+internal fun shouldBlockHtmlPreviewRequest(scheme: String?, isForMainFrame: Boolean): Boolean {
+    val normalized = scheme?.lowercase()
+    // loadDataWithBaseURL uses an in-memory main document; HTTPS is only for permitted subresources.
+    return if (isForMainFrame) normalized !in setOf("about", "data")
+    else normalized !in setOf("https", "data", "blob")
+}
+
+internal fun previewDocument(source: String): String {
+    val parsed = Jsoup.parse(source, "", HtmlParser.htmlParser().setTrackPosition(true))
+    val hasDocumentStructure = parsed.select("html, head, body").any { element ->
+        element.sourceRange().let { it.isTracked && !it.isImplicit }
+    }
+    // Standalone scripts must stay in the body so fragment previews can access document.body.
+    val document = if (hasDocumentStructure) parsed else Jsoup.parseBodyFragment(source)
+    document.outputSettings().prettyPrint(false)
+    document.select("meta[http-equiv]").filter { element ->
+        element.attr("http-equiv").trim().lowercase() in setOf("content-security-policy", "refresh")
+    }.forEach { it.remove() }
+    document.select("base, meta[name]").filter { element ->
+        element.normalName() == "base" || element.attr("name").trim().equals("viewport", ignoreCase = true)
+    }.forEach { it.remove() }
+    val head = document.head()
+    head.prependElement("meta").attr("name", "viewport").attr("content", "width=device-width, initial-scale=1")
+    head.prependElement("meta").attr("http-equiv", "Content-Security-Policy").attr("content", HTML_PREVIEW_CSP)
+    document.childNodes().filterIsInstance<DocumentType>().forEach { it.remove() }
+    document.prependChild(DocumentType("html", "", ""))
+    return document.outerHtml()
 }

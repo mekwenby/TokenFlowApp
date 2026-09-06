@@ -27,7 +27,7 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 版本 | `2.5.3`（`versionCode 20`） |
+| 版本 | `2.5.4`（`versionCode 21`） |
 | 正式包名 | `xyz.mek030399.tokenflow` |
 | Debug 包名 | `xyz.mek030399.tokenflow.debug` |
 | 正式证书 SHA-256 | `FEC865BEDC77C742B0E1B3D93A05FCEEBFA6075F46E1C8242B8F2261F0767AFE` |
@@ -56,6 +56,7 @@ GitHub Release 与 F-Droid APK 虽然包名相同，但签名不同，不能相�
 - JDK 17 或更高版本
 - Android SDK Platform 36
 - Android Build Tools 36.0.0
+- Python 3（仅用于远程 helper 的本地回归测试，无额外 Python 依赖）
 - Windows 环境使用 PowerShell 7
 
 项目通过已检入的 Gradle Wrapper 固定构建工具版本，不需要安装全局 Gradle。首次构建会联网下载 Wrapper、插件和 Maven 依赖。Android Studio 通常会自动生成本机的 `local.properties`；该文件已被 Git 忽略。
@@ -66,6 +67,7 @@ Windows PowerShell 7：
 # 在仓库根目录执行
 .\gradlew.bat --version
 .\gradlew.bat testDebugUnitTest --rerun-tasks lintDebug assembleDebug assembleDebugAndroidTest
+python -m unittest discover -s app/src/test/python -p 'test_*.py'
 ```
 
 macOS 或 Linux：
@@ -74,6 +76,7 @@ macOS 或 Linux：
 # 在仓库根目录执行
 ./gradlew --version
 ./gradlew testDebugUnitTest --rerun-tasks lintDebug assembleDebug assembleDebugAndroidTest
+python3 -m unittest discover -s app/src/test/python -p 'test_*.py'
 ```
 
 F-Droid 构建服务器使用专用属性生成由 F-Droid 后续签名的未签名 Release APK：
@@ -105,6 +108,7 @@ app/build/outputs/apk/debug/app-debug.apk
 - API Key 会发送到对应服务进行认证；自定义服务地址的运营者将能够接收相应凭据和请求内容。
 - Infinite Cloud 开启后，本条消息的全部附件会上传到所选 Linux 账号；模型无需逐次确认即可执行该账号允许的命令、文件操作和 MCP 工具。应只使用专用低权限账号。
 - `.tfcfg` 导出配置使用用户设置的密码加密，但不包含完整聊天与工作区数据；逐篇导出的笔记 `.md` 也不是完整备份。
+- 笔记保留 2 MiB Markdown 导入上限；标题与正文按字节分块读取，已有大笔记无需迁移或截断。自动标题和会话生成状态更新会保留期间的用户编辑。
 - 不要在 Issue、日志或提交中包含 API Key、keystore、密码、`.tfcfg`、`local.properties` 或私人对话内容。
 
 完整的数据流、存储边界和安全限制见 [数据与安全](docs/DATA_AND_SECURITY.md)。运行时用户协议的唯一源码是 [`app/src/main/res/raw/user_agreement.md`](app/src/main/res/raw/user_agreement.md)。
@@ -134,7 +138,7 @@ TokenFlowApp/
 │   ├── schemas/                     # Room schema 3/4/5/6/7 快照
 │   └── src/
 │       ├── main/                    # App 源码和资源
-│       ├── test/                    # JVM 单元测试
+│       ├── test/                    # JVM 单元测试与 Python helper 回归
 │       └── androidTest/             # 设备 instrumentation 测试
 ├── archive/                         # 历史设计输出，不参与构建
 ├── design-references/               # UI 探索图，仅作参考
@@ -156,6 +160,7 @@ TokenFlowApp/
 
 ```powershell
 .\gradlew.bat testDebugUnitTest --rerun-tasks lintDebug assembleDebug assembleDebugAndroidTest
+python -m unittest discover -s app/src/test/python -p 'test_*.py'
 ```
 
 Instrumentation 测试必须使用可丢弃的隔离 AVD，不要在保留用户数据的设备上运行。

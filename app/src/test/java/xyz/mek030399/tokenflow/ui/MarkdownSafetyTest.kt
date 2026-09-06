@@ -10,6 +10,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.commonmark.node.FencedCodeBlock
 import org.commonmark.parser.Parser
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 
 class MarkdownSafetyTest {
     private val parser = Parser.builder().build()
@@ -26,22 +28,98 @@ class MarkdownSafetyTest {
 
     @Test
     fun previewDocumentInjectsRestrictivePolicyIntoCompleteDocuments() {
-        val result = previewDocument("<!doctype html><html><head><title>Demo</title></head><body>ok</body></html>")
+        val document = trustedPreview("<!doctype html><html><head><title>Demo</title></head><body>ok</body></html>")
 
-        assertTrue(result.contains("<head><meta http-equiv=\"Content-Security-Policy\""))
-        assertTrue(result.contains("connect-src 'none'"))
-        assertTrue(result.contains("frame-src 'none'"))
-        assertTrue(result.contains("form-action 'none'"))
-        assertTrue(result.contains("<title>Demo</title>"))
+        assertEquals("Demo", document.title())
+        assertEquals("ok", document.body().text())
+        assertTrue(HTML_PREVIEW_CSP.contains("connect-src 'none'"))
+        assertTrue(HTML_PREVIEW_CSP.contains("frame-src 'none'"))
+        assertTrue(HTML_PREVIEW_CSP.contains("form-action 'none'"))
     }
 
     @Test
     fun previewDocumentWrapsFragmentsAndKeepsScriptsUnderCsp() {
-        val result = previewDocument("<script>document.body.textContent='ok'</script>")
+        val document = trustedPreview("<script>document.body.textContent='ok'</script>")
 
-        assertTrue(result.startsWith("<!doctype html><html><head>"))
-        assertTrue(result.contains(HTML_PREVIEW_CSP))
-        assertTrue(result.contains("<body><script>"))
+        assertEquals("document.body.textContent='ok'", document.body().selectFirst("script")?.data())
+        assertTrue(document.head().select("script").isEmpty())
+    }
+
+    @Test
+    fun previewPolicyCannotBeInsertedIntoFakeHeadInsideComment() {
+        val document = trustedPreview(
+            "<!-- <head> -->\n<html><head><script>window.example = true</script></head><body>visible</body></html>",
+        )
+
+        assertEquals("visible", document.body().text())
+        assertEquals("window.example = true", document.head().selectFirst("script")?.data())
+    }
+
+    @Test
+    fun previewKeepsFakeHeadInsideScriptAsScriptData() {
+        val script = "const template = '<head><html>'; document.body.dataset.preview='ok';"
+        val document = trustedPreview("<script>$script</script>")
+
+        assertEquals(script, document.body().selectFirst("script")?.data())
+        assertTrue(document.head().select("script").isEmpty())
+    }
+
+    @Test
+    fun previewNormalizesMalformedAndRepeatedDocumentStructure() {
+        val document = trustedPreview(
+            "<HTML><HEAD data-label='a>b'><title>Demo</title></HEAD><BODY>one" +
+                "<head><meta http-equiv='Content-Security-Policy' content=\"default-src * 'unsafe-inline'\"></head>" +
+                "<body><p>two</p></body></HTML>",
+        )
+
+        assertEquals(1, document.select("html").size)
+        assertEquals(1, document.select("head").size)
+        assertEquals(1, document.select("body").size)
+        assertEquals("Demo", document.title())
+        assertEquals("one two", document.body().text())
+    }
+
+    @Test
+    fun previewRemovesRefreshBaseAndConflictingMetadataEverywhere() {
+        val document = trustedPreview(
+            "<html><head><META HTTP-EQUIV=' Refresh ' content='0;url=https://example.test/escape'>" +
+                "<meta NAME='VIEWPORT' content='width=9000'><base href='https://example.test/'></head>" +
+                "<body><meta http-equiv='CONTENT-SECURITY-POLICY' content=\"default-src *\">" +
+                "<base target='_blank'><p>keep</p></body></html>",
+        )
+
+        assertTrue(document.select("base").isEmpty())
+        assertFalse(document.select("meta[http-equiv]").any { it.attr("http-equiv").trim().equals("refresh", true) })
+        val viewports = document.select("meta[name]").filter { it.attr("name").equals("viewport", true) }
+        assertEquals(1, viewports.size)
+        assertEquals("width=device-width, initial-scale=1", viewports.single().attr("content"))
+        assertEquals("keep", document.body().text())
+    }
+
+    @Test
+    fun previewRequestPolicySeparatesMainDocumentFromHttpsResources() {
+        assertFalse(shouldBlockHtmlPreviewRequest("about", isForMainFrame = true))
+        assertFalse(shouldBlockHtmlPreviewRequest("data", isForMainFrame = true))
+        assertTrue(shouldBlockHtmlPreviewRequest("https", isForMainFrame = true))
+        assertFalse(shouldBlockHtmlPreviewRequest("https", isForMainFrame = false))
+        assertFalse(shouldBlockHtmlPreviewRequest("data", isForMainFrame = false))
+        assertFalse(shouldBlockHtmlPreviewRequest("blob", isForMainFrame = false))
+        listOf(null, "http", "file", "content", "intent", "javascript").forEach { scheme ->
+            assertTrue(shouldBlockHtmlPreviewRequest(scheme, isForMainFrame = true))
+            assertTrue(shouldBlockHtmlPreviewRequest(scheme, isForMainFrame = false))
+        }
+    }
+
+    private fun trustedPreview(source: String): Document {
+        val document = Jsoup.parse(previewDocument(source))
+        val policies = document.select("meta[http-equiv]").filter {
+            it.attr("http-equiv").equals("content-security-policy", ignoreCase = true)
+        }
+        assertEquals("The actual document must contain exactly one policy", 1, policies.size)
+        assertEquals(HTML_PREVIEW_CSP, policies.single().attr("content"))
+        assertEquals(document.head(), policies.single().parent())
+        assertEquals("The policy must precede untrusted head content", policies.single(), document.head().children().first())
+        return document
     }
 
     @Test

@@ -5,7 +5,6 @@ import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.Base64
-import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.encodeToString
@@ -68,7 +67,7 @@ class MimoTtsClient(
             .header("Content-Type", "application/json")
             .post(json.encodeToString(body).toRequestBody(JSON_MEDIA_TYPE))
             .build()
-        val raw = execute(request)
+        val raw = executeMimoRequest(client, request, json)
         val payload = runCatching { json.parseToJsonElement(raw).jsonObject }
             .getOrElse { throw IOException("MiMo returned invalid JSON") }
         val audio = runCatching {
@@ -85,34 +84,42 @@ class MimoTtsClient(
         return TtsAudio(output, false)
     }
 
-    private suspend fun execute(request: Request): String = suspendCancellableCoroutine { continuation ->
-        val call = client.newCall(request)
-        continuation.invokeOnCancellation { call.cancel() }
-        call.enqueue(object : Callback {
-            override fun onFailure(call: Call, error: IOException) {
-                if (continuation.isActive) continuation.resumeWithException(error)
-            }
-
-            override fun onResponse(call: Call, response: Response) {
-                response.use {
-                    val raw = it.body?.string().orEmpty()
-                    if (!it.isSuccessful) {
-                        val message = runCatching {
-                            json.parseToJsonElement(raw).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content
-                        }.getOrNull().orEmpty().ifBlank { "MiMo TTS request failed (${it.code})" }
-                        if (continuation.isActive) continuation.resumeWithException(ApiException(it.code, message = message))
-                    } else if (continuation.isActive) continuation.resume(raw)
-                }
-            }
-        })
-    }
-
     companion object {
         const val ENDPOINT = "https://api.xiaomimimo.com/v1/chat/completions"
         const val MODEL = "mimo-v2.5-tts"
         val VOICES = listOf("mimo_default", "冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean")
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
+}
+
+internal suspend fun executeMimoRequest(
+    client: OkHttpClient,
+    request: Request,
+    json: Json = DirectApiTransport.defaultJson,
+): String = suspendCancellableCoroutine { continuation ->
+    val call = client.newCall(request)
+    continuation.invokeOnCancellation { call.cancel() }
+    call.enqueue(object : Callback {
+        override fun onFailure(call: Call, error: IOException) {
+            if (continuation.isActive) continuation.resumeWithException(error)
+        }
+
+        override fun onResponse(call: Call, response: Response) {
+            val result = runCatching {
+                response.use {
+                    val raw = it.body?.string().orEmpty()
+                    if (!it.isSuccessful) {
+                        val message = runCatching {
+                            json.parseToJsonElement(raw).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content
+                        }.getOrNull().orEmpty().ifBlank { "MiMo TTS request failed (${it.code})" }
+                        throw ApiException(it.code, message = message)
+                    }
+                    raw
+                }
+            }
+            if (continuation.isActive) continuation.resumeWith(result)
+        }
+    })
 }
 
 internal fun markdownToSpeech(value: String): String = value

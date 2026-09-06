@@ -1,6 +1,11 @@
 package xyz.mek030399.tokenflow.data
 
+import java.util.Base64
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -77,7 +82,12 @@ class ConfigArchiveTest {
         assertThrows(ConfigArchiveException::class.java) {
             codec.decode(encoded, "incorrect password".toCharArray())
         }
-        val tampered = encoded.replace(Regex("\"ciphertext\":\"."), "\"ciphertext\":\"A")
+        val envelope = ConfigArchiveCodec.defaultJson.parseToJsonElement(encoded).jsonObject
+        val ciphertext = Base64.getDecoder().decode(envelope.getValue("ciphertext").jsonPrimitive.content)
+        ciphertext[0] = (ciphertext[0].toInt() xor 1).toByte()
+        val tampered = JsonObject(
+            envelope + ("ciphertext" to JsonPrimitive(Base64.getEncoder().encodeToString(ciphertext))),
+        ).toString()
         assertThrows(ConfigArchiveException::class.java) {
             codec.decode(tampered, "correct horse battery".toCharArray())
         }

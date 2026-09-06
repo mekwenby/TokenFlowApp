@@ -51,6 +51,10 @@ jobs:
           fi
           "$sdkmanager_path" "platforms;android-36" "build-tools;36.0.0"
 
+      - name: Test remote helper file operations
+        shell: bash
+        run: python3 -m unittest discover -s app/src/test/python -p 'test_*.py'
+
       - name: Run Android verification
         shell: bash
         run: |

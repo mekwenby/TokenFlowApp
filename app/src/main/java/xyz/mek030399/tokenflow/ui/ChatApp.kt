@@ -2680,7 +2680,7 @@ private fun Composer(
     onRemoveAttachment: (String) -> Unit,
     onCameraFailure: () -> Unit,
     onDraftRecoveryConsumed: (String) -> Unit,
-    onSend: (String) -> Unit,
+    onSend: (String) -> Boolean,
     onStop: () -> Unit,
 ) {
     var value by rememberSaveable(state.activeConversationId) { mutableStateOf("") }
@@ -2695,11 +2695,11 @@ private fun Composer(
     val generating = state.activeGeneration?.active == true
     val draftRecovery = state.composerDraftRecovery
     LaunchedEffect(draftRecovery?.requestId, state.activeConversationId) {
-        if (draftRecovery != null) {
-            if (draftRecovery.conversationId == state.activeConversationId && value.isEmpty()) {
+        if (draftRecovery != null && draftRecovery.conversationId == state.activeConversationId) {
+            if (value.isEmpty()) {
                 value = draftRecovery.content
             }
-            onDraftRecoveryConsumed(draftRecovery.requestId)
+            if (value == draftRecovery.content) onDraftRecoveryConsumed(draftRecovery.requestId)
         }
     }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(5)) { uris ->
@@ -2790,7 +2790,10 @@ private fun Composer(
                     FilledIconButton(
                         onClick = {
                             if (generating) onStop() else if (!cameraProcessing && (value.isNotBlank() || state.pendingAttachments.isNotEmpty())) {
-                                val sent = value; value = ""; focus.clearFocus(); onSend(sent)
+                                if (onSend(value)) {
+                                    value = ""
+                                    focus.clearFocus()
+                                }
                             }
                         },
                         enabled = generating || (!cameraProcessing && (value.isNotBlank() || state.pendingAttachments.isNotEmpty())),

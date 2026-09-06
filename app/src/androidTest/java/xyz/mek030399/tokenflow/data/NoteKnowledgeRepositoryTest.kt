@@ -3,19 +3,112 @@ package xyz.mek030399.tokenflow.data
 import androidx.room.Room
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NoteKnowledgeRepositoryTest {
+    @Test
+    fun exactLimitMarkdownNoteLoadsInWorkspaceAfterDatabaseReopen() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val databaseName = "note-cursor-window-${System.nanoTime()}.db"
+        val bytes = ByteArray(MAX_MARKDOWN_NOTE_BYTES.toInt()) { 'x'.code.toByte() }
+        val imported = parseImportedMarkdownNote("limit.md", MAX_MARKDOWN_NOTE_BYTES, bytes.inputStream())
+        val secrets = SecretStore(context)
+        var database = Room.databaseBuilder(context, TokenFlowDatabase::class.java, databaseName).build()
+        try {
+            val repository = noteRepository(context, database.localDao(), secrets, ModelGateway())
+            val saved = repository.saveNote(Note(title = imported.title, body = imported.body))
+            database.close()
+            database = Room.databaseBuilder(context, TokenFlowDatabase::class.java, databaseName).build()
+            val reopened = noteRepository(context, database.localDao(), secrets, ModelGateway())
+
+            assertEquals(7, database.openHelper.readableDatabase.version)
+            assertEquals(saved, reopened.workspace().notes.single())
+            assertEquals(saved, database.localDao().note(saved.id)?.toDomain())
+            reopened.deleteNote(saved.id)
+            assertTrue(reopened.workspace().notes.isEmpty())
+        } finally {
+            database.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    @Test
+    fun savedNoteTitlePreservesTheBodyWhenTheNoteIsUnchanged() = runBlocking {
+        withSavedNoteTitleFixture { repository, dao, note ->
+            val updated = repository.summarizeNoteTitle(note.id)
+            assertEquals("Generated title", updated.title)
+            assertEquals(note.body, updated.body)
+            assertEquals(updated, dao.note(note.id)?.toDomain())
+        }
+    }
+
+    @Test
+    fun savedNoteTitleCannotOverwriteEditsOrRestoreADeletedNote() = runBlocking {
+        for (editTitle in listOf(false, true)) {
+            withSavedNoteTitleFixture(
+                duringRequest = { dao, note ->
+                    dao.putNote(note.copy(
+                        title = if (editTitle) "User title" else note.title,
+                        body = if (editTitle) note.body else "User body",
+                        updatedAt = note.updatedAt + 1,
+                    ).toEntity())
+                },
+            ) { repository, dao, note ->
+                val error = runCatching { repository.summarizeNoteTitle(note.id) }.exceptionOrNull()
+                assertTrue(error is NoteChangedDuringSummaryException)
+                val current = requireNotNull(dao.note(note.id))
+                assertEquals(if (editTitle) "User title" else note.title, current.title)
+                assertEquals(if (editTitle) note.body else "User body", current.body)
+            }
+        }
+        withSavedNoteTitleFixture(duringRequest = { dao, note -> dao.deleteNote(note.id) }) { repository, dao, note ->
+            val error = runCatching { repository.summarizeNoteTitle(note.id) }.exceptionOrNull()
+            assertTrue(error is NoteChangedDuringSummaryException)
+            assertNull(dao.note(note.id))
+        }
+    }
+
+    @Test
+    fun emptySavedNoteTitleReturnsTheCurrentNoteAndDoesNotRestoreDeletion() = runBlocking {
+        withSavedNoteTitleFixture(
+            response = "   ",
+            duringRequest = { dao, note -> dao.putNote(note.copy(body = "Current body", updatedAt = 2).toEntity()) },
+        ) { repository, dao, note ->
+            val result = repository.summarizeNoteTitle(note.id)
+            assertEquals("Current body", result.body)
+            assertEquals(result, dao.note(note.id)?.toDomain())
+        }
+        withSavedNoteTitleFixture(
+            response = "",
+            duringRequest = { dao, note -> dao.deleteNote(note.id) },
+        ) { repository, dao, note ->
+            assertTrue(runCatching { repository.summarizeNoteTitle(note.id) }.exceptionOrNull() is NoteChangedDuringSummaryException)
+            assertNull(dao.note(note.id))
+        }
+    }
+
+    @Test
+    fun cancellingSavedNoteTitlePropagatesWithoutWriting() = runBlocking {
+        val cancelled = CancellationException("Title cancelled")
+        withSavedNoteTitleFixture(duringRequest = { _, _ -> throw cancelled }) { repository, dao, note ->
+            assertSame(cancelled, runCatching { repository.summarizeNoteTitle(note.id) }.exceptionOrNull())
+            assertEquals(note, dao.note(note.id)?.toDomain())
+        }
+    }
+
     @Test
     fun noteImportIsConcurrentIdempotentAndRemainsAnIndependentSnapshot() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -245,6 +338,50 @@ class NoteKnowledgeRepositoryTest {
             secrets.remove(secrets.providerKeyName(providerId))
             database.close()
         }
+    }
+}
+
+private suspend fun withSavedNoteTitleFixture(
+    response: String = "Generated title",
+    duringRequest: suspend (LocalDao, Note) -> Unit = { _, _ -> },
+    verify: suspend (ChatRepository, LocalDao, Note) -> Unit,
+) {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val database = Room.inMemoryDatabaseBuilder(context, TokenFlowDatabase::class.java).build()
+    val dao = database.localDao()
+    val secrets = SecretStore(context)
+    val suffix = System.nanoTime()
+    val provider = ProviderConfig("title-provider-$suffix", "Title test", "https://api.example.com/v1", ProviderProtocol.OPENAI_RESPONSES)
+    val model = ModelProfile("title-model-$suffix", provider.id, "title-model")
+    val conversation = Conversation(id = "title-conversation-$suffix", model = model.id, modelMode = SettingMode.OVERRIDE)
+    val message = ChatMessage(id = "title-message-$suffix", conversationId = conversation.id, role = "assistant", content = "Source response")
+    val note = Note(
+        id = "title-note-$suffix",
+        title = "Original title",
+        body = "Original body",
+        sourceMessageId = message.id,
+        sourceConversationId = conversation.id,
+        createdAt = 1,
+        updatedAt = 1,
+    )
+    val gateway = object : ModelGateway() {
+        override fun stream(request: ModelCallRequest) = flow {
+            duringRequest(dao, note)
+            emit(ModelStreamEvent.TextDelta(response))
+            emit(ModelStreamEvent.Completed)
+        }
+    }
+    try {
+        dao.putProvider(provider.toEntity())
+        dao.putModels(listOf(model.toEntity()))
+        dao.putConversation(conversation.toEntity())
+        dao.putMessages(listOf(message.toEntity()))
+        dao.putNote(note.toEntity())
+        secrets.write(secrets.providerKeyName(provider.id), "title-test-key")
+        verify(noteRepository(context, dao, secrets, gateway), dao, note)
+    } finally {
+        secrets.remove(secrets.providerKeyName(provider.id))
+        database.close()
     }
 }
 

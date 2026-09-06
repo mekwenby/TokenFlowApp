@@ -4,8 +4,11 @@ import xyz.mek030399.tokenflow.BuildConfig
 import android.util.Log
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -88,6 +91,7 @@ class DirectApiTransport(
         }
     }
 
+    @OptIn(InternalCoroutinesApi::class)
     fun stream(
         provider: ProviderConfig,
         apiKey: String,
@@ -105,7 +109,12 @@ class DirectApiTransport(
             apiKey,
         ).build()
         val call = streamingClient.newCall(request)
-        val cancellation = currentCoroutineContext().job.invokeOnCompletion { call.cancel() }
+        val cancellation = currentCoroutineContext().job.invokeOnCompletion(
+            onCancelling = true,
+            invokeImmediately = true,
+        ) { cause ->
+            if (cause is CancellationException) call.cancel()
+        }
         try {
             call.execute().use { response ->
                 if (!response.isSuccessful) {
@@ -122,6 +131,9 @@ class DirectApiTransport(
                 val source = response.body?.source() ?: throw IOException("Provider returned an empty stream")
                 parser.read(source) { emit(it) }
             }
+        } catch (failure: Throwable) {
+            currentCoroutineContext().ensureActive()
+            throw failure
         } finally {
             cancellation.dispose()
             call.cancel()

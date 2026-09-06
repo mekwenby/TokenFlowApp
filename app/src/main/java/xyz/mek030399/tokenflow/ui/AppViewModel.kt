@@ -57,6 +57,7 @@ import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -68,6 +69,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 enum class AppPhase { LOADING, SETUP, READY }
 enum class AppScreen { CHAT, BOOKMARKS, NOTES, AGENTS, KNOWLEDGE, INFINITE_CLOUD, GLOBAL_SETTINGS, PROVIDERS, EXA, TRANSFER, ABOUT }
@@ -1240,6 +1242,7 @@ class AppViewModel internal constructor(
                 enableRead = config.enableRead,
                 enableKnowledge = config.enableKnowledge,
                 pendingAttachments = emptyList(),
+                composerDraftRecovery = null,
             )
         }
     }
@@ -1279,9 +1282,10 @@ class AppViewModel internal constructor(
             runCatching { repository.updateConversation(id, normalized.toRequest()) }
                 .onSuccess { updated ->
                     mutableState.update {
+                        if (it.conversations.none { conversation -> conversation.id == id }) return@update it
                         it.copy(
                             conversations = upsertConversation(it.conversations, updated),
-                            config = updated.toConfig(),
+                            config = if (it.activeConversationId == id) updated.toConfig() else it.config,
                             notice = uiText(R.string.settings_saved),
                         )
                     }
@@ -1365,6 +1369,7 @@ class AppViewModel internal constructor(
                             conversations = state.conversations.filterNot { it.id in ids },
                             activeConversationId = if (activeDeleted) null else state.activeConversationId,
                             messages = state.messages - ids,
+                            composerDraftRecovery = state.composerDraftRecovery?.takeUnless { it.conversationId in ids },
                             bookmarks = state.bookmarks.filterNot { it.conversationId in ids },
                             scrollToMessageId = state.scrollToMessageId?.takeUnless {
                                 activeDeleted || it in deletedMessageIds
@@ -1488,7 +1493,7 @@ class AppViewModel internal constructor(
                     .onSuccess { note ->
                         mutableState.update { it.copy(notes = upsertNote(it.notes, note)) }
                         runCatching { repository.summarizeNoteTitle(note.id) }
-                            .onSuccess { summarized -> mutableState.update { it.copy(notes = upsertNote(it.notes, summarized)) } }
+                            .onSuccess { loadWorkspace() }
                     }
                     .onFailure(::handleError)
             } finally {
@@ -1500,7 +1505,7 @@ class AppViewModel internal constructor(
     fun summarizeNoteTitle(noteId: String) {
         viewModelScope.launch {
             runCatching { repository.summarizeNoteTitle(noteId) }
-                .onSuccess { note -> mutableState.update { it.copy(notes = upsertNote(it.notes, note)) } }
+                .onSuccess { loadWorkspace() }
                 .onFailure(::handleError)
         }
     }
@@ -1695,10 +1700,12 @@ class AppViewModel internal constructor(
         discardPendingAttachments(removed)
     }
 
-    fun send(content: String) {
+    fun send(content: String): Boolean {
         val message = content.trim()
         val current = mutableState.value
-        if ((message.isEmpty() && current.pendingAttachments.isEmpty()) || current.models.isEmpty()) return
+        if ((message.isEmpty() && current.pendingAttachments.isEmpty()) || current.models.isEmpty()) return false
+        val initialConversationId = current.activeConversationId
+        if (initialConversationId != null && generationJobs.containsKey(initialConversationId)) return false
         val hasImages = current.pendingAttachments.any { item ->
             item.mimeType.startsWith("image/", true) || item.displayName.substringAfterLast('.', "").lowercase() in
                 setOf("jpg", "jpeg", "png", "webp", "heic", "heif", "gif")
@@ -1706,11 +1713,17 @@ class AppViewModel internal constructor(
         val modelId = if (current.config.modelMode == SettingMode.INHERIT) current.globalSettings.defaultModelId else current.config.model
         val model = current.models.firstOrNull { it.id == modelId }
         if (hasImages && model?.visionStatus != VisionStatus.SUPPORTED && current.globalSettings.visionFallbackModelId == null) {
-            mutableState.update { it.copy(screen = AppScreen.GLOBAL_SETTINGS, notice = uiText(R.string.configure_vision_fallback)) }
-            return
+            mutableState.update {
+                it.copy(
+                    screen = AppScreen.GLOBAL_SETTINGS,
+                    composerDraftRecovery = content.takeIf(String::isNotEmpty)?.let { draft ->
+                        ComposerDraftRecovery(UUID.randomUUID().toString(), initialConversationId, draft)
+                    },
+                    notice = uiText(R.string.configure_vision_fallback),
+                )
+            }
+            return false
         }
-        val initialConversationId = current.activeConversationId
-        if (initialConversationId != null && generationJobs[initialConversationId]?.isActive == true) return
         val transferredAttachments = current.pendingAttachments
         val request = SendMessageRequest(
             content = message,
@@ -1750,7 +1763,7 @@ class AppViewModel internal constructor(
                 }
                 created.id
             }
-            if (generationJobs[conversationId]?.isActive == true) {
+            if (generationJobs.containsKey(conversationId)) {
                 restoreOrDiscardTransferredAttachments(conversationId, transferredAttachments)
                 restoreComposerDraft(conversationId, request.requestId, content)
                 return@launch
@@ -1761,15 +1774,19 @@ class AppViewModel internal constructor(
                 transferredDraft = ComposerDraftRecovery(request.requestId, conversationId, content),
             ) { repository.sendMessage(conversationId, request) }
         }
+        return true
     }
 
     fun consumeComposerDraftRecovery(requestId: String) = mutableState.update { state ->
-        if (state.composerDraftRecovery?.requestId == requestId) state.copy(composerDraftRecovery = null) else state
+        val recovery = state.composerDraftRecovery
+        if (recovery?.requestId == requestId && recovery.conversationId == state.activeConversationId) {
+            state.copy(composerDraftRecovery = null)
+        } else state
     }
 
     fun regenerateLatest() {
         val id = mutableState.value.activeConversationId ?: return
-        if (generationJobs[id]?.isActive == true) return
+        if (generationJobs.containsKey(id)) return
         val request = SendMessageRequest(
             enableSearch = mutableState.value.enableSearch,
             enableRead = mutableState.value.enableRead,
@@ -1782,10 +1799,11 @@ class AppViewModel internal constructor(
 
     fun stopGeneration(id: String? = mutableState.value.activeConversationId) {
         id ?: return
+        val job = generationJobs[id] ?: return
         mutableState.update { state ->
             state.copy(generations = state.generations + (id to (state.generations[id] ?: GenerationState()).copy(stopping = true)))
         }
-        generationJobs[id]?.cancel()
+        job.cancel()
     }
 
     fun beginNewProvider() {
@@ -2191,6 +2209,7 @@ class AppViewModel internal constructor(
                 )
             } }
             .onFailure { error ->
+                if (error is CancellationException) throw error
                 if (mutableState.value.conversations.any { it.id == id }) handleError(error)
             }
     }
@@ -2204,38 +2223,64 @@ class AppViewModel internal constructor(
         mutableState.update { state ->
             state.copy(generations = state.generations + (id to GenerationState()))
         }
-        val job = viewModelScope.launch {
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val ownJob = requireNotNull(coroutineContext[Job])
             var userMessageAccepted = false
             try {
                 stream().collect { event ->
                     if (event is ChatEvent.UserMessage) userMessageAccepted = true
                     handleChatEvent(id, event)
                 }
-            } catch (_: CancellationException) {
-                mutableState.update { state ->
-                    state.copy(generations = state.generations + (id to (state.generations[id] ?: GenerationState()).copy(active = false, stopping = false)))
-                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Throwable) {
                 val message = readableError(error)
                 mutableState.update { state ->
                     state.copy(
-                        generations = state.generations + (id to (state.generations[id] ?: GenerationState()).copy(active = false, error = message)),
+                        generations = state.generations + (id to (state.generations[id] ?: GenerationState()).copy(error = message)),
                         notice = message,
                     )
                 }
             } finally {
-                if (!userMessageAccepted) {
-                    restoreOrDiscardTransferredAttachments(id, transferredAttachments)
-                    transferredDraft?.let { draft ->
-                        restoreComposerDraft(draft.conversationId, draft.requestId, draft.content)
+                try {
+                    if (!userMessageAccepted) {
+                        restoreOrDiscardTransferredAttachments(id, transferredAttachments)
+                        transferredDraft?.let { draft ->
+                            restoreComposerDraft(draft.conversationId, draft.requestId, draft.content)
+                        }
+                    }
+                    withContext(NonCancellable) {
+                        if (generationJobs[id] === ownJob) loadConversation(id)
+                    }
+                } finally {
+                    if (generationJobs[id] === ownJob) {
+                        generationJobs.remove(id)
+                        mutableState.update { state ->
+                            val generation = state.generations[id] ?: GenerationState()
+                            state.copy(generations = state.generations + (id to generation.copy(active = false, stopping = false)))
+                        }
+                        loadWorkspace()
                     }
                 }
-                generationJobs.remove(id)
-                loadConversation(id)
-                loadWorkspace()
             }
         }
         generationJobs[id] = job
+        job.invokeOnCompletion {
+            if (generationJobs[id] === job) viewModelScope.launch {
+                if (generationJobs[id] !== job) return@launch
+                // Cancellation before the coroutine starts does not execute its finally block.
+                restoreOrDiscardTransferredAttachments(id, transferredAttachments)
+                transferredDraft?.let { draft ->
+                    restoreComposerDraft(draft.conversationId, draft.requestId, draft.content)
+                }
+                generationJobs.remove(id)
+                mutableState.update { state ->
+                    val generation = state.generations[id] ?: GenerationState()
+                    state.copy(generations = state.generations + (id to generation.copy(active = false, stopping = false)))
+                }
+            }
+        }
+        job.start()
     }
 
     private fun handleChatEvent(id: String, event: ChatEvent) {
@@ -2259,7 +2304,7 @@ class AppViewModel internal constructor(
                 }
                 is ChatEvent.Done -> {
                     val generation = state.generations[id] ?: GenerationState()
-                    state.copy(generations = state.generations + (id to generation.copy(active = false, stopping = false, usage = event.usage)))
+                    state.copy(generations = state.generations + (id to generation.copy(usage = event.usage)))
                 }
             }
         }

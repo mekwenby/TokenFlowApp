@@ -1,0 +1,3 @@
+Move Create branch and Save as note to the reply's top toolbar, immediately after Bookmark.
+Keep speech and regeneration controls beside the process and token summary below the reply.
+Improve toolbar layout on phones and at larger font sizes.

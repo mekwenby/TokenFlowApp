@@ -2232,6 +2232,17 @@ private fun MessageItem(
                                         tint = if (bookmarked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
+                                IconButton(onClick = onBranch, enabled = message.status == "completed", modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Outlined.CallSplit, stringResource(R.string.create_branch), Modifier.size(17.dp))
+                                }
+                                IconButton(onClick = onSaveNote, enabled = !savedAsNote, modifier = Modifier.size(32.dp)) {
+                                    Icon(
+                                        Icons.Outlined.NoteAlt,
+                                        stringResource(if (savedAsNote) R.string.already_saved_as_note else R.string.save_as_note),
+                                        Modifier.size(17.dp),
+                                        tint = if (savedAsNote) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             }
                         }
                     }
@@ -2348,9 +2359,6 @@ private fun MessageItem(
                             modifier = Modifier.testTag(UiTestTags.assistantMessageFooterActions(message.id)),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            IconButton(onClick = onBranch, enabled = message.status == "completed", modifier = Modifier.size(32.dp)) {
-                                Icon(Icons.Outlined.CallSplit, stringResource(R.string.create_branch), Modifier.size(17.dp))
-                            }
                             if (!speechReady) IconButton(
                                 onClick = onSpeak,
                                 enabled = tts?.loading != true && message.status == "completed",
@@ -2358,14 +2366,6 @@ private fun MessageItem(
                             ) {
                                 if (tts?.loading == true) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                                 else Icon(Icons.Outlined.VolumeUp, stringResource(R.string.generate_speech), Modifier.size(17.dp))
-                            }
-                            IconButton(onClick = onSaveNote, enabled = !savedAsNote, modifier = Modifier.size(32.dp)) {
-                                Icon(
-                                    Icons.Outlined.NoteAlt,
-                                    stringResource(if (savedAsNote) R.string.already_saved_as_note else R.string.save_as_note),
-                                    Modifier.size(17.dp),
-                                    tint = if (savedAsNote) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
                             }
                             if (isLatestAssistant && message.status != "generating") IconButton(onClick = onRegenerate, modifier = Modifier.size(32.dp)) {
                                 Icon(Icons.Outlined.Refresh, stringResource(R.string.regenerate), Modifier.size(17.dp))

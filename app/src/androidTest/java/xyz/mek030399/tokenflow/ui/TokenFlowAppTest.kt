@@ -1424,7 +1424,7 @@ class TokenFlowAppTest {
     }
 
     @Test
-    fun assistantFooterUsesOneCompactRowAndKeepsReadySpeechBelowIt() {
+    fun assistantHeaderPlacesBranchAndNoteAfterBookmarkAndKeepsFooterCompact() {
         val conversation = Conversation(
             id = "conversation-compact-footer",
             title = "Compact footer",
@@ -1464,6 +1464,13 @@ class TokenFlowAppTest {
         val actions = composeRule.onNodeWithTag(
             UiTestTags.assistantMessageFooterActions(assistantMessage.id),
         ).assertIsDisplayed()
+        val headerActions = composeRule.onNodeWithTag(
+            UiTestTags.assistantMessageActions(assistantMessage.id),
+        ).assertIsDisplayed()
+        val copy = composeRule.onNodeWithTag(UiTestTags.COPY_ASSISTANT_MESSAGE).assertIsDisplayed()
+        val bookmark = composeRule.onNodeWithTag(
+            UiTestTags.assistantMessageBookmark(assistantMessage.id),
+        ).assertIsDisplayed()
         val branch = composeRule.onNodeWithContentDescription(
             context.getString(xyz.mek030399.tokenflow.R.string.create_branch),
         ).assertIsDisplayed()
@@ -1476,16 +1483,24 @@ class TokenFlowAppTest {
         ).assertIsDisplayed()
         val footerBounds = footer.fetchSemanticsNode().boundsInRoot
         val expectedFooterHeight = with(density) { 32.dp.toPx() }
-        val expectedFourActionWidth = with(density) { (32.dp * 4).toPx() }
+        val expectedHeaderActionWidth = with(density) { (32.dp * 4).toPx() }
+        val expectedFooterActionWidth = with(density) { (32.dp * 2).toPx() }
 
         assertEquals(expectedFooterHeight, footerBounds.height, 1f)
-        assertEquals(expectedFourActionWidth, actions.fetchSemanticsNode().boundsInRoot.width, 1f)
+        assertEquals(expectedHeaderActionWidth, headerActions.fetchSemanticsNode().boundsInRoot.width, 1f)
+        assertEquals(expectedFooterActionWidth, actions.fetchSemanticsNode().boundsInRoot.width, 1f)
+        assertNodeWithin(headerActions, composeRule.onNodeWithTag(UiTestTags.assistantMessageHeader(assistantMessage.id)))
+        assertNodeWithin(copy, headerActions)
+        assertNodeWithin(bookmark, headerActions)
+        assertNodeWithin(branch, headerActions)
+        assertNodeWithin(note, headerActions)
+        assertTrue(copy.fetchSemanticsNode().boundsInRoot.right <= bookmark.fetchSemanticsNode().boundsInRoot.left)
+        assertTrue(bookmark.fetchSemanticsNode().boundsInRoot.right <= branch.fetchSemanticsNode().boundsInRoot.left)
+        assertTrue(branch.fetchSemanticsNode().boundsInRoot.right <= note.fetchSemanticsNode().boundsInRoot.left)
         assertNodeWithin(process, footer)
         assertNodeWithin(token, footer)
         assertNodeWithin(actions, footer)
-        assertNodeWithin(branch, actions)
         assertNodeWithin(speech, actions)
-        assertNodeWithin(note, actions)
         assertNodeWithin(regenerate, actions)
         assertNodesDoNotOverlap(process, token)
         assertNodesDoNotOverlap(process, actions)
@@ -1507,14 +1522,14 @@ class TokenFlowAppTest {
             .assertIsDisplayed()
         composeRule.waitForIdle()
         val refreshedFooter = composeRule.onNodeWithTag(UiTestTags.PROCESS_TOKEN_ROW).assertIsDisplayed()
-        val expectedThreeActionWidth = with(density) { (32.dp * 3).toPx() }
+        val expectedReadyActionWidth = with(density) { 32.dp.toPx() }
 
         assertEquals(
             expectedFooterHeight,
             refreshedFooter.fetchSemanticsNode().boundsInRoot.height,
             1f,
         )
-        assertEquals(expectedThreeActionWidth, readyActions.fetchSemanticsNode().boundsInRoot.width, 1f)
+        assertEquals(expectedReadyActionWidth, readyActions.fetchSemanticsNode().boundsInRoot.width, 1f)
         assertNodeWithin(readyActions, refreshedFooter)
         assertTrue(
             refreshedFooter.fetchSemanticsNode().boundsInRoot.bottom <=
@@ -1657,8 +1672,8 @@ class TokenFlowAppTest {
         composeRule.onAllNodesWithTag(UiTestTags.TOKEN_USAGE).assertCountEquals(0)
         assertEquals(compactHeight, olderFooter.fetchSemanticsNode().boundsInRoot.height, 1f)
         assertEquals(compactHeight, failedFooter.fetchSemanticsNode().boundsInRoot.height, 1f)
-        assertEquals(with(density) { (32.dp * 3).toPx() }, olderActions.fetchSemanticsNode().boundsInRoot.width, 1f)
-        assertEquals(with(density) { (32.dp * 4).toPx() }, failedActions.fetchSemanticsNode().boundsInRoot.width, 1f)
+        assertEquals(with(density) { 32.dp.toPx() }, olderActions.fetchSemanticsNode().boundsInRoot.width, 1f)
+        assertEquals(with(density) { (32.dp * 2).toPx() }, failedActions.fetchSemanticsNode().boundsInRoot.width, 1f)
         assertNodeWithin(olderActions, olderFooter)
         assertNodeWithin(failedActions, failedFooter)
         assertNodeWithin(regenerate, failedActions)

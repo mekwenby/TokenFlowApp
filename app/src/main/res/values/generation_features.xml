@@ -1,0 +1,20 @@
+<resources>
+    <string name="edit_question">Edit question and regenerate</string>
+    <string name="edit_question_title">Edit question</string>
+    <string name="edit_question_notice">The edited question will generate a new conversation branch. The original conversation, later messages and attachments remain available.</string>
+    <string name="edit_question_submit">Regenerate in a new branch</string>
+    <string name="edit_question_retry">Retry this question</string>
+    <string name="edit_question_failed">Unable to prepare the edited conversation. Your changes remain in this editor.</string>
+    <string name="generation_channel_ongoing_name">Background generation</string>
+    <string name="generation_channel_completed_name">Generation results</string>
+    <string name="generation_notification_ongoing_title">Generating replies</string>
+    <string name="generation_notification_ongoing_text">%1$d conversation(s) in progress</string>
+    <string name="generation_notification_completed_title">Reply completed</string>
+    <string name="generation_notification_failed_title">Reply could not be completed</string>
+    <string name="generation_notification_finished_text">Tap to view the conversation</string>
+    <string name="generation_notification_stop">Stop</string>
+    <string name="generation_notification_stop_all">Stop all</string>
+    <string name="generation_background_unavailable">Unable to start background generation. Keep the app open and try again.</string>
+    <string name="generation_notification_permission">Allow notifications to receive an alert when background replies finish.</string>
+    <string name="knowledge_scope_chat">Knowledge scope</string>
+</resources>

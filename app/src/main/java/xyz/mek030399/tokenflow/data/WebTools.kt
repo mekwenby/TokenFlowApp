@@ -649,7 +649,9 @@ class WebToolExecutor(
         )
         if (!options.enableKnowledge) return ToolExecutionResult(error("Knowledge search is disabled"), false)
         val store = knowledgeStore ?: return ToolExecutionResult(error("Knowledge storage is unavailable"), false)
-        return executeKnowledgeSearch(call.arguments, json) { query -> store.search(query) }
+        return executeKnowledgeSearch(call.arguments, json) { query ->
+            store.search(query, scope = options.knowledgeScope)
+        }
     }
 
     private fun error(message: String) = json.encodeToString(buildJsonObject { put("error", message) })
@@ -707,7 +709,7 @@ internal fun searchKnowledgeToolDefinition() = ToolDefinition(
                 put("type", "string")
                 put(
                     "description",
-                    "Required focused terms matched against the on-device knowledge index; no default. Use the minimum context needed for retrieval.",
+                    "Required focused query for the on-device knowledge index within the conversation's selected range; no default. Use the minimum context needed for retrieval.",
                 )
             }
         }

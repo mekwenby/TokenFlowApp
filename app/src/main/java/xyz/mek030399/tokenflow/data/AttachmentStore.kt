@@ -20,6 +20,7 @@ import java.net.URLConnection
 import java.util.Base64
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import org.apache.poi.hwpf.HWPFDocument
 import org.apache.poi.hwpf.extractor.WordExtractor
@@ -35,29 +36,38 @@ class AttachmentStore(
     private val root = File(appContext.filesDir, "chat_attachments").apply { mkdirs() }
     private val cloudDeliveryCache = File(appContext.filesDir, "cloud_artifact_delivery_cache").apply { mkdirs() }
     private val cameraDraftRoot = File(appContext.cacheDir, CameraCaptureStore.DIRECTORY_NAME).apply { mkdirs() }
+    private val shareDraftRoot = File(appContext.filesDir, ShareDraftStore.DIRECTORY_NAME).apply { mkdirs() }
 
     init {
         PDFBoxResourceLoader.init(appContext)
     }
 
     suspend fun persist(messageId: String, pending: List<PendingAttachment>): List<MessageAttachment> =
-        withContext(Dispatchers.IO) {
-            validateSelection(pending)
-            val created = mutableListOf<MessageAttachment>()
-            try {
+        prepare(messageId, pending).also { created ->
+            try { dao.putAttachments(created.map(MessageAttachment::toEntity)) }
+            catch (failure: Throwable) { deleteFiles(created); throw failure }
+        }
+
+    suspend fun prepare(messageId: String, pending: List<PendingAttachment>): List<MessageAttachment> {
+        val created = mutableListOf<MessageAttachment>()
+        try {
+            return withContext(Dispatchers.IO) {
+                validateSelection(pending)
                 pending.forEachIndexed { index, source ->
                     created += importOne(messageId, source, System.currentTimeMillis() + index)
                     require(created.sumOf(MessageAttachment::sizeBytes) <= MAX_TOTAL_BYTES) {
                         "Attachments exceed the 20 MiB total limit"
                     }
                 }
-                dao.putAttachments(created.map(MessageAttachment::toEntity))
                 created
-            } catch (failure: Throwable) {
-                created.forEach { File(it.storedPath).delete() }
-                throw failure
             }
+        } catch (failure: Throwable) {
+            withContext(NonCancellable + Dispatchers.IO) {
+                created.forEach { File(it.storedPath).delete() }
+            }
+            throw failure
         }
+    }
 
     suspend fun forMessages(messageIds: List<String>): List<MessageAttachment> =
         if (messageIds.isEmpty()) emptyList() else dao.attachmentsForMessages(messageIds).map(MessageAttachmentEntity::toDomain)
@@ -131,15 +141,17 @@ class AttachmentStore(
     }
 
     suspend fun canonicalParts(message: ChatMessage, descriptions: List<String> = emptyList()): List<CanonicalContentPart> =
+        canonicalParts(message, forMessages(listOf(message.id)), descriptions)
+
+    suspend fun canonicalParts(message: ChatMessage, attachments: List<MessageAttachment>, descriptions: List<String>): List<CanonicalContentPart> =
         withContext(Dispatchers.IO) {
-            val attachments = dao.attachmentsForMessage(message.id).map(MessageAttachmentEntity::toDomain)
             buildList {
                 if (message.content.isNotBlank()) add(CanonicalContentPart.Text(message.content))
                 attachments.filter { it.status == AttachmentStatus.READY }.forEach { attachment ->
                     when (attachment.kind) {
                         AttachmentKind.IMAGE -> if (descriptions.isEmpty()) {
                             val bytes = File(attachment.storedPath).readBytes()
-                            add(CanonicalContentPart.Image(attachment.mimeType, Base64.getEncoder().encodeToString(bytes)))
+                            add(CanonicalContentPart.Image(attachment.mimeType, Base64.getEncoder().encodeToString(bytes), attachment.width, attachment.height))
                         }
                         AttachmentKind.DOCUMENT -> if (attachment.extractedText.isNotBlank()) {
                             add(CanonicalContentPart.Document(attachment.fileName, attachment.extractedText))
@@ -156,12 +168,15 @@ class AttachmentStore(
         dao.attachmentsForMessage(messageId).any { it.kind == AttachmentKind.IMAGE.name && it.status == AttachmentStatus.READY.name }
 
     suspend fun imageParts(messageId: String): List<CanonicalContentPart.Image> = withContext(Dispatchers.IO) {
-        dao.attachmentsForMessage(messageId).filter {
-            it.kind == AttachmentKind.IMAGE.name && it.status == AttachmentStatus.READY.name
-        }.map { attachment ->
+        imageParts(forMessages(listOf(messageId)))
+    }
+
+    suspend fun imageParts(attachments: List<MessageAttachment>): List<CanonicalContentPart.Image> = withContext(Dispatchers.IO) {
+        attachments.filter { it.kind == AttachmentKind.IMAGE && it.status == AttachmentStatus.READY }.map { attachment ->
             CanonicalContentPart.Image(
                 attachment.mimeType,
                 Base64.getEncoder().encodeToString(File(attachment.storedPath).readBytes()),
+                attachment.width, attachment.height,
             )
         }
     }
@@ -217,8 +232,12 @@ class AttachmentStore(
     }
 
     suspend fun discardPendingDrafts(attachments: List<PendingAttachment>) = withContext(Dispatchers.IO) {
-        attachments.filter { it.origin == PendingAttachmentOrigin.CAMERA }.forEach { attachment ->
-            runCatching { ownedCameraDraft(attachment).delete() }
+        attachments.forEach { attachment ->
+            when (attachment.origin) {
+                PendingAttachmentOrigin.CAMERA -> runCatching { ownedCameraDraft(attachment).delete() }
+                PendingAttachmentOrigin.SHARE -> runCatching { ownedShareDraft(attachment).delete() }
+                else -> Unit
+            }
         }
     }
 
@@ -248,6 +267,15 @@ class AttachmentStore(
         }
         if (source.origin == PendingAttachmentOrigin.NOTE) {
             return importInlineNote(messageId, source, createdAt)
+        }
+        if (source.origin == PendingAttachmentOrigin.SHARE) {
+            val file = ownedShareDraft(source)
+            val image = isImage(source.mimeType, source.displayName)
+            require(file.isFile && file.length() in 1..(if (image) MAX_IMAGE_BYTES else MAX_DOCUMENT_BYTES)) {
+                "Shared file is unavailable or too large"
+            }
+            return if (image) importImage(messageId, source, file, createdAt)
+                else importDocument(messageId, source, file, createdAt)
         }
         val uri = Uri.parse(source.uri)
         val isImage = isImage(source.mimeType, source.displayName)
@@ -423,6 +451,12 @@ class AttachmentStore(
         val path = requireNotNull(source.appOwnedDraftPath) { "Camera photo draft is unavailable" }
         val file = File(path).canonicalFile
         require(file.parentFile == cameraDraftRoot.canonicalFile) { "Invalid camera photo draft" }
+        return file
+    }
+
+    private fun ownedShareDraft(source: PendingAttachment): File {
+        val file = File(requireNotNull(source.appOwnedDraftPath) { "Shared file draft is unavailable" }).canonicalFile
+        require(file.parentFile == shareDraftRoot.canonicalFile) { "Invalid shared file draft" }
         return file
     }
 

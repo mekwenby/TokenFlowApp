@@ -140,6 +140,7 @@ internal fun WorkspaceScreen(state: AppUiState, viewModel: AppViewModel) {
             }
             Box(Modifier.weight(1f)) {
                 when (state.screen) {
+                    AppScreen.MESSAGE_SEARCH -> MessageSearchScreen(state, viewModel, !persistent)
                     AppScreen.BOOKMARKS -> BookmarksScreen(state, viewModel, !persistent)
                     AppScreen.NOTES -> NotesScreen(state, viewModel, !persistent)
                     AppScreen.AGENTS -> AgentsScreen(state, viewModel, !persistent)
@@ -179,6 +180,7 @@ private fun WorkspaceRail(selected: AppScreen, viewModel: AppViewModel, modifier
         }
         val destinations = listOf(
             Triple(AppScreen.CHAT, Icons.Outlined.ChatBubbleOutline, R.string.conversations),
+            Triple(AppScreen.MESSAGE_SEARCH, Icons.Outlined.Search, R.string.search_messages),
             Triple(AppScreen.BOOKMARKS, Icons.Outlined.Bookmarks, R.string.bookmarks),
             Triple(AppScreen.NOTES, Icons.Outlined.NoteAlt, R.string.notes),
             Triple(AppScreen.AGENTS, Icons.Outlined.SmartToy, R.string.agents),
@@ -803,6 +805,7 @@ private fun AgentToggle(label: String, checked: Boolean, enabled: Boolean = true
 private fun KnowledgeScreen(state: AppUiState, viewModel: AppViewModel, showBack: Boolean) {
     val context = LocalContext.current
     var query by rememberSaveable { mutableStateOf("") }
+    var searched by rememberSaveable { mutableStateOf(false) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
         var name = uri.lastPathSegment ?: "document"
@@ -819,50 +822,72 @@ private fun KnowledgeScreen(state: AppUiState, viewModel: AppViewModel, showBack
         stringResource(R.string.knowledge), showBack, { viewModel.openScreen(AppScreen.CHAT) },
         action = { IconButton(onClick = { picker.launch(arrayOf("text/plain", "text/markdown", "application/json", "text/csv", "application/pdf")) }) { Icon(Icons.Outlined.UploadFile, stringResource(R.string.import_document)) } },
     ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize().padding(horizontal = 16.dp)) {
-            Row(Modifier.fillMaxWidth().widthIn(max = 820.dp).align(Alignment.CenterHorizontally), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(query, { query = it }, placeholder = { Text(stringResource(R.string.search_knowledge)) }, leadingIcon = { Icon(Icons.Outlined.Search, null) }, singleLine = true, modifier = Modifier.weight(1f))
-                FilledTonalButton(onClick = { viewModel.searchKnowledge(query) }, enabled = query.isNotBlank()) { Text(stringResource(R.string.search_action)) }
-            }
-            if (state.pendingKnowledgeChunkIds.isNotEmpty()) Text(stringResource(R.string.attached_count, state.pendingKnowledgeChunkIds.size), color = MaterialTheme.colorScheme.primary, modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 8.dp))
-            if (state.knowledgeResults.isNotEmpty()) LazyColumn(Modifier.weight(1f).fillMaxWidth().widthIn(max = 820.dp).align(Alignment.CenterHorizontally)) {
-                items(state.knowledgeResults, key = { it.chunkId }) { snippet ->
-                    Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.Top) {
-                        Checkbox(snippet.chunkId in state.pendingKnowledgeChunkIds, { viewModel.toggleKnowledgeAttachment(snippet.chunkId) })
-                        Column(Modifier.weight(1f)) { Text("${snippet.documentName} · #${snippet.position + 1}", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge); Text(snippet.text, maxLines = 5, overflow = TextOverflow.Ellipsis) }
+        Box(Modifier.padding(padding).fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+            LazyColumn(Modifier.widthIn(max = 820.dp).fillMaxSize().padding(horizontal = 16.dp), contentPadding = PaddingValues(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                item { KnowledgeRetrievalPanel(state, viewModel) }
+                item {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(query, { query = it; searched = false }, placeholder = { Text(stringResource(R.string.search_knowledge)) }, leadingIcon = { Icon(Icons.Outlined.Search, null) }, singleLine = true, modifier = Modifier.weight(1f).testTag("knowledge_search_input"))
+                        FilledTonalButton(onClick = { searched = true; viewModel.searchKnowledge(query) }, enabled = query.isNotBlank(), modifier = Modifier.testTag("knowledge_search_submit")) { Text(stringResource(R.string.search_action)) }
                     }
-                    HorizontalDivider()
                 }
-            } else if (state.knowledgeDocuments.isEmpty()) EmptyWorkspace(Icons.Outlined.FolderOpen, stringResource(R.string.empty_knowledge), Modifier.weight(1f))
-            else LazyColumn(Modifier.weight(1f).fillMaxWidth().widthIn(max = 820.dp).align(Alignment.CenterHorizontally), contentPadding = PaddingValues(vertical = 12.dp)) {
-                items(state.knowledgeDocuments, key = { it.id }) { document ->
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        val previewModifier = if (document.status == "ready") {
-                            Modifier.clickable { viewModel.openKnowledgePreview(document.id) }
-                        } else {
-                            Modifier
-                        }
-                        Row(
-                            previewModifier
-                                .weight(1f)
-                                .padding(vertical = 12.dp)
-                                .testTag(UiTestTags.knowledgeDocument(document.id)),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(if (document.status == "error") Icons.Outlined.ErrorOutline else if (document.status == "ready") Icons.Outlined.CheckCircle else Icons.Outlined.Description, null, tint = if (document.status == "error") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
-                            Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
-                                Text(document.name, fontWeight = FontWeight.Medium)
-                                Text(if (document.status == "error") document.error else "${document.chunkCount} chunks · ${document.sizeBytes / 1024} KiB", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (state.knowledgeSearchBusy) item {
+                    Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CircularProgressIndicator(Modifier.size(20.dp))
+                        Text(stringResource(R.string.knowledge_search_loading), style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                state.knowledgeSearchError?.let { error -> item { Text(error.resolve(), color = MaterialTheme.colorScheme.error) } }
+                if (state.pendingKnowledgeChunkIds.isNotEmpty()) item {
+                    Text(stringResource(R.string.attached_count, state.pendingKnowledgeChunkIds.size), color = MaterialTheme.colorScheme.primary)
+                }
+                if (state.knowledgeResults.isNotEmpty()) {
+                    items(state.knowledgeResults, key = { it.chunkId }) { snippet ->
+                        Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.Top) {
+                            Checkbox(snippet.chunkId in state.pendingKnowledgeChunkIds, { viewModel.toggleKnowledgeAttachment(snippet.chunkId) })
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("${snippet.documentName} · #${snippet.position + 1}", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
+                                Text(snippet.text, maxLines = 5, overflow = TextOverflow.Ellipsis)
                             }
                         }
-                        IconButton(
-                            onClick = { viewModel.deleteKnowledge(document.id) },
-                            modifier = Modifier.testTag(UiTestTags.knowledgeDelete(document.id)),
-                        ) {
-                            Icon(Icons.Outlined.DeleteOutline, stringResource(R.string.delete))
-                        }
+                        HorizontalDivider()
                     }
-                    HorizontalDivider()
+                } else {
+                    if (searched && !state.knowledgeSearchBusy && state.knowledgeSearchError == null) item {
+                        Text(stringResource(R.string.knowledge_search_empty_scope), Modifier.padding(vertical = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (state.knowledgeDocuments.isEmpty()) item {
+                        EmptyWorkspace(Icons.Outlined.FolderOpen, stringResource(R.string.empty_knowledge), Modifier.heightIn(min = 200.dp))
+                    }
+                    items(state.knowledgeDocuments, key = { it.id }) { document ->
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            val previewModifier = if (document.status == "ready") {
+                                Modifier.clickable { viewModel.openKnowledgePreview(document.id) }
+                            } else {
+                                Modifier
+                            }
+                            Row(
+                                previewModifier
+                                    .weight(1f)
+                                    .padding(vertical = 12.dp)
+                                    .testTag(UiTestTags.knowledgeDocument(document.id)),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(if (document.status == "error") Icons.Outlined.ErrorOutline else if (document.status == "ready") Icons.Outlined.CheckCircle else Icons.Outlined.Description, null, tint = if (document.status == "error") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+                                Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
+                                    Text(document.name, fontWeight = FontWeight.Medium)
+                                    Text(if (document.status == "error") document.error else "${document.chunkCount} chunks · ${document.sizeBytes / 1024} KiB", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            IconButton(
+                                onClick = { viewModel.deleteKnowledge(document.id) },
+                                modifier = Modifier.testTag(UiTestTags.knowledgeDelete(document.id)),
+                            ) {
+                                Icon(Icons.Outlined.DeleteOutline, stringResource(R.string.delete))
+                            }
+                        }
+                        HorizontalDivider()
+                    }
                 }
             }
         }

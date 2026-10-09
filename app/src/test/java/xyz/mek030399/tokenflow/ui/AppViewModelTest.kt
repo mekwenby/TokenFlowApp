@@ -1,6 +1,13 @@
 package xyz.mek030399.tokenflow.ui
 
 import xyz.mek030399.tokenflow.R
+import androidx.lifecycle.ViewModelStore
+import xyz.mek030399.tokenflow.background.GenerationCoordinator
+import xyz.mek030399.tokenflow.background.GenerationLifecycle
+import xyz.mek030399.tokenflow.background.GenerationSnapshot
+import xyz.mek030399.tokenflow.data.MessageSearchCursor
+import xyz.mek030399.tokenflow.data.MessageSearchHit
+import xyz.mek030399.tokenflow.data.MessageSearchPage
 import xyz.mek030399.tokenflow.data.ChatDataSource
 import xyz.mek030399.tokenflow.data.ChatEvent
 import xyz.mek030399.tokenflow.data.ChatMessage
@@ -26,6 +33,8 @@ import xyz.mek030399.tokenflow.data.ImportedMarkdownNote
 import xyz.mek030399.tokenflow.data.KnowledgeDocument
 import xyz.mek030399.tokenflow.data.KnowledgeDocumentPreview
 import xyz.mek030399.tokenflow.data.KnowledgeSnippet
+import xyz.mek030399.tokenflow.data.KnowledgeScope
+import xyz.mek030399.tokenflow.data.KnowledgeScopeMode
 import xyz.mek030399.tokenflow.data.MAX_NOTE_SUMMARY_INPUT_CHARACTERS
 import xyz.mek030399.tokenflow.data.ModelProfile
 import xyz.mek030399.tokenflow.data.Note
@@ -53,6 +62,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -60,6 +72,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
@@ -90,6 +103,772 @@ class AppViewModelTest {
     @After
     fun tearDown() {
         Dispatchers.resetMain()
+    }
+
+    @Test
+    fun applicationGenerationSurvivesViewModelClearingAndRecreatedUiRehydratesTheReply() = runTest(dispatcher) {
+        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val coordinator = GenerationCoordinator(applicationScope)
+        val gate = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true).apply {
+            conversations += Conversation(id = "background-chat", model = model.id)
+            sendMessageGate = gate
+        }
+        val first = AppViewModel(fake, generationCoordinator = coordinator)
+        val firstOwner = ViewModelStore().apply { put("app", first) }
+        advanceUntilIdle()
+        first.openConversation("background-chat")
+        advanceUntilIdle()
+        assertTrue(first.send("Keep running"))
+        runCurrent()
+        assertEquals("Answer from provider", first.state.value.activeMessages.last().content)
+        firstOwner.clear()
+        runCurrent()
+        assertTrue(coordinator.snapshots.value.getValue("background-chat").active)
+        val recreated = AppViewModel(fake, generationCoordinator = coordinator)
+        val recreatedOwner = ViewModelStore().apply { put("app", recreated) }
+        advanceUntilIdle()
+        recreated.openConversation("background-chat")
+        runCurrent()
+        assertTrue(recreated.state.value.activeGeneration?.active == true)
+        assertEquals("Answer from provider", recreated.state.value.activeMessages.last().content)
+        assertEquals("summary", recreated.state.value.activeGeneration?.events?.single()?.content)
+        assertFalse(recreated.send("duplicate"))
+        assertEquals(1, fake.sendMessageCalls)
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertFalse(recreated.state.value.activeGeneration?.active == true)
+        assertEquals("completed", recreated.state.value.activeMessages.last().status)
+        assertEquals(7L, recreated.state.value.activeGeneration?.usage?.totalTokens)
+        assertEquals("", recreated.state.value.composerText)
+        recreatedOwner.clear()
+        applicationScope.cancel()
+    }
+
+    @Test
+    fun managedFailureBeforeAcceptanceRestoresDraftAndAttachmentsAndAllowsExplicitRetry() = runTest(dispatcher) {
+        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val coordinator = GenerationCoordinator(applicationScope)
+        val fake = FakeChatDataSource(true).apply {
+            conversations += Conversation(id = "failed-background", model = model.id)
+            sendMessageFailureBeforeUser = IllegalStateException("prepare failed")
+        }
+        val viewModel = AppViewModel(fake, generationCoordinator = coordinator)
+        val owner = ViewModelStore().apply { put("app", viewModel) }
+        advanceUntilIdle()
+        viewModel.openConversation("failed-background")
+        advanceUntilIdle()
+        val attachment = cameraDraft("background-draft")
+        viewModel.setComposerText("Original question")
+        viewModel.addAttachments(listOf(attachment))
+        assertTrue(viewModel.send("Original question"))
+        advanceUntilIdle()
+        assertEquals("Original question", viewModel.state.value.composerText)
+        assertEquals(listOf(attachment), viewModel.state.value.pendingAttachments)
+        assertFalse(attachment in fake.discardedAttachments)
+        fake.sendMessageFailureBeforeUser = null
+        assertTrue(viewModel.send(viewModel.state.value.composerText))
+        advanceUntilIdle()
+        assertEquals(2, fake.sendMessageCalls)
+        assertEquals("", viewModel.state.value.composerText)
+        assertTrue(attachment in fake.discardedAttachments)
+        owner.clear()
+        applicationScope.cancel()
+    }
+
+    @Test
+    fun recreatedUiCanStopAnAcceptedBackgroundReplyWithoutRestoringTheSubmittedQuestion() = runTest(dispatcher) {
+        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val coordinator = GenerationCoordinator(applicationScope)
+        val cleanup = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true).apply {
+            conversations += Conversation(id = "stop-background", model = model.id)
+            sendMessageGate = CompletableDeferred()
+            cancellationCleanupGate = cleanup
+        }
+        val original = AppViewModel(fake, generationCoordinator = coordinator)
+        val originalOwner = ViewModelStore().apply { put("app", original) }
+        advanceUntilIdle()
+        original.openConversation("stop-background")
+        advanceUntilIdle()
+        original.send("Accepted question")
+        runCurrent()
+        originalOwner.clear()
+        val recreated = AppViewModel(fake, generationCoordinator = coordinator)
+        val recreatedOwner = ViewModelStore().apply { put("app", recreated) }
+        advanceUntilIdle()
+        recreated.openConversation("stop-background")
+        runCurrent()
+        recreated.stopGeneration()
+        runCurrent()
+        assertTrue(recreated.state.value.activeGeneration?.stopping == true)
+        assertFalse(recreated.send("Too early"))
+        cleanup.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("interrupted", recreated.state.value.activeMessages.last().status)
+        assertEquals("", recreated.state.value.composerText)
+        assertEquals(1, fake.sendMessageCalls)
+        recreatedOwner.clear()
+        applicationScope.cancel()
+    }
+
+    @Test
+    fun foregroundServiceStartupRejectionRestoresComposerWithoutCallingTheModel() = runTest(dispatcher) {
+        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val coordinator = GenerationCoordinator(applicationScope, object : GenerationLifecycle {
+            override fun onStarting(snapshot: GenerationSnapshot) { throw IllegalStateException("Background unavailable") }
+        })
+        val fake = FakeChatDataSource(true).apply {
+            conversations += Conversation(id = "rejected-background", model = model.id)
+        }
+        val viewModel = AppViewModel(fake, generationCoordinator = coordinator)
+        val owner = ViewModelStore().apply { put("app", viewModel) }
+        advanceUntilIdle()
+        viewModel.openConversation("rejected-background")
+        advanceUntilIdle()
+        viewModel.send("Retry later")
+        advanceUntilIdle()
+        assertEquals(0, fake.sendMessageCalls)
+        assertEquals("Retry later", viewModel.state.value.composerText)
+        assertEquals(UiText.Dynamic("Background unavailable"), viewModel.state.value.notice)
+        owner.clear()
+        applicationScope.cancel()
+    }
+
+    @Test
+    fun pendingQuestionEditSurvivesUiClearingWithoutReplacingTheOriginalComposerDraft() = runTest(dispatcher) {
+        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val coordinator = GenerationCoordinator(applicationScope)
+        val prepare = CompletableDeferred<Unit>()
+        val reply = CompletableDeferred<Unit>()
+        val source = Conversation(id = "edited-source", model = "model-1")
+        val question = ChatMessage(id = "edited-question", conversationId = source.id, role = "user", content = "Original question")
+        val originalReply = ChatMessage(id = "original-answer", conversationId = source.id, role = "assistant", content = "Original answer")
+        val fake = FakeChatDataSource(true).apply {
+            conversations += source
+            messageMap[source.id] = listOf(question, originalReply)
+            editPreparationGate = prepare
+            sendMessageGate = reply
+        }
+        val original = AppViewModel(fake, generationCoordinator = coordinator)
+        val originalOwner = ViewModelStore().apply { put("app", original) }
+        advanceUntilIdle()
+        original.openConversation(source.id)
+        advanceUntilIdle()
+        val attachment = cameraDraft("unrelated-original-draft")
+        original.setComposerText("Unsent original draft")
+        original.addAttachments(listOf(attachment))
+        original.openQuestionEditor(question)
+        original.submitEditedQuestion("Edited question")
+        runCurrent()
+        val runId = coordinator.snapshots.value.getValue(source.id).runId
+        assertEquals(0, fake.editedGenerationCalls)
+        originalOwner.clear()
+        val recreated = AppViewModel(fake, generationCoordinator = coordinator)
+        val recreatedOwner = ViewModelStore().apply { put("app", recreated) }
+        advanceUntilIdle()
+        assertEquals("Edited question", recreated.state.value.editingQuestion?.content)
+        assertTrue(recreated.state.value.questionEditBusy)
+        assertEquals("Unsent original draft", recreated.state.value.drafts[source.id]?.text)
+        assertEquals(listOf(attachment), recreated.state.value.drafts[source.id]?.attachments)
+        prepare.complete(Unit)
+        runCurrent()
+        val branch = fake.conversations.single { it.id != source.id }
+        assertEquals(branch.id, recreated.state.value.activeConversationId)
+        assertEquals(runId, coordinator.snapshots.value.getValue(branch.id).runId)
+        assertFalse(coordinator.snapshots.value.containsKey(source.id))
+        assertFalse(recreated.state.value.generations.containsKey(source.id))
+        assertEquals(1, fake.editedGenerationCalls)
+        assertEquals("Edited question", fake.editedGenerationContent)
+        assertEquals(listOf(question, originalReply), fake.messageMap[source.id])
+        assertEquals("Unsent original draft", recreated.state.value.drafts[source.id]?.text)
+        assertFalse(attachment in fake.discardedAttachments)
+        reply.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(1, recreated.state.value.activeMessages.count { it.role == "user" && it.content == "Edited question" })
+        assertEquals("completed", recreated.state.value.activeMessages.last().status)
+        recreated.openConversation(source.id)
+        advanceUntilIdle()
+        assertEquals("Unsent original draft", recreated.state.value.composerText)
+        assertEquals(listOf(attachment), recreated.state.value.pendingAttachments)
+        recreatedOwner.clear()
+        applicationScope.cancel()
+    }
+
+    @Test
+    fun failedEditPreparationRestoresTheProposedEditAfterRecreationAndAllowsExplicitRetry() = runTest(dispatcher) {
+        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val coordinator = GenerationCoordinator(applicationScope)
+        val prepare = CompletableDeferred<Unit>()
+        val source = Conversation(id = "edit-retry-source", model = "model-1")
+        val question = ChatMessage(id = "edit-retry-question", conversationId = source.id, role = "user", content = "Original question")
+        val fake = FakeChatDataSource(true).apply {
+            conversations += source
+            messageMap[source.id] = listOf(question)
+            editPreparationGate = prepare
+            editPreparationFailure = IllegalStateException("Copy failed")
+        }
+        val original = AppViewModel(fake, generationCoordinator = coordinator)
+        val originalOwner = ViewModelStore().apply { put("app", original) }
+        advanceUntilIdle()
+        original.openConversation(source.id)
+        advanceUntilIdle()
+        original.setComposerText("Keep original draft")
+        original.openQuestionEditor(question)
+        original.submitEditedQuestion("Edited retry question")
+        runCurrent()
+        originalOwner.clear()
+        prepare.complete(Unit)
+        advanceUntilIdle()
+        val recreated = AppViewModel(fake, generationCoordinator = coordinator)
+        val recreatedOwner = ViewModelStore().apply { put("app", recreated) }
+        advanceUntilIdle()
+        assertEquals("Edited retry question", recreated.state.value.editingQuestion?.content)
+        assertEquals(UiText.Dynamic("Copy failed"), recreated.state.value.questionEditError)
+        assertFalse(recreated.state.value.questionEditBusy)
+        assertEquals("Keep original draft", recreated.state.value.composerText)
+        assertEquals(0, fake.editedGenerationCalls)
+        fake.editPreparationFailure = null
+        recreated.submitEditedQuestion(recreated.state.value.editingQuestion!!.content)
+        advanceUntilIdle()
+        assertEquals(1, fake.editedGenerationCalls)
+        assertEquals("Edited retry question", fake.editedGenerationContent)
+        assertEquals("Keep original draft", recreated.state.value.drafts[source.id]?.text)
+        assertEquals(listOf(question), fake.messageMap[source.id])
+        recreatedOwner.clear()
+        applicationScope.cancel()
+    }
+
+    @Test
+    fun cancellingManagedEditKeepsItsTextSeparateFromTheOriginalDraft() = runTest(dispatcher) {
+        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val coordinator = GenerationCoordinator(applicationScope)
+        val source = Conversation(id = "edit-cancel-source", model = "model-1")
+        val question = ChatMessage(id = "edit-cancel-question", conversationId = source.id, role = "user", content = "Original")
+        val fake = FakeChatDataSource(true).apply {
+            conversations += source
+            messageMap[source.id] = listOf(question)
+            editPreparationGate = CompletableDeferred()
+        }
+        val viewModel = AppViewModel(fake, generationCoordinator = coordinator)
+        val owner = ViewModelStore().apply { put("app", viewModel) }
+        advanceUntilIdle()
+        viewModel.openConversation(source.id)
+        advanceUntilIdle()
+        viewModel.setComposerText("Unrelated unsent draft")
+        viewModel.openQuestionEditor(question)
+        viewModel.submitEditedQuestion("Cancelled edit text")
+        runCurrent()
+        viewModel.stopGeneration(source.id)
+        advanceUntilIdle()
+        assertEquals("Cancelled edit text", viewModel.state.value.editingQuestion?.content)
+        assertFalse(viewModel.state.value.questionEditBusy)
+        assertEquals("Unrelated unsent draft", viewModel.state.value.composerText)
+        assertEquals(0, fake.editedGenerationCalls)
+        assertEquals(1, fake.conversations.size)
+        viewModel.closeQuestionEditor()
+        runCurrent()
+        assertFalse(coordinator.snapshots.value.containsKey(source.id))
+        owner.clear()
+        applicationScope.cancel()
+    }
+
+    @Test
+    fun deletedFinishedConversationIsNotReintroducedByAnotherManagedStream() = runTest(dispatcher) {
+        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val coordinator = GenerationCoordinator(applicationScope)
+        val fake = FakeChatDataSource(true).apply {
+            conversations += Conversation(id = "finished-delete", model = model.id)
+            conversations += Conversation(id = "other-stream", model = model.id)
+        }
+        val viewModel = AppViewModel(fake, generationCoordinator = coordinator)
+        val owner = ViewModelStore().apply { put("app", viewModel) }
+        advanceUntilIdle()
+        viewModel.openConversation("finished-delete")
+        advanceUntilIdle()
+        viewModel.send("Delete this completed conversation")
+        advanceUntilIdle()
+        viewModel.deleteConversations(setOf("finished-delete"))
+        advanceUntilIdle()
+        assertFalse(coordinator.snapshots.value.containsKey("finished-delete"))
+        viewModel.openConversation("other-stream")
+        advanceUntilIdle()
+        fake.sendMessageGate = CompletableDeferred()
+        viewModel.send("Another request")
+        runCurrent()
+        assertFalse(viewModel.state.value.messages.containsKey("finished-delete"))
+        assertFalse(viewModel.state.value.generations.containsKey("finished-delete"))
+        fake.sendMessageGate!!.complete(Unit)
+        advanceUntilIdle()
+        owner.clear()
+        applicationScope.cancel()
+    }
+
+    @Test
+    fun pendingNewConversationCreationSurvivesUiClearingAndRekeysTheSingleApplicationRequest() = runTest(dispatcher) {
+        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val coordinator = GenerationCoordinator(applicationScope)
+        val create = CompletableDeferred<Unit>()
+        val reply = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true).apply { createConversationGate = create; sendMessageGate = reply }
+        val original = AppViewModel(fake, generationCoordinator = coordinator)
+        val originalOwner = ViewModelStore().apply { put("app", original) }
+        advanceUntilIdle()
+        original.setComposerText("New chat question")
+        assertTrue(original.send("New chat question"))
+        runCurrent()
+        val run = coordinator.snapshots.value.getValue(NEW_DRAFT_KEY).runId
+        assertTrue(original.state.value.activeGeneration?.active == true)
+        assertEquals(0, fake.sendMessageCalls)
+        originalOwner.clear()
+        val recreated = AppViewModel(fake, generationCoordinator = coordinator)
+        val recreatedOwner = ViewModelStore().apply { put("app", recreated) }
+        advanceUntilIdle()
+        assertTrue(recreated.state.value.activeGeneration?.active == true)
+        assertFalse(recreated.send("duplicate"))
+        create.complete(Unit)
+        runCurrent()
+        val actualId = fake.conversations.single().id
+        assertFalse(coordinator.snapshots.value.containsKey(NEW_DRAFT_KEY))
+        assertEquals(run, coordinator.snapshots.value.getValue(actualId).runId)
+        assertEquals(actualId, recreated.state.value.activeConversationId)
+        assertFalse(recreated.state.value.generations.containsKey(NEW_DRAFT_KEY))
+        assertEquals(1, fake.sendMessageCalls)
+        assertEquals("New chat question", fake.sentRequest?.content)
+        assertEquals("Answer from provider", recreated.state.value.activeMessages.last().content)
+        reply.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("completed", recreated.state.value.activeMessages.last().status)
+        recreatedOwner.clear()
+        applicationScope.cancel()
+    }
+
+    @Test
+    fun cancelPendingNewConversationCreationRestoresDraftWithoutCreatingOrBillingAModelRequest() = runTest(dispatcher) {
+        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val coordinator = GenerationCoordinator(applicationScope)
+        val fake = FakeChatDataSource(true).apply { createConversationGate = CompletableDeferred() }
+        val original = AppViewModel(fake, generationCoordinator = coordinator)
+        val originalOwner = ViewModelStore().apply { put("app", original) }
+        advanceUntilIdle()
+        original.send("Unaccepted question")
+        runCurrent()
+        originalOwner.clear()
+        val recreated = AppViewModel(fake, generationCoordinator = coordinator)
+        val recreatedOwner = ViewModelStore().apply { put("app", recreated) }
+        advanceUntilIdle()
+        recreated.stopGeneration()
+        advanceUntilIdle()
+        assertEquals("Unaccepted question", recreated.state.value.composerText)
+        assertEquals(0, fake.sendMessageCalls)
+        assertTrue(fake.conversations.isEmpty())
+        assertFalse(recreated.state.value.activeGeneration?.active == true)
+        recreatedOwner.clear()
+        applicationScope.cancel()
+    }
+
+    @Test
+    fun managedNewConversationCreationFailureRestoresOriginalDraftWithoutCallingAModel() = runTest(dispatcher) {
+        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val coordinator = GenerationCoordinator(applicationScope)
+        val fake = FakeChatDataSource(true).apply { createConversationFailure = IllegalStateException("create failed") }
+        val viewModel = AppViewModel(fake, generationCoordinator = coordinator)
+        val owner = ViewModelStore().apply { put("app", viewModel) }
+        advanceUntilIdle()
+        viewModel.send("Keep this input")
+        advanceUntilIdle()
+        assertEquals("Keep this input", viewModel.state.value.composerText)
+        assertTrue(fake.conversations.isEmpty())
+        assertEquals(0, fake.sendMessageCalls)
+        assertEquals(UiText.Dynamic("create failed"), viewModel.state.value.notice)
+        owner.clear()
+        applicationScope.cancel()
+    }
+
+    @Test
+    fun streamingReplyDoesNotReopenItsConversationAfterTheUserStartsANewDraft() = runTest(dispatcher) {
+        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val coordinator = GenerationCoordinator(applicationScope)
+        val nextToken = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true).apply { sendMessageContinuationGate = nextToken; sendMessageGate = finish }
+        val viewModel = AppViewModel(fake, generationCoordinator = coordinator)
+        val owner = ViewModelStore().apply { put("app", viewModel) }
+        advanceUntilIdle()
+        viewModel.send("First question")
+        runCurrent()
+        val originalId = fake.conversations.single().id
+        assertEquals(originalId, viewModel.state.value.activeConversationId)
+        viewModel.newConversation()
+        assertEquals(null, viewModel.state.value.activeConversationId)
+        nextToken.complete(Unit)
+        runCurrent()
+        assertEquals(null, viewModel.state.value.activeConversationId)
+        assertTrue(coordinator.snapshots.value.getValue(originalId).active)
+        viewModel.setComposerText("Independent next draft")
+        assertEquals("Independent next draft", viewModel.state.value.composerText)
+        finish.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(null, viewModel.state.value.activeConversationId)
+        assertEquals("Independent next draft", viewModel.state.value.composerText)
+        owner.clear()
+        applicationScope.cancel()
+    }
+
+    @Test
+    fun recreatedUiInitiallyRestoresAnActiveNewConversationButLaterTokensRespectExplicitNewDraftNavigation() = runTest(dispatcher) {
+        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val coordinator = GenerationCoordinator(applicationScope)
+        val nextToken = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true).apply { sendMessageContinuationGate = nextToken; sendMessageGate = finish }
+        val original = AppViewModel(fake, generationCoordinator = coordinator)
+        val originalOwner = ViewModelStore().apply { put("app", original) }
+        advanceUntilIdle()
+        original.send("Restore running chat")
+        runCurrent()
+        val originalId = fake.conversations.single().id
+        originalOwner.clear()
+        val restored = AppViewModel(fake, generationCoordinator = coordinator)
+        val restoredOwner = ViewModelStore().apply { put("app", restored) }
+        advanceUntilIdle()
+        assertEquals(originalId, restored.state.value.activeConversationId)
+        assertEquals("Answer from provider", restored.state.value.activeMessages.last().content)
+        assertEquals(1, fake.sendMessageCalls)
+        restored.newConversation()
+        nextToken.complete(Unit)
+        runCurrent()
+        assertEquals(null, restored.state.value.activeConversationId)
+        finish.complete(Unit)
+        advanceUntilIdle()
+        restoredOwner.clear()
+        applicationScope.cancel()
+    }
+
+    @Test
+    fun textAndAttachmentsRemainOwnedByTheirDraftAcrossConversationSwitches() = runTest(dispatcher) {
+        val fake = FakeChatDataSource(true).apply {
+            conversations += Conversation(id = "one", model = model.id)
+            conversations += Conversation(id = "two", model = model.id)
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openConversation("one")
+        viewModel.setComposerText("unsent first")
+        val attachment = cameraDraft("draft-one")
+        viewModel.addAttachments(listOf(attachment))
+        viewModel.openConversation("two")
+        viewModel.setComposerText("unsent second")
+        viewModel.openConversation("one")
+        advanceUntilIdle()
+        assertEquals("unsent first", viewModel.state.value.composerText)
+        assertEquals(listOf(attachment), viewModel.state.value.pendingAttachments)
+        assertFalse(attachment in fake.discardedAttachments)
+        viewModel.openConversation("two")
+        assertEquals("unsent second", viewModel.state.value.composerText)
+    }
+
+    @Test
+    fun staleSearchCompletionCannotReplaceANewerQuery() = runTest(dispatcher) {
+        val oldGate = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true).apply {
+            searchHandler = { query, _ ->
+                if (query == "old") withContext(NonCancellable) { oldGate.await() }
+                MessageSearchPage(listOf(MessageSearchHit(query, "chat", "Chat", null, "user", 1, query)))
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.searchMessages("old")
+        advanceTimeBy(301)
+        runCurrent()
+        viewModel.searchMessages("new")
+        advanceTimeBy(301)
+        runCurrent()
+        assertEquals(listOf("new"), viewModel.state.value.messageSearchPage.items.map { it.messageId })
+        oldGate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("new", viewModel.state.value.messageSearchQuery)
+        assertEquals(listOf("new"), viewModel.state.value.messageSearchPage.items.map { it.messageId })
+        assertFalse(viewModel.state.value.messageSearchBusy)
+    }
+
+    @Test
+    fun knowledgeSearchFromThePreviousScopeCannotPopulateAMessageSearchDestination() = runTest(dispatcher) {
+        val oldSearch = CompletableDeferred<Unit>()
+        val firstScope = KnowledgeScope(KnowledgeScopeMode.SELECTED, listOf("first-document"))
+        val secondScope = KnowledgeScope(KnowledgeScopeMode.SELECTED, listOf("second-document"))
+        val fake = FakeChatDataSource(true).apply {
+            conversations += Conversation(id = "first", model = model.id, knowledgeScope = firstScope)
+            conversations += Conversation(id = "second", model = model.id, knowledgeScope = secondScope)
+            messageMap["second"] = listOf(ChatMessage(id = "second-message", conversationId = "second", role = "user", content = "match"))
+        }
+        val repository = object : ChatDataSource by fake {
+            override suspend fun searchKnowledge(query: String, scope: KnowledgeScope): List<KnowledgeSnippet> {
+                assertEquals(firstScope, scope)
+                withContext(NonCancellable) { oldSearch.await() }
+                return listOf(KnowledgeSnippet(1, "first-document", "First", 0, "old result"))
+            }
+        }
+        val viewModel = AppViewModel(repository)
+        val owner = ViewModelStore().apply { put("app", viewModel) }
+        advanceUntilIdle()
+        viewModel.openConversation("first")
+        advanceUntilIdle()
+        viewModel.searchKnowledge("old query")
+        runCurrent()
+        viewModel.openScreen(AppScreen.MESSAGE_SEARCH)
+        viewModel.openSearchResult(MessageSearchHit("second-message", "second", "Second", null, "user", 1, "match"))
+        runCurrent()
+        assertEquals("second", viewModel.state.value.activeConversationId)
+        oldSearch.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(secondScope, viewModel.state.value.config.knowledgeScope)
+        assertTrue(viewModel.state.value.knowledgeResults.isEmpty())
+        assertFalse(viewModel.state.value.knowledgeSearchBusy)
+        owner.clear()
+    }
+
+    @Test
+    fun laterNotificationNavigationWinsOverAnEarlierSlowConversationRead() = runTest(dispatcher) {
+        val firstRead = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true).apply {
+            conversations += Conversation(id = "first", model = model.id)
+            conversations += Conversation(id = "second", model = model.id)
+        }
+        val repository = object : ChatDataSource by fake {
+            override suspend fun conversation(id: String): ConversationDetail {
+                val detail = fake.conversation(id)
+                if (id == "first") withContext(NonCancellable) { firstRead.await() }
+                return detail
+            }
+        }
+        val viewModel = AppViewModel(repository)
+        val owner = ViewModelStore().apply { put("app", viewModel) }
+        advanceUntilIdle()
+        viewModel.openNotifiedConversation("first")
+        runCurrent()
+        viewModel.openNotifiedConversation("second")
+        runCurrent()
+        assertEquals("second", viewModel.state.value.activeConversationId)
+        firstRead.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("second", viewModel.state.value.activeConversationId)
+        owner.clear()
+    }
+
+    @Test
+    fun pendingNewConversationNotificationSelectsItsDraftAndFollowsTheResolvedConversation() = runTest(dispatcher) {
+        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val coordinator = GenerationCoordinator(applicationScope)
+        val creation = CompletableDeferred<Unit>()
+        val reply = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true).apply {
+            conversations += Conversation(id = "other", model = model.id)
+            createConversationGate = creation
+            sendMessageGate = reply
+        }
+        val viewModel = AppViewModel(fake, generationCoordinator = coordinator)
+        val owner = ViewModelStore().apply { put("app", viewModel) }
+        advanceUntilIdle()
+        assertTrue(viewModel.send("pending new question"))
+        runCurrent()
+        viewModel.openConversation("other")
+        runCurrent()
+        viewModel.setComposerText("keep other draft")
+        viewModel.openNotifiedConversation(NEW_DRAFT_KEY)
+        runCurrent()
+        assertEquals(null, viewModel.state.value.activeConversationId)
+        assertTrue(viewModel.state.value.activeGeneration?.active == true)
+        creation.complete(Unit)
+        runCurrent()
+        val actualId = fake.conversations.first { it.id != "other" }.id
+        assertEquals(actualId, viewModel.state.value.activeConversationId)
+        assertEquals("keep other draft", viewModel.state.value.drafts["other"]?.text)
+        reply.complete(Unit)
+        advanceUntilIdle()
+        owner.clear()
+        applicationScope.cancel()
+    }
+
+    @Test
+    fun firstSearchNavigationLoadsMessagesBeforePublishingTheScrollTarget() = runTest(dispatcher) {
+        val conversation = Conversation(id = "found", title = "Archived", model = "model-1", archivedAt = 100)
+        val fake = FakeChatDataSource(true).apply {
+            conversations += conversation
+            messageMap[conversation.id] = listOf(ChatMessage(id = "found-message", conversationId = conversation.id, role = "user", content = "match"))
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.MESSAGE_SEARCH)
+        viewModel.openSearchResult(MessageSearchHit("found-message", "found", "Archived", 100, "user", 1, "match"))
+        advanceUntilIdle()
+        assertEquals(AppScreen.CHAT, viewModel.state.value.screen)
+        assertEquals("found-message", viewModel.state.value.activeMessages.single().id)
+        assertEquals("found-message", viewModel.state.value.scrollToMessageId)
+        assertEquals("found-message", viewModel.state.value.highlightMessageId)
+    }
+
+    @Test
+    fun newestSearchSelectionWinsWhenThePreviousLoadIgnoresCancellation() = runTest(dispatcher) {
+        val firstGate = CompletableDeferred<Unit>()
+        val secondGate = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true).apply {
+            for (id in listOf("first", "second")) {
+                conversations += Conversation(id = id, model = model.id)
+                messageMap[id] = listOf(ChatMessage(id = "$id-message", conversationId = id, role = "user", content = "match"))
+            }
+        }
+        val repository = object : ChatDataSource by fake {
+            override suspend fun conversation(id: String): ConversationDetail {
+                val detail = fake.conversation(id)
+                withContext(NonCancellable) { (if (id == "first") firstGate else secondGate).await() }
+                return detail
+            }
+        }
+        val viewModel = AppViewModel(repository)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.MESSAGE_SEARCH)
+        viewModel.openSearchResult(MessageSearchHit("first-message", "first", "First", null, "user", 1, "match"))
+        runCurrent()
+        viewModel.openSearchResult(MessageSearchHit("second-message", "second", "Second", null, "user", 1, "match"))
+        runCurrent()
+
+        firstGate.complete(Unit)
+        runCurrent()
+        assertEquals(AppScreen.MESSAGE_SEARCH, viewModel.state.value.screen)
+        secondGate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("second", viewModel.state.value.activeConversationId)
+        assertEquals("second-message", viewModel.state.value.scrollToMessageId)
+    }
+
+    @Test
+    fun searchNavigationReportsReadFailuresWithoutClaimingTheMessageWasDeleted() = runTest(dispatcher) {
+        val fake = FakeChatDataSource(true).apply {
+            conversations += Conversation(id = "found", model = model.id)
+            conversationFailure = IllegalStateException("database unavailable")
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.MESSAGE_SEARCH)
+        viewModel.openSearchResult(MessageSearchHit("found-message", "found", "Found", null, "user", 1, "match"))
+        advanceUntilIdle()
+
+        assertEquals(AppScreen.MESSAGE_SEARCH, viewModel.state.value.screen)
+        assertEquals(UiText.Dynamic("database unavailable"), viewModel.state.value.notice)
+    }
+
+    @Test
+    fun deletedSearchTargetsRefreshTheResultsAndRemainOnSearch() = runTest(dispatcher) {
+        val searches = mutableListOf<String>()
+        val fake = FakeChatDataSource(true).apply {
+            searchHandler = { query, _ -> searches += query; MessageSearchPage() }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openScreen(AppScreen.MESSAGE_SEARCH)
+        viewModel.searchMessages("match")
+        advanceUntilIdle()
+        viewModel.openSearchResult(MessageSearchHit("deleted-message", "deleted", "Deleted", null, "user", 1, "match"))
+        advanceUntilIdle()
+
+        assertEquals(AppScreen.MESSAGE_SEARCH, viewModel.state.value.screen)
+        assertEquals(UiText.Resource(R.string.search_message_missing), viewModel.state.value.notice)
+        assertEquals(listOf("match", "match"), searches)
+    }
+
+    @Test
+    fun returningToChatResumesTheShareDialogAfterOpeningModelSettings() = runTest(dispatcher) {
+        val viewModel = AppViewModel(FakeChatDataSource(true))
+        advanceUntilIdle()
+        viewModel.configureSharedModel()
+        assertFalse(viewModel.state.value.shareVisible)
+        assertEquals(AppScreen.PROVIDERS, viewModel.state.value.screen)
+
+        viewModel.openScreen(AppScreen.CHAT)
+
+        assertTrue(viewModel.state.value.shareVisible)
+        assertEquals(AppScreen.CHAT, viewModel.state.value.screen)
+    }
+
+    @Test
+    fun configuringTheFirstModelResumesTheShareDialogWhenSetupReturnsToChat() = runTest(dispatcher) {
+        val viewModel = AppViewModel(FakeChatDataSource(false))
+        advanceUntilIdle()
+        viewModel.configureSharedModel()
+        viewModel.beginNewProvider()
+        viewModel.addManualModel("configured-model")
+        viewModel.saveProvider()
+        advanceUntilIdle()
+
+        assertEquals(AppPhase.READY, viewModel.state.value.phase)
+        assertEquals(AppScreen.CHAT, viewModel.state.value.screen)
+        assertTrue(viewModel.state.value.shareVisible)
+    }
+
+    @Test
+    fun aSubmittedNewConversationDraftCannotBeSentTwiceWhileCreationIsPending() = runTest(dispatcher) {
+        val creationGate = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true).apply { createConversationGate = creationGate }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.setComposerText("first question")
+
+        assertTrue(viewModel.send("first question"))
+        runCurrent()
+        assertEquals("", viewModel.state.value.composerText)
+        assertFalse(viewModel.send("first question"))
+        creationGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(1, fake.conversations.size)
+        assertEquals(1, fake.sendMessageCalls)
+    }
+
+    @Test
+    fun delayedConversationCreationDoesNotReplaceANewlyEditedDraft() = runTest(dispatcher) {
+        val creationGate = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true).apply { createConversationGate = creationGate }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.setComposerText("first question")
+        val attachment = cameraDraft("first-question")
+        viewModel.addAttachments(listOf(attachment))
+        assertTrue(viewModel.send("first question"))
+        runCurrent()
+        viewModel.setComposerText("next question")
+        creationGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(null, viewModel.state.value.activeConversationId)
+        assertEquals("next question", viewModel.state.value.composerText)
+        assertTrue(viewModel.state.value.drafts[NEW_DRAFT_KEY]?.attachments.orEmpty().isEmpty())
+        assertEquals("first question", fake.sentRequest?.content)
+        assertEquals(listOf(attachment), fake.sentRequest?.attachments)
+    }
+
+    @Test
+    fun attachmentsSelectedDuringConversationCreationBelongToANewDraft() = runTest(dispatcher) {
+        val creationGate = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true).apply { createConversationGate = creationGate }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.setComposerText("first question")
+        val submittedAttachment = cameraDraft("submitted")
+        viewModel.addAttachments(listOf(submittedAttachment))
+        assertTrue(viewModel.send("first question"))
+        runCurrent()
+        val nextAttachment = cameraDraft("next-draft")
+        viewModel.addAttachments(listOf(nextAttachment))
+        creationGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(null, viewModel.state.value.activeConversationId)
+        assertEquals("", viewModel.state.value.composerText)
+        assertEquals(listOf(nextAttachment), viewModel.state.value.pendingAttachments)
+        assertEquals(listOf(nextAttachment), viewModel.state.value.drafts[NEW_DRAFT_KEY]?.attachments)
+        assertEquals(listOf(submittedAttachment), fake.sentRequest?.attachments)
     }
 
     @Test
@@ -864,7 +1643,7 @@ class AppViewModelTest {
     }
 
     @Test
-    fun cameraDraftsAreDiscardedWhenRemovedRejectedOrAbandoned() = runTest(dispatcher) {
+    fun cameraDraftsAreDiscardedWhenRemovedOrRejectedAndPreservedWhenSwitching() = runTest(dispatcher) {
         val fake = FakeChatDataSource(withModel = true).apply {
             conversations += Conversation(id = "conversation-existing", title = "Existing", model = model.id)
         }
@@ -886,14 +1665,20 @@ class AppViewModelTest {
 
         viewModel.newConversation()
         advanceUntilIdle()
-        assertTrue(fake.discardedAttachments.containsAll(accepted))
+        assertFalse(fake.discardedAttachments.containsAll(accepted))
+        assertEquals(accepted, viewModel.state.value.pendingAttachments)
+        accepted.forEach { viewModel.removeAttachment(it.uri) }
+        advanceUntilIdle()
 
         val switched = cameraDraft("switched")
         viewModel.addAttachments(listOf(switched))
         viewModel.openConversation("conversation-existing")
         advanceUntilIdle()
-        assertTrue(switched in fake.discardedAttachments)
+        assertFalse(switched in fake.discardedAttachments)
         assertTrue(viewModel.state.value.pendingAttachments.isEmpty())
+        viewModel.newConversation()
+        advanceUntilIdle()
+        assertEquals(listOf(switched), viewModel.state.value.pendingAttachments)
     }
 
     @Test
@@ -1964,15 +2749,24 @@ private class FakeChatDataSource(withModel: Boolean, modelVisionStatus: VisionSt
     val knowledgeSnippets = mutableListOf<KnowledgeSnippet>()
     val knowledgePreviewCalls = mutableListOf<String>()
     var knowledgePreviewHandler: suspend (String) -> KnowledgeDocumentPreview? = { null }
+    var searchHandler: suspend (String, MessageSearchCursor?) -> MessageSearchPage = { _, _ -> MessageSearchPage() }
+    override suspend fun searchMessages(query: String, cursor: MessageSearchCursor?) = searchHandler(query, cursor)
     var initialized = false
     var initializationGate: CompletableDeferred<Unit>? = null
     var sentRequest: SendMessageRequest? = null
     var createConversationFailure: Throwable? = null
+    var createConversationGate: CompletableDeferred<Unit>? = null
     var sendMessageFailureBeforeUser: Throwable? = null
     var sendMessageFailureAfterUser: Throwable? = null
     var sendMessageGate: CompletableDeferred<Unit>? = null
+    var sendMessageContinuationGate: CompletableDeferred<Unit>? = null
     var cancellationCleanupGate: CompletableDeferred<Unit>? = null
     var sendMessageCalls = 0
+    var editPreparationGate: CompletableDeferred<Unit>? = null
+    var editPreparationFailure: Throwable? = null
+    var editPreparationCalls = 0
+    var editedGenerationCalls = 0
+    var editedGenerationContent: String? = null
     var regenerateCalls = 0
     var noteSummaryFailure: Throwable? = null
     var noteSummaryModelId: String? = null
@@ -2093,6 +2887,7 @@ private class FakeChatDataSource(withModel: Boolean, modelVisionStatus: VisionSt
     }
 
     override suspend fun createConversation(request: ConversationWriteRequest): Conversation {
+        createConversationGate?.await()
         createConversationFailure?.let { throw it }
         val conversation = Conversation(
             id = "conversation-${conversations.size + 1}",
@@ -2116,6 +2911,38 @@ private class FakeChatDataSource(withModel: Boolean, modelVisionStatus: VisionSt
             content = "Branched answer",
         ))
         return branch
+    }
+
+    override suspend fun prepareEditedQuestion(messageId: String, newContent: String): ConversationDetail {
+        editPreparationCalls++
+        editPreparationGate?.await()
+        editPreparationFailure?.let { throw it }
+        val sourceMessage = messageMap.values.flatten().single { it.id == messageId }
+        val source = conversations.single { it.id == sourceMessage.conversationId }
+        val branch = source.copy(id = "edited-branch-$editPreparationCalls", title = newContent,
+            branchedFromConversationId = source.id, branchedFromMessageId = messageId)
+        val original = messageMap.getValue(source.id)
+        val prefix = original.takeWhile { it.id != messageId } + sourceMessage
+        val copied = prefix.map { it.copy(id = "${branch.id}-${it.id}", conversationId = branch.id,
+            content = if (it.id == messageId) newContent else it.content) }
+        conversations += branch
+        messageMap[branch.id] = copied
+        return ConversationDetail(branch, copied)
+    }
+
+    override fun regenerateEditedQuestion(id: String, request: SendMessageRequest): Flow<ChatEvent> = flow {
+        editedGenerationCalls++
+        val prefix = messageMap.getValue(id)
+        val user = prefix.last().copy(requestId = request.requestId)
+        editedGenerationContent = user.content
+        val assistant = ChatMessage(id = "edited-answer-$id", conversationId = id, requestId = request.requestId,
+            role = "assistant", status = "generating")
+        emit(ChatEvent.UserMessage(user))
+        emit(ChatEvent.AssistantMessage(assistant))
+        emit(ChatEvent.Delta("Edited response"))
+        sendMessageGate?.await()
+        messageMap[id] = prefix.dropLast(1) + user + assistant.copy(content = "Edited response", status = "completed")
+        emit(ChatEvent.Done(Usage(3, 4), false))
     }
 
     override suspend fun updateConversation(id: String, request: ConversationWriteRequest): Conversation {
@@ -2271,6 +3098,7 @@ private class FakeChatDataSource(withModel: Boolean, modelVisionStatus: VisionSt
         emit(ChatEvent.Process(ProcessEvent(type = "thinking", id = "thinking-1", content = "summary")))
         emit(ChatEvent.Delta("Answer from provider"))
         try {
+            sendMessageContinuationGate?.let { gate -> gate.await(); emit(ChatEvent.Delta(" continued")) }
             sendMessageGate?.await()
         } catch (cancelled: CancellationException) {
             withContext(NonCancellable) {

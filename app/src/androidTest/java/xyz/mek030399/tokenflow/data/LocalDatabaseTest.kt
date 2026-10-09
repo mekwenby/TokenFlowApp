@@ -440,7 +440,7 @@ class LocalDatabaseTest {
     }
 
     @Test
-    fun migrationOneToSevenPreservesMessagesAndAddsCloudTables() = runBlocking {
+    fun migrationOneToTenPreservesMessagesAndAddsCloudContextAndKnowledgeScope() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val name = "migration-${System.nanoTime()}.db"
         context.deleteDatabase(name)
@@ -483,6 +483,8 @@ class LocalDatabaseTest {
                 TokenFlowDatabase.MIGRATION_4_5,
                 TokenFlowDatabase.MIGRATION_5_6,
                 TokenFlowDatabase.MIGRATION_6_7,
+                TokenFlowDatabase.MIGRATION_7_9,
+                TokenFlowDatabase.MIGRATION_9_10,
             )
             .build()
         try {
@@ -492,6 +494,7 @@ class LocalDatabaseTest {
             assertEquals(SettingMode.OVERRIDE, migratedDao.conversation("override")?.toDomain()?.modelMode)
             assertEquals("other", migratedDao.conversation("override")?.modelOverrideId)
             assertEquals("kept", migratedDao.messages("override").single().content)
+            assertEquals(KnowledgeScope(), migratedDao.conversation("override")?.toDomain()?.knowledgeScope)
             assertEquals(UrlReaderBackend.BUILT_IN.name, migratedDao.appSettings()?.urlReaderBackend)
             assertTrue(migratedDao.conversation("override")?.enableSearch == true)
             assertTrue(migratedDao.conversation("override")?.enableRead == true)

@@ -14,6 +14,8 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
@@ -488,9 +490,16 @@ interface ChatDataSource {
     suspend fun testUrl(url: String): UrlReadDiagnostic = throw UnsupportedOperationException()
     suspend fun testModelVision(modelId: String): VisionStatus = VisionStatus.UNKNOWN
     suspend fun conversations(): List<Conversation>
+    suspend fun isRequestAccepted(requestId: String): Boolean = false
+    suspend fun searchMessages(query: String, cursor: MessageSearchCursor? = null): MessageSearchPage = MessageSearchPage()
+    suspend fun contextPreview(id: String, request: SendMessageRequest? = null): ContextPreview = throw UnsupportedOperationException()
+    suspend fun compactContext(id: String): ContextSummary = throw UnsupportedOperationException()
+    suspend fun saveContextSummary(summary: ContextSummary) = Unit
+    suspend fun resetContext(id: String) = Unit
     suspend fun conversation(id: String): ConversationDetail
     suspend fun createConversation(request: ConversationWriteRequest): Conversation
     suspend fun createBranch(messageId: String, title: String): Conversation = throw UnsupportedOperationException()
+    suspend fun prepareEditedQuestion(messageId: String, newContent: String): ConversationDetail = throw UnsupportedOperationException()
     suspend fun clearContext(conversationId: String): ChatMessage = throw UnsupportedOperationException()
     suspend fun updateConversation(id: String, request: ConversationWriteRequest): Conversation
     suspend fun deleteConversations(ids: Set<String>)
@@ -519,14 +528,17 @@ interface ChatDataSource {
     suspend fun importKnowledge(source: KnowledgeImportSource): KnowledgeDocument = throw UnsupportedOperationException()
     suspend fun deleteKnowledge(id: String) = Unit
     suspend fun searchKnowledge(query: String): List<KnowledgeSnippet> = emptyList()
+    suspend fun searchKnowledge(query: String, scope: KnowledgeScope): List<KnowledgeSnippet> = searchKnowledge(query).filter { scope.includes(it.documentId) }
     suspend fun knowledgeDocumentPreview(documentId: String): KnowledgeDocumentPreview? = null
     suspend fun knowledgeSnippets(ids: List<Long>): List<KnowledgeSnippet> = emptyList()
+    suspend fun knowledgeSnippets(ids: List<Long>, scope: KnowledgeScope): List<KnowledgeSnippet> = knowledgeSnippets(ids).filter { scope.includes(it.documentId) }
     suspend fun knowledgeSnippet(chunkId: Long): KnowledgeSnippet? =
         knowledgeSnippets(listOf(chunkId)).firstOrNull()
     suspend fun discardPendingAttachments(attachments: List<PendingAttachment>) = Unit
     suspend fun generateTitle(id: String, force: Boolean = true): Conversation
     fun sendMessage(id: String, request: SendMessageRequest): Flow<ChatEvent>
     fun regenerate(id: String, request: SendMessageRequest): Flow<ChatEvent>
+    fun regenerateEditedQuestion(id: String, request: SendMessageRequest): Flow<ChatEvent> = flow { throw UnsupportedOperationException() }
     suspend fun synthesizeSpeech(messageId: String, force: Boolean = false): TtsAudio = throw UnsupportedOperationException()
     suspend fun exportConfiguration(password: CharArray): String
     suspend fun previewImport(raw: String, password: CharArray): ImportPreview
@@ -578,7 +590,11 @@ class ChatRepository(
     private val cloudConfigurationMutationLock = Mutex()
     private val artifactDeliveryLock = Mutex()
 
-    override suspend fun initialize() {
+    private val initializationLock = Mutex()
+    private var initialized = false
+
+    override suspend fun initialize() = initializationLock.withLock {
+        if (initialized) return@withLock
         secretStore.clearLegacyMobileToken()
         secretStore.remove(SecretStore.INFOFLOW_KEY)
         if (dao.appSettings() == null) dao.putAppSettings(AppSettingsEntity())
@@ -593,6 +609,7 @@ class ChatRepository(
         if (interrupted.isNotEmpty()) dao.putMessages(interrupted)
         dao.interruptGeneratingConversations()
         dao.interruptKnowledgeIndexing(System.currentTimeMillis())
+        initialized = true
     }
 
     override suspend fun workspace(): WorkspaceSnapshot {
@@ -968,6 +985,9 @@ class ChatRepository(
         )
         val normalizedModels = models.distinctBy { it.id }.map { model ->
             require(model.remoteId.isNotBlank()) { "Model ID is required" }
+            require(model.contextWindowTokens == null || model.contextWindowTokens > model.maxOutputTokens.coerceIn(1, MAX_MODEL_OUTPUT_TOKENS)) {
+                "Context capacity must exceed maximum output tokens"
+            }
             model.copy(
                 providerId = provider.id,
                 remoteId = model.remoteId.trim(),
@@ -1123,6 +1143,16 @@ class ChatRepository(
 
     override suspend fun conversations(): List<Conversation> = dao.conversations().map(ConversationEntity::toDomain)
 
+    override suspend fun isRequestAccepted(requestId: String): Boolean = dao.isRequestAccepted(requestId)
+
+    override suspend fun searchMessages(query: String, cursor: MessageSearchCursor?): MessageSearchPage {
+        val literal = query.trim().take(200)
+        if (literal.isBlank()) return MessageSearchPage()
+        val rows = dao.searchMessages(literal, cursor?.createdAt, cursor?.messageId, 51)
+        val page = rows.take(50)
+        return MessageSearchPage(page, if (rows.size > 50) page.last().let { MessageSearchCursor(it.createdAt, it.messageId) } else null)
+    }
+
     override suspend fun conversation(id: String): ConversationDetail {
         val conversation = requireNotNull(dao.conversation(id)) { "Conversation not found" }
         val messages = dao.messages(id).map(MessageEntity::toDomain)
@@ -1160,6 +1190,8 @@ class ChatRepository(
             enableKnowledge = request.enableKnowledge ?: false,
             enableInfiniteCloud = request.enableInfiniteCloud == true,
             cloudServerId = cloudServerId,
+            contextPolicy = request.contextPolicy?.validated() ?: ContextPolicy(),
+            knowledgeScope = request.knowledgeScope?.normalized() ?: KnowledgeScope(),
             createdAt = now,
             updatedAt = now,
         )
@@ -1173,6 +1205,7 @@ class ChatRepository(
         require(sourceMessage.role == "assistant" && sourceMessage.status == "completed") {
             "Only completed assistant responses can be branched"
         }
+        return withContextOperation(sourceMessage.conversationId) {
         val sourceConversation = requireNotNull(dao.conversation(sourceMessage.conversationId)) {
             "Conversation not found"
         }.toDomain()
@@ -1197,7 +1230,7 @@ class ChatRepository(
             lastMessageAt = now,
         )
         val copiedMessages = selected.mapIndexed { index, source ->
-            val normalizedMetadata = if (source.role == "assistant" && source.metadata.isNotBlank()) {
+            val normalizedMetadata = if (source.role == "assistant" && source.status == "completed" && source.metadata.isNotBlank()) {
                 runCatching {
                     val metadata = json.decodeFromString<AssistantMetadata>(source.metadata)
                     json.encodeToString(metadata.copy(completionStatus = "completed", error = "", errorCode = ""))
@@ -1209,22 +1242,106 @@ class ChatRepository(
                 parentMessageId = source.parentMessageId?.let(idMap::get),
                 requestId = UUID.randomUUID().toString(),
                 metadata = normalizedMetadata,
-                status = "completed",
+                status = source.status,
                 createdAt = now + index,
             )
         }
         val copiedAttachments = attachmentStore?.copyForBranch(selected.map { it.id }, idMap).orEmpty()
         try {
-            dao.putBranch(branch.toEntity(), copiedMessages, copiedAttachments.map(MessageAttachment::toEntity))
+            val inherited = ContextBuilder.validSummary(readContextSummary(sourceConversation.id), selected.map(MessageEntity::toDomain))?.let { summary ->
+                val ids = summary.sourceMessageIds.map(idMap::getValue)
+                summary.copy(conversationId = branch.id,
+                    boundaryId = summary.boundaryId?.let(idMap::getValue), sourceMessageIds = ids,
+                    sourceDigest = ContextBuilder.digest(ContextBuilder.eligible(copiedMessages.map(MessageEntity::toDomain)).take(ids.size))).toEntity()
+            }
+            dao.putBranch(branch.toEntity(), copiedMessages, copiedAttachments.map(MessageAttachment::toEntity), inherited)
         } catch (failure: Throwable) {
             attachmentStore?.deleteFiles(copiedAttachments)
             throw failure
         }
-        return branch
+        branch
+        }
+    }
+
+    override suspend fun prepareEditedQuestion(messageId: String, newContent: String): ConversationDetail {
+        val sourceMessage = requireNotNull(dao.message(messageId)) { "Message not found" }.toDomain()
+        return withContextOperation(sourceMessage.conversationId) {
+            val sourceConversation = requireNotNull(dao.conversation(sourceMessage.conversationId)) {
+                "Conversation not found"
+            }.toDomain()
+            if (sourceConversation.status in setOf("preparing", "generating")) {
+                throw ConfigurationException("Wait for the current response before editing a question")
+            }
+            val prefix = editedQuestionPrefix(dao.messages(sourceConversation.id).map(MessageEntity::toDomain), messageId)
+            val content = newContent.trim()
+            require(content.isNotBlank() || dao.attachmentsForMessage(messageId).isNotEmpty()) {
+                "The edited question must contain text or an attachment"
+            }
+            val idMap = prefix.associate { it.id to UUID.randomUUID().toString() }
+            val now = System.currentTimeMillis()
+            val branch = sourceConversation.copy(
+                id = UUID.randomUUID().toString(),
+                title = unicodePrefix(content, 40).ifBlank { sourceConversation.title },
+                titleAutoGenerated = false,
+                pinnedAt = null,
+                archivedAt = null,
+                branchedFromConversationId = sourceConversation.id,
+                branchedFromMessageId = messageId,
+                activeOperation = "",
+                status = "idle",
+                statusMessage = "",
+                createdAt = now,
+                updatedAt = now,
+                lastMessageAt = now + prefix.lastIndex,
+            )
+            val copiedMessages = prefix.mapIndexed { index, source ->
+                val metadata = if (source.id == messageId) {
+                    val old = runCatching { json.decodeFromString<UserMessageMetadata>(source.metadata) }
+                        .getOrDefault(UserMessageMetadata())
+                    json.encodeToString(old.copy(knowledgeChunkIds = emptyList()))
+                } else source.metadata
+                source.copy(
+                    id = idMap.getValue(source.id),
+                    conversationId = branch.id,
+                    parentMessageId = source.parentMessageId?.let(idMap::get),
+                    requestId = UUID.randomUUID().toString(),
+                    content = if (source.id == messageId) content else source.content,
+                    metadata = metadata,
+                    createdAt = now + index,
+                )
+            }
+            val copiedAttachments = withContext(NonCancellable) { attachmentStore?.copyForBranch(prefix.map(ChatMessage::id), idMap).orEmpty() }
+            var committed = false
+            try {
+                val inherited = summaryBeforeEditedQuestion(readContextSummary(sourceConversation.id), prefix)?.let { summary ->
+                    val ids = summary.sourceMessageIds.map(idMap::getValue)
+                    summary.copy(
+                        conversationId = branch.id,
+                        boundaryId = summary.boundaryId?.let(idMap::getValue),
+                        sourceMessageIds = ids,
+                        sourceDigest = ContextBuilder.digest(ContextBuilder.eligible(copiedMessages).take(ids.size)),
+                    ).toEntity()
+                }
+                currentCoroutineContext().ensureActive()
+                withContext(NonCancellable) {
+                    dao.putBranch(branch.toEntity(), copiedMessages.map(ChatMessage::toEntity),
+                        copiedAttachments.map(MessageAttachment::toEntity), inherited)
+                    committed = true
+                }
+            } catch (failure: Throwable) {
+                if (!committed) withContext(NonCancellable) { attachmentStore?.deleteFiles(copiedAttachments) }
+                throw failure
+            }
+            ConversationDetail(branch, copiedMessages, copiedAttachments)
+        }
     }
 
     override suspend fun updateConversation(id: String, request: ConversationWriteRequest): Conversation =
-        conversationUpdateLocks.computeIfAbsent(id) { Mutex() }.withLock {
+        if (request.contextPolicy != null || request.knowledgeScope != null) withContextOperation(id) {
+            request.contextPolicy?.validated()
+            if (request.contextPolicy?.mode == ContextMode.SUMMARY) requireContextCapacity(id)
+            conversationUpdateLocks.computeIfAbsent(id) { Mutex() }.withLock { updateConversationLocked(id, request) }
+        } else conversationUpdateLocks.computeIfAbsent(id) { Mutex() }.withLock {
             updateConversationLocked(id, request)
         }
 
@@ -1245,6 +1362,8 @@ class ChatRepository(
                 model = if (modelMode == SettingMode.INHERIT) null else request.model ?: existing.model,
                 modelMode = modelMode,
                 thinkingEffort = request.thinkingEffort ?: existing.thinkingEffort,
+                contextPolicy = request.contextPolicy?.validated() ?: existing.contextPolicy,
+                knowledgeScope = request.knowledgeScope?.normalized() ?: existing.knowledgeScope,
                 systemPrompt = request.systemPrompt ?: existing.systemPrompt,
                 systemPromptMode = request.systemPromptMode ?: existing.systemPromptMode,
                 nickname = request.nickname ?: existing.nickname,
@@ -1504,11 +1623,17 @@ class ChatRepository(
     override suspend fun searchKnowledge(query: String): List<KnowledgeSnippet> =
         requireNotNull(knowledgeStore) { "Knowledge storage is unavailable" }.search(query)
 
+    override suspend fun searchKnowledge(query: String, scope: KnowledgeScope): List<KnowledgeSnippet> =
+        requireNotNull(knowledgeStore) { "Knowledge storage is unavailable" }.search(query, scope = scope)
+
     override suspend fun knowledgeDocumentPreview(documentId: String): KnowledgeDocumentPreview? =
         requireNotNull(knowledgeStore) { "Knowledge storage is unavailable" }.preview(documentId)
 
     override suspend fun knowledgeSnippets(ids: List<Long>): List<KnowledgeSnippet> =
         requireNotNull(knowledgeStore) { "Knowledge storage is unavailable" }.snippets(ids)
+
+    override suspend fun knowledgeSnippets(ids: List<Long>, scope: KnowledgeScope): List<KnowledgeSnippet> =
+        requireNotNull(knowledgeStore) { "Knowledge storage is unavailable" }.snippets(ids, scope)
 
     override suspend fun knowledgeSnippet(chunkId: Long): KnowledgeSnippet? =
         knowledgeSnippets(listOf(chunkId)).firstOrNull()
@@ -1529,7 +1654,7 @@ class ChatRepository(
                 role = CONTEXT_BOUNDARY_ROLE,
                 createdAt = nextMessageCreatedAt(messages, System.currentTimeMillis()),
             )
-            dao.putMessages(listOf(boundary.toEntity()))
+            dao.putContextBoundary(boundary.toEntity())
             return boundary
         } finally {
             lock.unlock()
@@ -1584,16 +1709,19 @@ class ChatRepository(
                     userContent = null,
                     initialRemoteAttachments = remoteAttachments,
                     excludedHistoryMessageId = latest.id,
-                    beforeAssistantPersist = {
+                    persistTurn = { commit ->
                         artifactDeliveryLock.withLock {
-                            val attachments = attachmentStore?.forMessages(listOf(latest.id)).orEmpty()
-                            val cloudCachePaths = dao.cloudArtifactDeliveriesForMessage(latest.id)
+                            val oldAttachments = attachmentStore?.forMessages(listOf(latest.id)).orEmpty()
+                            val oldCloudCachePaths = dao.cloudArtifactDeliveriesForMessage(latest.id)
                                 .map(CloudArtifactDeliveryEntity::localCachePath)
-                            dao.deleteMessage(latest.id)
-                            replaced = true
-                            attachmentStore?.deleteFiles(attachments)
-                            cloudCachePaths.forEach { path ->
-                                runCatching { attachmentStore?.deleteCloudArtifactCache(path) }
+                            currentCoroutineContext().ensureActive()
+                            withContext(NonCancellable) {
+                                commit()
+                                replaced = true
+                                attachmentStore?.deleteFiles(oldAttachments)
+                                oldCloudCachePaths.forEach { path ->
+                                    runCatching { attachmentStore?.deleteCloudArtifactCache(path) }
+                                }
                             }
                         }
                     },
@@ -1605,6 +1733,45 @@ class ChatRepository(
                         requireNotNull(stagedServerId),
                         regenerationRequest.requestId,
                     )
+                }
+                throw failure
+            }
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    override fun regenerateEditedQuestion(id: String, request: SendMessageRequest): Flow<ChatEvent> = flow {
+        val lock = conversationOperationLock(id)
+        if (!lock.tryLock()) throw ConfigurationException("Conversation is already generating")
+        try {
+            require(request.attachments.isEmpty()) { "Edited questions reuse their saved attachments" }
+            val sourceUser = requireNotNull(dao.messages(id).map(MessageEntity::toDomain)
+                .afterLatestContextBoundary().lastOrNull()?.takeIf { it.role == "user" }) {
+                "The edited question already has a response; regenerate that response instead"
+            }
+            val sourceAttachments = attachmentStore?.forMessages(listOf(sourceUser.id)).orEmpty()
+            val editingRequest = request.copy(content = "", requestId = request.requestId.ifBlank { UUID.randomUUID().toString() })
+            val conversation = requireNotNull(dao.conversation(id)) { "Conversation not found" }.toDomain()
+            var stagedServerId: String? = null
+            var accepted = false
+            try {
+                val remoteAttachments = if (conversation.enableInfiniteCloud && sourceAttachments.isNotEmpty()) {
+                    val cloud = requireNotNull(infiniteCloud) { "Infinite Cloud is unavailable" }
+                    val serverId = requireNotNull(conversation.cloudServerId) { "Infinite Cloud server is not selected" }
+                    stagedServerId = serverId
+                    cloud.stageAttachments(serverId, editingRequest.requestId, sourceAttachments.map {
+                        CloudAttachmentUpload(it.id, it.fileName, it.storedPath)
+                    })
+                } else emptyList()
+                generateLocked(id, editingRequest, sourceUser.content,
+                    initialRemoteAttachments = remoteAttachments,
+                    existingUserMessageId = sourceUser.id,
+                    persistTurn = { commit -> withContext(NonCancellable) { commit(); accepted = true } },
+                ).collect { emit(it) }
+            } catch (failure: Throwable) {
+                if (!accepted) stagedServerId?.let { serverId ->
+                    cleanupStagedCloudAttachments(requireNotNull(infiniteCloud), serverId, editingRequest.requestId)
                 }
                 throw failure
             }
@@ -1633,8 +1800,18 @@ class ChatRepository(
         userContent: String?,
         initialRemoteAttachments: List<RemoteAttachmentMapping> = emptyList(),
         excludedHistoryMessageId: String? = null,
-        beforeAssistantPersist: suspend () -> Unit = {},
+        existingUserMessageId: String? = null,
+        persistTurn: suspend (suspend () -> Unit) -> Unit = { commit -> commit() },
     ): Flow<ChatEvent> = flow {
+        var preparedUser: ChatMessage? = null
+        var storedAttachments = emptyList<MessageAttachment>()
+        var stagedServerId: String? = null
+        var preparedSession: ToolSession? = null
+        var accepted = false
+        var committedAssistant: ChatMessage? = null
+        var ownsPreparedAttachments = true
+        val requestId = request.requestId.ifBlank { UUID.randomUUID().toString() }
+        try {
         val conversation = requireNotNull(dao.conversation(conversationId)) { "Conversation not found" }.toDomain()
         if (conversation.status == "generating") throw ConfigurationException("Conversation is already generating")
         val effective = effectiveSettings(conversation)
@@ -1648,7 +1825,6 @@ class ChatRepository(
             dao.messages(conversationId).map(MessageEntity::toDomain),
             System.currentTimeMillis(),
         )
-        val requestId = request.requestId.ifBlank { UUID.randomUUID().toString() }
         val process = mutableListOf<ProcessEvent>()
         var remoteAttachments: List<RemoteAttachmentMapping> = initialRemoteAttachments
         if (initialRemoteAttachments.isNotEmpty()) {
@@ -1658,105 +1834,86 @@ class ChatRepository(
                 message = "Uploaded ${initialRemoteAttachments.size} attachment(s) to Infinite Cloud",
             )
         }
+        val assistantId = UUID.randomUUID().toString()
         userContent?.let { content ->
             val retrieval = knowledgeStore?.let { store ->
-                resolveKnowledgeSnippets(
-                    manualIds = request.knowledgeChunkIds,
-                    enableAutomaticSearch = request.enableKnowledge,
-                    query = content,
-                    loadManual = { ids -> store.snippets(ids) },
-                    automaticSearch = { query -> store.search(query, AUTOMATIC_KNOWLEDGE_CHUNK_LIMIT) },
-                )
+                resolveKnowledgeSnippets(request.knowledgeChunkIds, request.enableKnowledge, content,
+                    { ids -> store.snippets(ids, conversation.knowledgeScope) },
+                    { query -> store.search(query, AUTOMATIC_KNOWLEDGE_CHUNK_LIMIT, conversation.knowledgeScope) })
             }
-            val injectedKnowledge = buildInjectedKnowledgeContext(retrieval?.finalSnippets.orEmpty())
-            retrieval?.let { result ->
-                knowledgeRetrievalProcessEvent(
-                    requestId = requestId,
-                    result = result,
-                    injectedCitations = injectedKnowledge.citations,
-                )?.let(process::add)
+            val injected = buildInjectedKnowledgeContext(retrieval?.finalSnippets.orEmpty())
+            retrieval?.let { result -> knowledgeRetrievalProcessEvent(requestId, result, injected.citations)?.let(process::add) }
+            val existingUser = existingUserMessageId?.let { messageId ->
+                requireNotNull(dao.message(messageId)) { "Edited question not found" }.toDomain().also {
+                    require(it.conversationId == conversationId && it.role == "user") { "Invalid edited question" }
+                }
             }
-            val knowledgeChunkIds = injectedKnowledge.citations.map(KnowledgeCitation::chunkId)
-            var userMetadata = UserMessageMetadata(knowledgeChunkIds)
-            var user = ChatMessage(
-                conversationId = conversationId,
-                requestId = requestId,
-                role = "user",
-                content = content,
-                metadata = if (knowledgeChunkIds.isEmpty()) "" else json.encodeToString(userMetadata),
-                createdAt = now,
-            )
-            var userPersisted = false
-            var storedAttachments: List<MessageAttachment> = emptyList()
-            var stagedServerId: String? = null
-            runWithRollbackBeforeCommit(
-                rollback = {
-                    if (userPersisted) runCatching { dao.deleteMessage(user.id) }
-                    runCatching { attachmentStore?.deleteFiles(storedAttachments) }
-                    stagedServerId?.let { serverId ->
-                        infiniteCloud?.let { cloud -> cleanupStagedCloudAttachments(cloud, serverId, requestId) }
-                    }
-                },
-                action = { commit ->
-                    dao.putMessages(listOf(user.toEntity()))
-                    userPersisted = true
-                    storedAttachments = attachmentStore?.persist(user.id, request.attachments).orEmpty()
-                    if (storedAttachments.any { it.kind == AttachmentKind.IMAGE } && model.visionStatus != VisionStatus.SUPPORTED) {
-                        val descriptions = describeImages(user.id)
-                        userMetadata = userMetadata.copy(visionDescriptions = descriptions)
-                        user = user.copy(metadata = json.encodeToString(userMetadata))
-                        dao.putMessages(listOf(user.toEntity()))
-                    }
-                    if (conversation.enableInfiniteCloud && storedAttachments.isNotEmpty()) {
-                        val cloud = requireNotNull(infiniteCloud) { "Infinite Cloud is unavailable" }
-                        val serverId = requireNotNull(conversation.cloudServerId) { "Infinite Cloud server is not selected" }
-                        stagedServerId = serverId
-                        remoteAttachments = cloud.stageAttachments(
-                            serverId,
-                            requestId,
-                            storedAttachments.map { attachment ->
-                                CloudAttachmentUpload(attachment.id, attachment.fileName, attachment.storedPath)
-                            },
-                        )
-                        process += ProcessEvent(
-                            type = "cloud_attachments_uploaded",
-                            id = "cloud-attachments-$requestId",
-                            message = "Uploaded ${remoteAttachments.size} attachment(s) to Infinite Cloud",
-                        )
-                    }
-                    emit(ChatEvent.UserMessage(user, storedAttachments))
-                    commit()
-                    withContext(NonCancellable) {
-                        runCatching { attachmentStore?.discardPendingDrafts(request.attachments) }
-                    }
-                },
-            )
-        }
-        val historyMessages = dao.messages(conversationId)
-            .map(MessageEntity::toDomain)
-            .forModelContext(excludedHistoryMessageId)
-        val injectedCitations = mutableListOf<KnowledgeCitation>()
-        val history = historyMessages.map { message ->
-            val knowledge = if (message.role == "user") knowledgeContext(message) else InjectedKnowledgeContext()
-            injectedCitations += knowledge.citations
-            if (message.role != "user" || attachmentStore == null) {
-                CanonicalMessage(role = message.role, content = message.content + knowledge.content)
-            } else {
-                val metadata = runCatching { json.decodeFromString<UserMessageMetadata>(message.metadata) }
-                    .getOrDefault(UserMessageMetadata())
-                val parts = capDocumentContext(attachmentStore.canonicalParts(message, metadata.visionDescriptions)).toMutableList()
-                if (knowledge.content.isNotBlank()) parts += CanonicalContentPart.Text(knowledge.content)
-                CanonicalMessage(role = message.role, content = message.content, parts = parts)
+            val oldMetadata = existingUser?.let { runCatching { json.decodeFromString<UserMessageMetadata>(it.metadata) }
+                .getOrDefault(UserMessageMetadata()) } ?: UserMessageMetadata()
+            var metadata = oldMetadata.copy(knowledgeChunkIds = injected.citations.map(KnowledgeCitation::chunkId))
+            var user = existingUser?.copy(requestId = requestId, metadata = json.encodeToString(metadata))
+                ?: ChatMessage(conversationId = conversationId, requestId = requestId, role = "user",
+                    content = content, metadata = json.encodeToString(metadata), createdAt = now)
+            ownsPreparedAttachments = existingUser == null
+            storedAttachments = if (existingUser == null) attachmentStore?.prepare(user.id, request.attachments).orEmpty()
+                else attachmentStore?.forMessages(listOf(user.id)).orEmpty()
+            if (storedAttachments.any { it.kind == AttachmentKind.IMAGE } && model.visionStatus != VisionStatus.SUPPORTED) {
+                metadata = metadata.copy(visionDescriptions = describeImages(storedAttachments))
+                user = user.copy(metadata = json.encodeToString(metadata))
+            }
+            preparedUser = user
+            if (existingUser == null && conversation.enableInfiniteCloud && storedAttachments.isNotEmpty()) {
+                val cloud = requireNotNull(infiniteCloud) { "Infinite Cloud is unavailable" }
+                val serverId = requireNotNull(conversation.cloudServerId) { "Infinite Cloud server is not selected" }
+                stagedServerId = serverId
+                remoteAttachments = cloud.stageAttachments(serverId, requestId, storedAttachments.map {
+                    CloudAttachmentUpload(it.id, it.fileName, it.storedPath)
+                })
+                process += ProcessEvent(type = "cloud_attachments_uploaded", id = "cloud-attachments-$requestId",
+                    message = "Uploaded ${remoteAttachments.size} attachment(s) to Infinite Cloud")
             }
         }
-        val distinctInjectedCitations = mergeKnowledgeCitations(injectedCitations)
+        val raw = dao.messages(conversationId).map(MessageEntity::toDomain)
+            .filterNot { it.id == excludedHistoryMessageId || it.id == existingUserMessageId } + listOfNotNull(preparedUser)
+        var summary = readContextSummary(conversationId)
+        val selectedRaw = ContextBuilder.select(raw, conversation.contextPolicy, summary)
+        val (canonical, allCitations) = canonicalContext(selectedRaw, preparedUser?.let { mapOf(it.id to storedAttachments) }.orEmpty(), conversation.knowledgeScope)
+        val toolOptions = ToolOptions(request.enableSearch, request.enableRead, request.enableKnowledge,
+            effective.urlReaderBackend, conversation.enableInfiniteCloud, conversation.cloudServerId, conversationId,
+            requestId, assistantId, explicitlyRequestsCloudTask(userContent ?: raw.lastOrNull { it.role == "user" }?.content.orEmpty()), remoteAttachments,
+            conversation.knowledgeScope)
+        preparedSession = engine.openSession(toolOptions, effective.maxToolCalls)
+        val definitions = preparedSession?.definitions.orEmpty()
+        val system = SystemPrompts.compose(effective.systemPrompt + cloudAttachmentPrompt(remoteAttachments), effective.nickname,
+            request.timeZone, request.enableKnowledge || allCitations.isNotEmpty())
+        val baseCall = ModelCallRequest(model, provider, apiKey, system, effective.thinkingEffort, emptyList(), definitions, requestId)
+        var newSummary: ContextSummary? = null
+        var preview = previewOf(raw, canonical, conversation.contextPolicy, model, system, definitions, summary)
+        if (preview.needsCompression && ContextBuilder.hasHistoryToCompress(raw, preview.summary)) {
+            val started = ProcessEvent(type = "context_compression", id = "context-$requestId", messageKey = "compressing_context")
+            emit(ChatEvent.Process(started))
+            newSummary = compressedSummary(conversationId, raw, canonical, conversation.contextPolicy, baseCall, definitions, summary,
+                mergeKnowledgeCitations(allCitations + preview.summary?.citations.orEmpty()))
+            summary = newSummary
+            preview = previewOf(raw, canonical, conversation.contextPolicy, model, system, definitions, summary)
+            process += ProcessEvent(type = "context_compressed", id = "context-$requestId", messageKey = "context_compressed",
+                usage = newSummary.usage)
+        }
+        preview.inputBudget?.let { budget ->
+            require(budget > 0 && preview.estimatedInputTokens <= budget) {
+                "Estimated context exceeds the model capacity. Reduce attachments or compress the conversation."
+            }
+        }
+        val historyMessages = ContextBuilder.select(raw, conversation.contextPolicy, summary)
+        val history = preview.messages
+        val suppliedText = history.flatMap { it.contentParts() }.mapNotNull {
+            when (it) { is CanonicalContentPart.Text -> it.text; is CanonicalContentPart.Document -> it.text; else -> null }
+        }.joinToString("\n")
+        val distinctInjectedCitations = mergeKnowledgeCitations(allCitations + preview.summary?.citations.orEmpty())
+            .filter { suppliedText.contains("[[KB:${it.chunkId}]]") }
         if (userContent == null && distinctInjectedCitations.isNotEmpty()) {
-            process += ProcessEvent(
-                type = "knowledge_retrieval",
-                id = "knowledge-retrieval-$requestId",
-                messageKey = "knowledge_reused",
-                knowledgeCitations = distinctInjectedCitations,
-            )
+            process += ProcessEvent(type = "knowledge_retrieval", id = "knowledge-retrieval-$requestId",
+                messageKey = "knowledge_reused", knowledgeCitations = distinctInjectedCitations)
         }
         val initialCitations = aggregateKnowledgeCitations(distinctInjectedCitations, process)
         val assistantIdentity = AssistantIdentitySnapshot(
@@ -1766,6 +1923,7 @@ class ChatRepository(
         )
         var usage = Usage()
         var assistant = ChatMessage(
+            id = assistantId,
             conversationId = conversationId,
             requestId = requestId,
             role = "assistant",
@@ -1779,47 +1937,24 @@ class ChatRepository(
             status = "generating",
             createdAt = now + 1,
         )
-        beforeAssistantPersist()
+        currentCoroutineContext().ensureActive()
+        persistTurn {
+            withContext(NonCancellable) {
+                dao.commitPreparedTurn(preparedUser?.toEntity(), storedAttachments.map(MessageAttachment::toEntity), newSummary?.toEntity(), assistant.toEntity(), excludedHistoryMessageId)
+                accepted = true
+                committedAssistant = assistant
+            }
+        }
+        preparedUser?.let { user -> emit(ChatEvent.UserMessage(user, storedAttachments)) }
+        withContext(NonCancellable) { runCatching { attachmentStore?.discardPendingDrafts(request.attachments) } }
         try {
             dao.putMessages(listOf(assistant.toEntity()))
             emit(ChatEvent.AssistantMessage(assistant))
             for (event in process.toList()) emit(ChatEvent.Process(event))
 
             dao.updateConversationGenerationState(conversationId, "generating", "", now, now)
-            val call = ModelCallRequest(
-                model = model,
-                provider = provider,
-                apiKey = apiKey,
-                systemPrompt = SystemPrompts.compose(
-                    customPrompt = effective.systemPrompt + cloudAttachmentPrompt(remoteAttachments),
-                    nickname = effective.nickname,
-                    enableKnowledge = request.enableKnowledge || distinctInjectedCitations.isNotEmpty(),
-                    timeZone = request.timeZone,
-                ),
-                thinkingEffort = effective.thinkingEffort,
-                messages = history,
-                tools = emptyList(),
-                requestId = requestId,
-            )
-            engine.run(
-                call,
-                ToolOptions(
-                    enableSearch = request.enableSearch,
-                    enableRead = request.enableRead,
-                    enableKnowledge = request.enableKnowledge,
-                    urlReaderBackend = effective.urlReaderBackend,
-                    enableInfiniteCloud = conversation.enableInfiniteCloud,
-                    cloudServerId = conversation.cloudServerId,
-                    conversationId = conversationId,
-                    requestId = requestId,
-                    messageId = assistant.id,
-                    allowCloudTaskCreation = explicitlyRequestsCloudTask(
-                        userContent ?: historyMessages.lastOrNull { it.role == "user" }?.content.orEmpty(),
-                    ),
-                    remoteAttachments = remoteAttachments,
-                ),
-                effective.maxToolCalls,
-            ).collect { event ->
+            val call = baseCall.copy(messages = history)
+            engine.run(call, toolOptions, effective.maxToolCalls, preparedSession).collect { event ->
                 when (event) {
                     is EngineEvent.Delta -> {
                         assistant = assistant.copy(content = assistant.content + event.content)
@@ -1935,6 +2070,26 @@ class ChatRepository(
             dao.putMessages(listOf(assistant.toEntity()))
             dao.updateConversationGenerationState(conversationId, "failed", failureMessage, System.currentTimeMillis())
             throw error
+        }
+        } finally {
+            withContext(NonCancellable) {
+                runCatching { preparedSession?.close() }
+                committedAssistant?.let { initial ->
+                    val persisted = dao.message(initial.id)
+                    if (persisted?.status == "generating") {
+                        val interrupted = persisted.toDomain().copy(status = "interrupted",
+                            metadata = json.encodeToString(persisted.toDomain().assistantMetadata(json).copy(completionStatus = "interrupted")))
+                        dao.putMessages(listOf(interrupted.toEntity()))
+                        dao.updateConversationGenerationState(conversationId, "idle", "", System.currentTimeMillis())
+                    }
+                }
+                if (!accepted) {
+                    if (ownsPreparedAttachments) runCatching { attachmentStore?.deleteFiles(storedAttachments) }
+                    stagedServerId?.let { serverId -> infiniteCloud?.let { cloud ->
+                        runCatching { cleanupStagedCloudAttachments(cloud, serverId, requestId) }
+                    } }
+                }
+            }
         }
     }
 
@@ -2059,6 +2214,7 @@ class ChatRepository(
         payload.models.forEach { model ->
             require(model.providerId in availableProviderIds) { "Model ${model.remoteId} has no provider" }
             require(model.remoteId.isNotBlank() && model.maxOutputTokens in 1..MAX_MODEL_OUTPUT_TOKENS) { "Invalid model configuration" }
+            require(model.contextWindowTokens == null || model.contextWindowTokens > model.maxOutputTokens) { "Invalid model context capacity" }
         }
         val availableModelIds = localModels.map { it.id }.toSet() + payload.models.map { it.id }
         val availableCloudServerIds = dao.cloudServers().map { it.id }.toSet() + payload.cloudServers.map { it.id }
@@ -2214,9 +2370,179 @@ class ChatRepository(
         }
     }
 
-    private suspend fun describeImages(messageId: String): List<String> {
+    private suspend fun <T> withContextOperation(id: String, action: suspend () -> T): T {
+        val lock = conversationOperationLock(id)
+        if (!lock.tryLock()) throw ConfigurationException("Conversation is busy")
+        try { return action() } finally { lock.unlock() }
+    }
+
+    private suspend fun requireContextCapacity(id: String): ModelProfile {
+        val conversation = requireNotNull(dao.conversation(id)) { "Conversation not found" }.toDomain()
+        val effective = effectiveSettings(conversation)
+        val model = requireNotNull(effective.modelId?.let { dao.model(it) }) { "Model is unavailable" }.toDomain()
+        require(model.contextWindowTokens != null && model.contextWindowTokens > model.maxOutputTokens) {
+            "Configure model context capacity greater than maximum output tokens before compression"
+        }
+        return model
+    }
+
+    private suspend fun readContextSummary(id: String): ContextSummary? = dao.contextSummary(id)?.let {
+        runCatching { json.decodeFromString<ContextSummary>(it.payloadJson) }.getOrNull()
+    }
+
+    private fun ContextSummary.toEntity() = ContextSummaryEntity(conversationId, json.encodeToString(this))
+
+    private suspend fun canonicalContext(
+        messages: List<ChatMessage>,
+        extra: Map<String, List<MessageAttachment>> = emptyMap(),
+        scope: KnowledgeScope = KnowledgeScope(),
+    ): Pair<Map<String, CanonicalMessage>, List<KnowledgeCitation>> {
+        val citations = mutableListOf<KnowledgeCitation>()
+        val map = ContextBuilder.eligible(messages).associate { message ->
+            val knowledge = if (message.role == "user") knowledgeContext(message, scope) else InjectedKnowledgeContext()
+            citations += knowledge.citations
+            if (message.role == "assistant") citations += message.assistantMetadata(json).knowledgeCitations.filter {
+                knowledgeStore?.snippets(listOf(it.chunkId), scope)?.isNotEmpty() == true
+            }
+            val canonical = if (message.role != "user" || attachmentStore == null) {
+                CanonicalMessage(message.role, message.content + knowledge.content)
+            } else {
+                val metadata = runCatching { json.decodeFromString<UserMessageMetadata>(message.metadata) }.getOrDefault(UserMessageMetadata())
+                val parts = capDocumentContext(extra[message.id]?.let {
+                    attachmentStore.canonicalParts(message, it, metadata.visionDescriptions)
+                } ?: attachmentStore.canonicalParts(message, metadata.visionDescriptions)).toMutableList()
+                if (knowledge.content.isNotBlank()) parts += CanonicalContentPart.Text(knowledge.content)
+                CanonicalMessage(message.role, message.content, parts)
+            }
+            message.id to canonical
+        }
+        return map to mergeKnowledgeCitations(citations)
+    }
+
+    private fun previewOf(
+        raw: List<ChatMessage>, canonical: Map<String, CanonicalMessage>, policy: ContextPolicy,
+        model: ModelProfile, system: String, tools: List<ToolDefinition>, summary: ContextSummary?, excludedId: String? = null,
+    ): ContextPreview {
+        val valid = if (policy.mode == ContextMode.SUMMARY) ContextBuilder.validSummary(summary, raw) else null
+        val messages = valid?.let { listOf(ContextBuilder.summaryMessage(it)) }.orEmpty() +
+            ContextBuilder.select(raw, policy, valid, excludedId).map { canonical.getValue(it.id) }
+        return ContextPreview(policy, ContextBuilder.estimate(system, messages, tools), model.contextWindowTokens,
+            model.maxOutputTokens, messages, system, valid, tools)
+    }
+
+    private suspend fun baseContextCall(id: String): ModelCallRequest {
+        val conversation = requireNotNull(dao.conversation(id)) { "Conversation not found" }.toDomain()
+        val effective = effectiveSettings(conversation)
+        val model = requireNotNull(effective.modelId?.let { dao.model(it) }) { "Model is unavailable" }.toDomain()
+        val provider = requireNotNull(dao.provider(model.providerId)) { "Provider is unavailable" }
+        val key = secretStore.read(secretStore.providerKeyName(provider.id)) ?: throw ConfigurationException("Provider key is unavailable")
+        return ModelCallRequest(model, provider.toDomain(true), key,
+            SystemPrompts.compose(effective.systemPrompt, effective.nickname, java.util.TimeZone.getDefault().id,
+                conversation.enableKnowledge), effective.thinkingEffort, emptyList(), emptyList(), UUID.randomUUID().toString())
+    }
+
+    private fun contextToolOptions(conversation: Conversation) = ToolOptions(
+        conversation.enableSearch, conversation.enableRead, conversation.enableKnowledge,
+        conversation.urlReaderBackend ?: UrlReaderBackend.BUILT_IN,
+        conversation.enableInfiniteCloud, conversation.cloudServerId, conversation.id,
+        knowledgeScope = conversation.knowledgeScope,
+    )
+
+    override suspend fun contextPreview(id: String, request: SendMessageRequest?): ContextPreview = withContextOperation(id) {
+        val conversation = requireNotNull(dao.conversation(id)).toDomain()
+        val base = baseContextCall(id)
+        val stored = dao.messages(id).map(MessageEntity::toDomain)
+        var attachments = emptyList<MessageAttachment>()
+        var session: ToolSession? = null
+        try {
+            val draft = request?.takeIf { it.content.isNotBlank() || it.attachments.isNotEmpty() }?.let {
+                var metadata = UserMessageMetadata()
+                knowledgeStore?.let { store ->
+                    val found = resolveKnowledgeSnippets(it.knowledgeChunkIds, it.enableKnowledge, it.content,
+                        { ids -> store.snippets(ids, conversation.knowledgeScope) },
+                        { query -> store.search(query, AUTOMATIC_KNOWLEDGE_CHUNK_LIMIT, conversation.knowledgeScope) })
+                    metadata = metadata.copy(knowledgeChunkIds = buildInjectedKnowledgeContext(found.finalSnippets).citations.map { citation -> citation.chunkId })
+                }
+                val message = ChatMessage(conversationId = id, role = "user", content = it.content, metadata = json.encodeToString(metadata))
+                attachments = attachmentStore?.prepare(message.id, it.attachments).orEmpty()
+                message
+            }
+            val raw = stored + listOfNotNull(draft)
+            val summary = readContextSummary(id)
+            val (canonical, _) = canonicalContext(ContextBuilder.select(raw, conversation.contextPolicy, summary),
+                draft?.let { mapOf(it.id to attachments) }.orEmpty(), conversation.knowledgeScope)
+            val options = contextToolOptions(conversation).copy(urlReaderBackend = effectiveSettings(conversation).urlReaderBackend,
+                allowCloudTaskCreation = explicitlyRequestsCloudTask(request?.content.orEmpty()))
+            session = engine.openSession(options, conversation.maxToolCalls)
+            previewOf(raw, canonical, conversation.contextPolicy, base.model, base.systemPrompt, session?.definitions.orEmpty(), summary)
+        } finally { session?.close(); attachmentStore?.deleteFiles(attachments) }
+    }
+
+    private suspend fun compressedSummary(
+        id: String, raw: List<ChatMessage>, canonical: Map<String, CanonicalMessage>, policy: ContextPolicy,
+        base: ModelCallRequest, tools: List<ToolDefinition>, previous: ContextSummary?, citations: List<KnowledgeCitation>,
+    ): ContextSummary = ContextCompressor.compress(id, raw, canonical, policy, base.model, base.systemPrompt, tools, previous, citations) { messages, maxOutput ->
+        val body = StringBuilder()
+        var usage = Usage()
+        gateway.stream(base.copy(systemPrompt = ContextCompressor.PROMPT, messages = messages, tools = emptyList(),
+            thinkingEffort = "off", maxOutputTokens = maxOutput, requestId = UUID.randomUUID().toString())).collect { event ->
+            when (event) {
+                is ModelStreamEvent.TextDelta -> {
+                    require(body.length.toLong() + event.content.length <= 65_536) { "Summary exceeds the supported length" }
+                    body.append(event.content)
+                }
+                is ModelStreamEvent.TokenUsage -> usage += event.usage
+                else -> Unit
+            }
+        }
+        SummaryResponse(body.toString(), usage)
+    }
+
+    override suspend fun compactContext(id: String): ContextSummary = withContextOperation(id) {
+        requireContextCapacity(id)
+        val conversation = requireNotNull(dao.conversation(id)).toDomain()
+        val raw = dao.messages(id).map(MessageEntity::toDomain)
+        val (canonical, citations) = canonicalContext(raw, scope = conversation.knowledgeScope)
+        val session = engine.openSession(contextToolOptions(conversation).copy(
+            urlReaderBackend = effectiveSettings(conversation).urlReaderBackend), conversation.maxToolCalls)
+        try {
+            compressedSummary(id, raw, canonical, conversation.contextPolicy, baseContextCall(id),
+                session?.definitions.orEmpty(), readContextSummary(id), citations)
+        } finally { session?.close() }
+    }
+
+    override suspend fun saveContextSummary(summary: ContextSummary) = withContextOperation(summary.conversationId) {
+        require(summary.body.isNotBlank()) { "Context summary cannot be empty" }
+        requireContextCapacity(summary.conversationId)
+        val raw = dao.messages(summary.conversationId).map(MessageEntity::toDomain)
+        require(ContextBuilder.validSummary(summary, raw) != null) { "Conversation changed; generate the summary again" }
+        val conversation = requireNotNull(dao.conversation(summary.conversationId)).toDomain()
+        val (canonical, _) = canonicalContext(ContextBuilder.select(raw,
+            conversation.contextPolicy.copy(mode = ContextMode.SUMMARY), summary), scope = conversation.knowledgeScope)
+        val base = baseContextCall(summary.conversationId)
+        val policy = conversation.contextPolicy.copy(mode = ContextMode.SUMMARY)
+        val session = engine.openSession(contextToolOptions(conversation).copy(
+            urlReaderBackend = effectiveSettings(conversation).urlReaderBackend), conversation.maxToolCalls)
+        try {
+            val preview = previewOf(raw, canonical, policy, base.model, base.systemPrompt,
+                session?.definitions.orEmpty(), summary)
+            require(preview.estimatedInputTokens <= requireNotNull(preview.inputBudget)) { "Edited summary exceeds the input budget" }
+            val edited = summary.copy(citations = summary.citations.filter { summary.body.contains("[[KB:${it.chunkId}]]") }, updatedAt = System.currentTimeMillis())
+            dao.saveContextConfiguration(summary.conversationId, edited.toEntity(), json.encodeToString(policy))
+            Unit
+        } finally {
+            withContext(NonCancellable) { session?.close() }
+        }
+    }
+
+    override suspend fun resetContext(id: String) = withContextOperation(id) {
+        dao.saveContextConfiguration(id, null, json.encodeToString(ContextPolicy()))
+        Unit
+    }
+
+    private suspend fun describeImages(attachments: List<MessageAttachment>): List<String> {
         val store = requireNotNull(attachmentStore) { "Attachment storage is unavailable" }
-        val images = store.imageParts(messageId)
+        val images = store.imageParts(attachments)
         if (images.isEmpty()) return emptyList()
         val fallbackId = globalSettings().visionFallbackModelId
             ?: throw ConfigurationException("Configure a tested vision fallback model before sending images")
@@ -2356,11 +2682,11 @@ class ChatRepository(
         )
     }
 
-    private suspend fun knowledgeContext(message: ChatMessage): InjectedKnowledgeContext {
+    private suspend fun knowledgeContext(message: ChatMessage, scope: KnowledgeScope = KnowledgeScope()): InjectedKnowledgeContext {
         if (message.metadata.isBlank() || knowledgeStore == null) return InjectedKnowledgeContext()
         val ids = runCatching { json.decodeFromString<UserMessageMetadata>(message.metadata).knowledgeChunkIds }
             .getOrDefault(emptyList())
-        return buildInjectedKnowledgeContext(knowledgeStore.snippets(ids))
+        return buildInjectedKnowledgeContext(knowledgeStore.snippets(ids, scope))
     }
 
     private suspend fun requireReadyCloudServer(id: String?): CloudServerEntity {

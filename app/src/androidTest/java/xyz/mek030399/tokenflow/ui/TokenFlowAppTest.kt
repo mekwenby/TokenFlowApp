@@ -41,9 +41,12 @@ import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.SemanticsNodeInteraction
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.assertHasClickAction
@@ -75,6 +78,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.test.espresso.Espresso.pressBack
 import androidx.test.platform.app.InstrumentationRegistry
+import xyz.mek030399.tokenflow.data.ContextPolicy
+import xyz.mek030399.tokenflow.data.ContextPreview
+import xyz.mek030399.tokenflow.data.ContextSummary
+import xyz.mek030399.tokenflow.data.ComposerDraft
+import xyz.mek030399.tokenflow.data.ShareDraftStore
+import xyz.mek030399.tokenflow.data.MessageSearchPage
+import xyz.mek030399.tokenflow.data.MessageSearchHit
+import xyz.mek030399.tokenflow.data.MessageSearchCursor
+import androidx.lifecycle.ViewModelStore
+import kotlinx.coroutines.runBlocking
 import xyz.mek030399.tokenflow.data.ChatDataSource
 import xyz.mek030399.tokenflow.data.ChatDisplayPreferences
 import xyz.mek030399.tokenflow.data.ChatEvent
@@ -99,6 +112,8 @@ import xyz.mek030399.tokenflow.data.KnowledgeCitation
 import xyz.mek030399.tokenflow.data.KnowledgeDocument
 import xyz.mek030399.tokenflow.data.KnowledgeDocumentPreview
 import xyz.mek030399.tokenflow.data.KnowledgeSnippet
+import xyz.mek030399.tokenflow.data.KnowledgeScope
+import xyz.mek030399.tokenflow.data.KnowledgeScopeMode
 import xyz.mek030399.tokenflow.data.GlobalChatSettings
 import xyz.mek030399.tokenflow.data.ModelProfile
 import xyz.mek030399.tokenflow.data.ImportedMarkdownNote
@@ -126,6 +141,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.encodeToString
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -138,6 +154,311 @@ import kotlin.math.roundToInt
 class TokenFlowAppTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun editingAQuestionGeneratesANewBranchAndPreservesOriginalHistoryAndDraft() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val source = Conversation(id = "edit-source", title = "Original conversation", model = "model-1")
+        val original = listOf(
+            ChatMessage(id = "edit-prior-user", conversationId = source.id, role = "user", content = "Prior question", createdAt = 1),
+            ChatMessage(id = "edit-prior-answer", conversationId = source.id, role = "assistant", content = "Prior answer", createdAt = 2),
+            ChatMessage(id = "edit-target", conversationId = source.id, role = "user", content = "Original question", createdAt = 3),
+            ChatMessage(id = "edit-old-answer", conversationId = source.id, role = "assistant", content = "Original answer", createdAt = 4),
+        )
+        val fake = UiFakeDataSource(withModel = true).apply { conversations += source; seedMessages(source.id, original) }
+        var editedTarget: String? = null
+        var generatedQuestion: String? = null
+        var generationRequest: SendMessageRequest? = null
+        val repository = object : ChatDataSource by fake {
+            override suspend fun prepareEditedQuestion(messageId: String, newContent: String): ConversationDetail {
+                editedTarget = messageId
+                val branch = source.copy(id = "edited-branch", title = newContent,
+                    branchedFromConversationId = source.id, branchedFromMessageId = messageId)
+                val prefix = original.takeWhile { it.id != messageId } + original.single { it.id == messageId }
+                val copied = prefix.map { message -> message.copy(id = "branch-${message.id}", conversationId = branch.id,
+                    content = if (message.id == messageId) newContent else message.content) }
+                fake.conversations += branch
+                fake.seedMessages(branch.id, copied)
+                return ConversationDetail(branch, copied)
+            }
+
+            override fun regenerateEditedQuestion(id: String, request: SendMessageRequest): Flow<ChatEvent> = flow {
+                generationRequest = request
+                val detail = fake.conversation(id)
+                val user = detail.messages.last().copy(requestId = request.requestId)
+                generatedQuestion = user.content
+                val assistant = ChatMessage(id = "edited-reply", conversationId = id, requestId = request.requestId,
+                    role = "assistant", status = "generating")
+                emit(ChatEvent.UserMessage(user))
+                emit(ChatEvent.AssistantMessage(assistant))
+                emit(ChatEvent.Delta("Reply to edited question"))
+                fake.seedMessages(id, detail.messages.dropLast(1) + user + assistant.copy(
+                    content = "Reply to edited question", status = "completed"))
+                emit(ChatEvent.Done(Usage(10, 5), false))
+            }
+        }
+        val viewModel = AppViewModel(repository)
+        val owner = ViewModelStore().apply { put("editing", viewModel) }
+        try {
+            composeRule.setContent { TokenFlowApp(viewModel) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.phase == AppPhase.READY }
+            composeRule.runOnIdle { viewModel.openConversation(source.id) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages.size == original.size }
+            composeRule.runOnIdle { viewModel.setComposerText("Unsent original draft") }
+            composeRule.onNodeWithTag("edit_question_edit-target").performScrollTo().performClick()
+            composeRule.onNodeWithTag("question_edit_input").assert(
+                SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString("Original question")))
+            composeRule.onNodeWithTag("question_edit_input").performTextClearance()
+            composeRule.onNodeWithTag("question_edit_input").performTextInput("Edited question")
+            composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.edit_question_submit)).performClick()
+            composeRule.waitUntil(5_000) { viewModel.state.value.activeConversationId == "edited-branch" &&
+                viewModel.state.value.activeMessages.any { it.content == "Reply to edited question" } &&
+                viewModel.state.value.activeGeneration?.active == false }
+            assertEquals("edit-target", editedTarget)
+            assertEquals("Edited question", generatedQuestion)
+            assertNotNull(generationRequest?.requestId)
+            assertEquals(1, viewModel.state.value.activeMessages.count { it.role == "user" && it.content == "Edited question" })
+            assertFalse(viewModel.state.value.activeMessages.any { it.content == "Original answer" })
+            assertEquals(original, runBlocking { fake.conversation(source.id) }.messages)
+            assertEquals("Unsent original draft", viewModel.state.value.drafts[source.id]?.text)
+            composeRule.runOnIdle { viewModel.openConversation(source.id) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.activeConversationId == source.id &&
+                viewModel.state.value.activeMessages.map { it.id } == original.map { it.id } }
+            composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).assertTextEquals("Unsent original draft")
+        } finally { owner.clear() }
+    }
+
+    @Test
+    fun cancellingQuestionEditingKeepsOriginalMessageAndUnsentDraft() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val source = Conversation(id = "cancel-edit", title = "Cancel edit", model = "model-1")
+        val question = ChatMessage(id = "cancel-edit-question", conversationId = source.id, role = "user", content = "Original question")
+        val fake = UiFakeDataSource(withModel = true).apply { conversations += source; seedMessages(source.id, listOf(question)) }
+        var editingCalls = 0
+        val repository = object : ChatDataSource by fake {
+            override suspend fun prepareEditedQuestion(messageId: String, newContent: String): ConversationDetail {
+                editingCalls++
+                error("Cancelled editing must not reach the repository")
+            }
+        }
+        val viewModel = AppViewModel(repository)
+        val owner = ViewModelStore().apply { put("editing", viewModel) }
+        try {
+            composeRule.setContent { TokenFlowApp(viewModel) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.phase == AppPhase.READY }
+            composeRule.runOnIdle { viewModel.openConversation(source.id) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages.size == 1 }
+            composeRule.runOnIdle { viewModel.setComposerText("Keep this draft") }
+            composeRule.onNodeWithTag("edit_question_${question.id}").performScrollTo().performClick()
+            composeRule.onNodeWithTag("question_edit_input").performTextClearance()
+            composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.edit_question_submit)).assertIsNotEnabled()
+            composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.cancel)).performClick()
+            composeRule.waitUntil(5_000) { viewModel.state.value.editingQuestion == null }
+            assertEquals(0, editingCalls)
+            assertEquals(listOf(question), viewModel.state.value.activeMessages)
+            assertEquals(1, fake.conversations.size)
+            composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).assertTextEquals("Keep this draft")
+        } finally { owner.clear() }
+    }
+
+    @Test
+    fun selectedKnowledgeRangeIsSavedToOnlyTheCurrentConversationAndRestoredOnReopen() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val source = Conversation(id = "scope-current", title = "Scoped chat", model = "model-1")
+        val other = Conversation(id = "scope-other", title = "Other chat", model = "model-1")
+        val selected = KnowledgeScope(KnowledgeScopeMode.SELECTED, listOf("scope-document-a"))
+        val fake = UiFakeDataSource(withModel = true).apply {
+            conversations += listOf(source, other)
+            knowledgeDocuments += listOf(
+                KnowledgeDocument("scope-document-a", "Selected reference", "text/plain", "unused-a", 10),
+                KnowledgeDocument("scope-document-b", "Other reference", "text/plain", "unused-b", 10),
+                KnowledgeDocument("scope-document-error", "Unavailable reference", "text/plain", "unused-error", 10, status = "error"),
+            )
+        }
+        val viewModel = AppViewModel(fake)
+        val owner = ViewModelStore().apply { put("scope", viewModel) }
+        try {
+            composeRule.setContent { TokenFlowApp(viewModel) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.phase == AppPhase.READY }
+            composeRule.runOnIdle { viewModel.openConversation(source.id) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.activeConversationId == source.id }
+            composeRule.onNodeWithTag(UiTestTags.CHAT_MORE_ACTIONS).performClick()
+            composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.knowledge_scope_chat)).performClick()
+            composeRule.onNodeWithTag("knowledge_scope_selected").performClick()
+            composeRule.onNodeWithTag("knowledge_scope_document_scope-document-a").performClick()
+            composeRule.onAllNodesWithTag("knowledge_scope_document_scope-document-error").assertCountEquals(0)
+            composeRule.onNodeWithTag("knowledge_scope_save").performClick()
+            composeRule.waitUntil(5_000) { !viewModel.state.value.knowledgeScopeOpen && viewModel.state.value.config.knowledgeScope == selected }
+            assertEquals(selected, fake.conversations.single { it.id == source.id }.knowledgeScope)
+            assertEquals(KnowledgeScope(), fake.conversations.single { it.id == other.id }.knowledgeScope)
+            composeRule.runOnIdle { viewModel.openConversation(other.id) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.config.knowledgeScope == KnowledgeScope() }
+            composeRule.runOnIdle { viewModel.openConversation(source.id); viewModel.openKnowledgeScope() }
+            composeRule.onNodeWithTag("knowledge_scope_selected").assertIsSelected()
+            composeRule.onNodeWithTag("knowledge_scope_document_scope-document-a").assertIsOn()
+            composeRule.onNodeWithTag("knowledge_scope_document_scope-document-b").assertIsOff()
+        } finally { owner.clear() }
+    }
+
+    @Test
+    fun emptyKnowledgeRangeRemainsExplicitWhenTheDraftCreatesANewConversation() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val empty = KnowledgeScope(KnowledgeScopeMode.SELECTED)
+        val fake = UiFakeDataSource(withModel = true).apply {
+            knowledgeDocuments += KnowledgeDocument("empty-scope-document", "Optional reference", "text/plain", "unused", 10)
+        }
+        val viewModel = AppViewModel(fake)
+        val owner = ViewModelStore().apply { put("scope", viewModel) }
+        try {
+            composeRule.setContent { TokenFlowApp(viewModel) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.phase == AppPhase.READY }
+            composeRule.runOnIdle { viewModel.openKnowledgeScope() }
+            composeRule.onNodeWithTag("knowledge_scope_selected").performClick()
+            composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.knowledge_scope_empty_notice)).assertIsDisplayed()
+            composeRule.onNodeWithTag("knowledge_scope_save").performClick()
+            composeRule.waitUntil(5_000) { !viewModel.state.value.knowledgeScopeOpen && viewModel.state.value.config.knowledgeScope == empty }
+            composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).performTextInput("Question without reference documents")
+            composeRule.onNodeWithTag(UiTestTags.MESSAGE_ACTION).performClick()
+            composeRule.waitUntil(5_000) { fake.sentRequest != null && viewModel.state.value.activeMessages.any { it.role == "assistant" } }
+            assertEquals(empty, fake.sentRequest?.knowledgeScope)
+            assertEquals(empty, fake.conversations.single().knowledgeScope)
+        } finally { owner.clear() }
+    }
+
+    @Test
+    fun globalSearchOpensTheMatchingArchivedMessage() {
+        val chat = Conversation(id = "search-chat", title = "Archived search", model = "model-1", archivedAt = 1)
+        val fake = UiFakeDataSource(withModel = true).apply {
+            conversations += chat
+            seedMessages(chat.id, listOf(ChatMessage(id = "search-message", conversationId = chat.id, role = "user", content = "needle in history")))
+        }
+        val repository = object : ChatDataSource by fake {
+            override suspend fun searchMessages(query: String, cursor: MessageSearchCursor?) = MessageSearchPage(
+                if (query == "needle") listOf(MessageSearchHit("search-message", chat.id, chat.title, 1, "user", 1, "needle in history")) else emptyList())
+        }
+        val viewModel = AppViewModel(repository)
+        val owner = ViewModelStore().apply { put("feature", viewModel) }
+        try {
+            composeRule.setContent { TokenFlowApp(viewModel) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.phase == AppPhase.READY }
+            composeRule.runOnIdle { viewModel.openScreen(AppScreen.MESSAGE_SEARCH) }
+            composeRule.onNodeWithTag("message_search_input").performTextInput("needle")
+            composeRule.waitUntil(5_000) { viewModel.state.value.messageSearchPage.items.isNotEmpty() }
+            composeRule.onNodeWithTag("search_hit_search-message").performClick()
+            composeRule.onNodeWithTag(UiTestTags.messageBody("search-message")).assertIsDisplayed()
+            assertEquals(chat.id, viewModel.state.value.activeConversationId)
+        } finally { owner.clear() }
+    }
+
+    @Test
+    fun shareReceiptIsConsumedOnceAndAppendsToTheSelectedDraftWithoutSending() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val store = ShareDraftStore(context)
+        val previous = runBlocking { store.load() }
+        val chat = Conversation(id = "share-chat", title = "Existing draft", model = "model-1")
+        val fake = UiFakeDataSource(withModel = true).apply { conversations += chat }
+        runBlocking { store.save(xyz.mek030399.tokenflow.data.SavedShareState(mapOf(chat.id to ComposerDraft("existing text")))) }
+        val viewModel = AppViewModel(fake, shareDraftStore = store)
+        val owner = ViewModelStore().apply { put("feature", viewModel) }
+        try {
+            composeRule.setContent { TokenFlowApp(viewModel) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.phase == AppPhase.READY }
+            val intent = android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain")
+                .putExtra(android.content.Intent.EXTRA_TEXT, "shared text")
+            composeRule.runOnIdle { viewModel.receiveShare(intent, "receipt-ui"); viewModel.receiveShare(intent, "receipt-ui") }
+            composeRule.waitUntil(5_000) { viewModel.state.value.incomingShare != null && !viewModel.state.value.shareBusy }
+            composeRule.onNodeWithTag("share_content_input").assert(
+                SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString("shared text")))
+            composeRule.onNodeWithTag("share_target_${chat.id}").performClick()
+            composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.share_import_draft)).performClick()
+            composeRule.waitUntil(5_000) { viewModel.state.value.incomingShare == null }
+            composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).assertTextEquals("existing text\n\nshared text")
+            assertEquals(null, fake.sentRequest)
+        } finally { owner.clear(); runBlocking { store.save(previous) } }
+    }
+
+    @Test
+    fun contextSummaryPreviewIsEditableAndRequiresApply() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val chat = Conversation(id = "context-chat", title = "Context", model = "model-1")
+        val fake = UiFakeDataSource(withModel = true).apply { conversations += chat }
+        var saved: ContextSummary? = null
+        val candidate = ContextSummary(chat.id, "Generated reference notes", sourceMessageIds = listOf("old"),
+            sourceDigest = "test", modelId = "model-1", remoteModelId = "test")
+        val repository = object : ChatDataSource by fake {
+            override suspend fun contextPreview(id: String, request: SendMessageRequest?) =
+                ContextPreview(ContextPolicy(), 200, 32768, 4096, emptyList(), "System instructions", saved)
+            override suspend fun compactContext(id: String) = candidate
+            override suspend fun saveContextSummary(summary: ContextSummary) { saved = summary }
+        }
+        val viewModel = AppViewModel(repository)
+        val owner = ViewModelStore().apply { put("feature", viewModel) }
+        try {
+            composeRule.setContent { TokenFlowApp(viewModel) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.phase == AppPhase.READY }
+            composeRule.runOnIdle { viewModel.openConversation(chat.id); viewModel.openContextManager() }
+            composeRule.waitUntil(5_000) { viewModel.state.value.contextPreview != null && !viewModel.state.value.contextBusy }
+            composeRule.onNodeWithTag("context_generate_summary").performScrollTo().performClick()
+            composeRule.waitUntil(5_000) { viewModel.state.value.contextCandidate != null && !viewModel.state.value.contextBusy }
+            assertEquals(null, saved)
+            composeRule.onNodeWithTag("context_summary_editor").performScrollTo().performTextClearance()
+            composeRule.onNodeWithTag("context_summary_editor").performTextInput("Edited reference notes")
+            composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.context_apply_summary)).performScrollTo().performClick()
+            composeRule.waitUntil(5_000) { saved != null }
+            assertEquals("Edited reference notes", saved?.body)
+        } finally { owner.clear() }
+    }
+
+    @Test
+    fun shareArrivingDuringImportRemainsInANewPreview() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val store = ShareDraftStore(context)
+        val previous = runBlocking { store.load() }
+        runBlocking { store.save(xyz.mek030399.tokenflow.data.SavedShareState()) }
+        val chat = Conversation(id = "share-race", title = "Share race", model = "model-1")
+        val fake = UiFakeDataSource(withModel = true).apply { conversations += chat }
+        var gateEnabled = false
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val repository = object : ChatDataSource by fake {
+            override suspend fun conversation(id: String): ConversationDetail {
+                if (gateEnabled) { gateEnabled = false; started.complete(Unit); release.await() }
+                return fake.conversation(id)
+            }
+            override suspend fun discardPendingAttachments(attachments: List<PendingAttachment>) { store.discard(attachments) }
+        }
+        val viewModel = AppViewModel(repository, shareDraftStore = store)
+        val owner = ViewModelStore().apply { put("feature", viewModel) }
+        val source = File(context.cacheDir, "camera_captures/${java.util.UUID.randomUUID()}-race.txt").apply {
+            parentFile?.mkdirs(); writeText("second attachment")
+        }
+        val root = File(context.filesDir, ShareDraftStore.DIRECTORY_NAME)
+        val existingFiles = root.listFiles().orEmpty().map { it.name }.toSet()
+        try {
+            composeRule.setContent { TokenFlowApp(viewModel) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.phase == AppPhase.READY }
+            composeRule.runOnIdle { viewModel.receiveShare(android.content.Intent(android.content.Intent.ACTION_SEND)
+                .setType("text/plain").putExtra(android.content.Intent.EXTRA_TEXT, "first"), "race-first") }
+            composeRule.waitUntil(5_000) { viewModel.state.value.incomingShare?.text == "first" && !viewModel.state.value.shareBusy }
+            composeRule.runOnIdle { gateEnabled = true; viewModel.applyShare(chat.id, null, "") }
+            composeRule.waitUntil(5_000) { started.isCompleted }
+            val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", source)
+            composeRule.runOnIdle { viewModel.receiveShare(android.content.Intent(android.content.Intent.ACTION_SEND)
+                .setType("text/plain").putExtra(android.content.Intent.EXTRA_TEXT, "second")
+                .putExtra(android.content.Intent.EXTRA_STREAM, uri), "race-second") }
+            composeRule.waitUntil(5_000) { root.listFiles().orEmpty().any { it.name !in existingFiles && it.extension == "txt" } }
+            composeRule.runOnIdle { release.complete(Unit) }
+            composeRule.waitUntil(5_000) { !viewModel.state.value.shareBusy && viewModel.state.value.incomingShare?.text == "second" }
+            assertEquals("first", viewModel.state.value.composerText)
+            assertEquals(1, viewModel.state.value.incomingShare?.files?.size)
+            assertEquals(null, fake.sentRequest)
+            composeRule.runOnIdle { viewModel.cancelShare() }
+            composeRule.waitUntil(5_000) { root.listFiles().orEmpty().none { it.name !in existingFiles && it.extension == "txt" } }
+        } finally {
+            release.complete(Unit); owner.clear(); source.delete()
+            runBlocking { store.save(previous) }
+        }
+    }
 
     @Test
     fun infiniteCloudServerCardExpandsWithoutRiskNotice() {
@@ -3332,14 +3653,16 @@ private class UiFakeDataSource(
     override suspend fun conversation(id: String) = ConversationDetail(conversations.first { it.id == id }, messages[id].orEmpty())
 
     override suspend fun createConversation(request: ConversationWriteRequest): Conversation {
-        val conversation = Conversation(id = "conversation-created", model = request.model ?: model.id)
+        val conversation = Conversation(id = "conversation-created", model = request.model ?: model.id,
+            knowledgeScope = request.knowledgeScope ?: KnowledgeScope())
         conversations += conversation
         return conversation
     }
 
     override suspend fun updateConversation(id: String, request: ConversationWriteRequest): Conversation {
         val index = conversations.indexOfFirst { it.id == id }
-        val updated = conversations[index].copy(title = request.title ?: conversations[index].title)
+        val updated = conversations[index].copy(title = request.title ?: conversations[index].title,
+            knowledgeScope = request.knowledgeScope ?: conversations[index].knowledgeScope)
         conversations[index] = updated
         return updated
     }

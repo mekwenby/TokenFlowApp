@@ -881,7 +881,7 @@ private fun CloudSection.displayName() = stringResource(when (this) {
     CloudSection.SERVERS -> xyz.mek030399.tokenflow.R.string.cloud_servers_tab
     CloudSection.TASKS -> xyz.mek030399.tokenflow.R.string.cloud_tasks_tab
     CloudSection.FILES -> xyz.mek030399.tokenflow.R.string.cloud_files_tab
-    CloudSection.MCP -> xyz.mek030399.tokenflow.R.string.cloud_mcp_server
+    CloudSection.MCP -> xyz.mek030399.tokenflow.R.string.cloud_mcp_tab
 })
 
 @Composable

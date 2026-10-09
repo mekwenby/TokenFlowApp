@@ -3,6 +3,14 @@ package xyz.mek030399.tokenflow.ui
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.activity.compose.LocalActivityResultRegistryOwner
+import androidx.activity.result.ActivityResultRegistryOwner
+import androidx.compose.ui.platform.LocalView
+import android.content.ContextWrapper
+import android.os.Build
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -21,6 +29,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -132,6 +141,7 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -366,23 +376,28 @@ fun TokenFlowApp(
     val context = LocalContext.current
     val displayPreferences = remember(context.applicationContext) { ChatDisplayPreferences(context.applicationContext) }
     var appTheme by remember { mutableStateOf(displayPreferences.readTheme()) }
-    TokenFlowTheme(appTheme) {
-        Surface(
-            modifier = Modifier.fillMaxSize().testTag(UiTestTags.APP_BACKGROUND),
-            color = MaterialTheme.colorScheme.background,
-        ) {
-            TokenFlowAppContent(
-                viewModel = viewModel,
-                displayPreferences = displayPreferences,
-                appTheme = appTheme,
-                notificationAutoDismissMillis = notificationAutoDismissMillis,
-                onThemeSelected = { theme ->
-                    displayPreferences.writeTheme(theme)
-                    appTheme = theme
-                },
-            )
+    val registryOwner = LocalActivityResultRegistryOwner.current ?: activityResultOwner(LocalView.current.context)
+    val appContent: @Composable () -> Unit = {
+        TokenFlowTheme(appTheme) {
+            Surface(
+                modifier = Modifier.fillMaxSize().testTag(UiTestTags.APP_BACKGROUND),
+                color = MaterialTheme.colorScheme.background,
+            ) {
+                TokenFlowAppContent(
+                    viewModel = viewModel,
+                    displayPreferences = displayPreferences,
+                    appTheme = appTheme,
+                    notificationAutoDismissMillis = notificationAutoDismissMillis,
+                    onThemeSelected = { theme ->
+                        displayPreferences.writeTheme(theme)
+                        appTheme = theme
+                    },
+                )
+            }
         }
     }
+    if (registryOwner != null) CompositionLocalProvider(LocalActivityResultRegistryOwner provides registryOwner) { appContent() }
+    else appContent()
 }
 
 @Composable
@@ -397,6 +412,18 @@ private fun TokenFlowAppContent(
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    val notificationPreferences = remember(context.applicationContext) {
+        context.getSharedPreferences("tokenflow_notifications", android.content.Context.MODE_PRIVATE)
+    }
+    LaunchedEffect(state.generations.values.any { it.active }) {
+        if (viewModel.backgroundGenerationEnabled && state.generations.values.any { it.active } && Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+            !notificationPreferences.getBoolean("permission_asked", false)) {
+            notificationPreferences.edit().putBoolean("permission_asked", true).apply()
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     val scope = rememberCoroutineScope()
     val avatarStore = remember(context.applicationContext) { LocalAvatarStore(context.applicationContext) }
     var globalAvatars by remember { mutableStateOf(avatarStore.read()) }
@@ -583,7 +610,7 @@ private fun TokenFlowAppContent(
                     onExport = { showExportPassword = true },
                     onImport = selectImportFile,
                 ) }
-                AppScreen.BOOKMARKS, AppScreen.NOTES, AppScreen.AGENTS, AppScreen.KNOWLEDGE, AppScreen.INFINITE_CLOUD, AppScreen.ABOUT ->
+                AppScreen.MESSAGE_SEARCH, AppScreen.BOOKMARKS, AppScreen.NOTES, AppScreen.AGENTS, AppScreen.KNOWLEDGE, AppScreen.INFINITE_CLOUD, AppScreen.ABOUT ->
                     WorkspaceScreen(state, viewModel)
             }
         }
@@ -599,6 +626,8 @@ private fun TokenFlowAppContent(
             snackbar = { OutlinedTopNotification(it) },
         )
     }
+
+    ConversationFeatureDialogs(state, viewModel)
 
     if (showExportPassword) PasswordDialog(
         title = stringResource(R.string.export_configuration),
@@ -967,6 +996,7 @@ private fun ProviderEditor(state: AppUiState, viewModel: AppViewModel, modifier:
 private fun SelectedModelEditor(model: ModelProfile, visionTesting: Boolean, canTestVision: Boolean, viewModel: AppViewModel) {
     var alias by remember(model.id, model.displayName) { mutableStateOf(model.displayName) }
     var maxTokens by remember(model.id, model.maxOutputTokens) { mutableStateOf(model.maxOutputTokens.toString()) }
+    var capacity by remember(model.id) { mutableStateOf(model.contextWindowTokens?.toString().orEmpty()) }
     Surface(shape = RoundedCornerShape(8.dp), tonalElevation = 1.dp) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1015,6 +1045,14 @@ private fun SelectedModelEditor(model: ModelProfile, visionTesting: Boolean, can
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth(),
             )
+            OutlinedTextField(capacity, { value ->
+                capacity = value.filter(Char::isDigit).take(10)
+                viewModel.updateModelContextCapacity(model.id, if (capacity.isBlank()) null else capacity.toIntOrNull() ?: -1)
+            }, label = { Text(stringResource(R.string.context_capacity)) },
+                supportingText = { Text(stringResource(if (capacity.isNotBlank() && (capacity.toIntOrNull() ?: 0) <= model.maxOutputTokens)
+                    R.string.context_capacity_invalid else R.string.context_capacity_hint)) },
+                isError = capacity.isNotBlank() && (capacity.toIntOrNull() ?: 0) <= model.maxOutputTokens,
+                singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
             OutlinedButton(
                 onClick = { viewModel.testModelVision(model.id) },
                 enabled = !visionTesting && canTestVision,
@@ -1452,18 +1490,25 @@ private fun ConversationSidebar(
         state.conversationSearch.isBlank() || displayTitle(it, stringResource(R.string.new_chat)).contains(state.conversationSearch, true)
     }
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             AppLogo(34.dp)
             Text(stringResource(R.string.app_name), Modifier.padding(start = 10.dp).weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            IconButton(onClick = onNewConversation) { Icon(Icons.Outlined.Add, stringResource(R.string.new_chat)) }
+            FilledTonalIconButton(onClick = onNewConversation) { Icon(Icons.Outlined.Add, stringResource(R.string.new_chat), Modifier.size(22.dp)) }
         }
         OutlinedTextField(
             value = state.conversationSearch,
             onValueChange = viewModel::setConversationSearch,
-            placeholder = { Text(stringResource(R.string.search_conversations)) },
-            leadingIcon = { Icon(Icons.Outlined.Search, null) },
+            placeholder = { Text(stringResource(R.string.search_conversations), style = MaterialTheme.typography.bodyMedium) },
+            leadingIcon = { Icon(Icons.Outlined.Search, null, Modifier.size(20.dp)) },
             singleLine = true,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            textStyle = MaterialTheme.typography.bodyMedium,
+            shape = RoundedCornerShape(10.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+            ),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
         )
         if (selected.isNotEmpty()) Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(stringResource(R.string.selected_conversations, selected.size), Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
@@ -1478,19 +1523,20 @@ private fun ConversationSidebar(
             LazyColumn(
                 state = conversationsListState,
                 modifier = Modifier.weight(1f).testTag(UiTestTags.SIDEBAR_CONVERSATIONS),
-                contentPadding = PaddingValues(vertical = 8.dp),
+                contentPadding = PaddingValues(top = 8.dp, bottom = 12.dp),
             ) {
                 items(filtered, key = Conversation::id) { conversation ->
                     val isSelected = conversation.id in selected
+                    val isActive = state.activeConversationId == conversation.id
                     val generating = state.generations[conversation.id]?.active == true
                     Surface(
                         color = when {
                             isSelected -> MaterialTheme.colorScheme.secondaryContainer
-                            state.activeConversationId == conversation.id -> MaterialTheme.colorScheme.surfaceVariant
+                            isActive -> MaterialTheme.colorScheme.primaryContainer
                             else -> MaterialTheme.colorScheme.surface
                         },
-                        shape = RoundedCornerShape(6.dp),
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp).fillMaxWidth()
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 3.dp).fillMaxWidth()
                             .combinedClickable(
                                 onClick = {
                                     if (selected.isNotEmpty()) selected = if (isSelected) selected - conversation.id else selected + conversation.id
@@ -1499,13 +1545,19 @@ private fun ConversationSidebar(
                                 onLongClick = { selected = if (isSelected) selected - conversation.id else selected + conversation.id },
                             ).testTag(UiTestTags.conversationItem(conversation.id)),
                     ) {
-                        Row(Modifier.padding(horizontal = 10.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
+                        Row(Modifier.heightIn(min = 52.dp).padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                 Text(
                                     displayTitle(conversation, stringResource(R.string.new_chat)),
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                     style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = if (isActive || isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                                    color = when {
+                                        isSelected -> MaterialTheme.colorScheme.onSecondaryContainer
+                                        isActive -> MaterialTheme.colorScheme.onPrimaryContainer
+                                        else -> MaterialTheme.colorScheme.onSurface
+                                    },
                                 )
                                 val effectiveModelId = if (conversation.modelMode == SettingMode.INHERIT) {
                                     state.globalSettings.defaultModelId
@@ -1514,7 +1566,9 @@ private fun ConversationSidebar(
                                     Text(
                                         it.displayName,
                                         style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Normal,
                                         maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
@@ -1526,17 +1580,36 @@ private fun ConversationSidebar(
                 }
                 val archived = state.conversations.filter { it.archivedAt != null }
                 if (archived.isNotEmpty()) {
-                    item { Text(stringResource(R.string.archived), Modifier.padding(horizontal = 16.dp, vertical = 10.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    item {
+                        Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 16.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(stringResource(R.string.archived), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            HorizontalDivider(Modifier.weight(1f).padding(start = 12.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                    }
                     items(archived, key = { "archived-${it.id}" }) { conversation ->
-                        Row(Modifier.fillMaxWidth().clickable { onConversation(conversation.id) }.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text(displayTitle(conversation, stringResource(R.string.new_chat)), Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            IconButton(onClick = { viewModel.archiveConversation(conversation.id, false) }, modifier = Modifier.size(32.dp)) { Icon(Icons.Outlined.Refresh, stringResource(R.string.restore), Modifier.size(17.dp)) }
+                        val isActive = state.activeConversationId == conversation.id
+                        Surface(
+                            color = if (isActive) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.surface,
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp).fillMaxWidth()
+                                .clickable { onConversation(conversation.id) },
+                        ) {
+                            Row(Modifier.padding(start = 12.dp, end = 2.dp, top = 2.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(displayTitle(conversation, stringResource(R.string.new_chat)), Modifier.weight(1f),
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp, lineHeight = 18.sp),
+                                    fontWeight = FontWeight.Normal,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                IconButton(onClick = { viewModel.archiveConversation(conversation.id, false) }) {
+                                    Icon(Icons.Outlined.Refresh, stringResource(R.string.restore), Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        HorizontalDivider()
+        HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
         TextButton(
             onClick = { destinationsExpanded = !destinationsExpanded },
             modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp).testTag(UiTestTags.EXPAND_DESTINATIONS),
@@ -1555,6 +1628,7 @@ private fun ConversationSidebar(
                 modifier = Modifier.weight(1f).fillMaxWidth().testTag(UiTestTags.SIDEBAR_DESTINATIONS),
                 contentPadding = PaddingValues(vertical = 4.dp),
             ) {
+                item(key = AppScreen.MESSAGE_SEARCH) { SidebarDestination(AppScreen.MESSAGE_SEARCH, Icons.Outlined.Search, stringResource(R.string.search_messages)) { viewModel.openScreen(AppScreen.MESSAGE_SEARCH) } }
                 item(key = AppScreen.BOOKMARKS) { SidebarDestination(AppScreen.BOOKMARKS, Icons.Outlined.Bookmarks, stringResource(R.string.bookmarks)) { viewModel.openScreen(AppScreen.BOOKMARKS) } }
                 item(key = AppScreen.NOTES) { SidebarDestination(AppScreen.NOTES, Icons.Outlined.NoteAlt, stringResource(R.string.notes)) { viewModel.openScreen(AppScreen.NOTES) } }
                 item(key = AppScreen.AGENTS) { SidebarDestination(AppScreen.AGENTS, Icons.Outlined.SmartToy, stringResource(R.string.agents)) { viewModel.openScreen(AppScreen.AGENTS) } }
@@ -1715,6 +1789,11 @@ private fun ChatPane(
                 if (state.activeConversationId != null) Box {
                     IconButton(onClick = { menu = true }, modifier = Modifier.testTag(UiTestTags.CHAT_MORE_ACTIONS)) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.more_actions)) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text(stringResource(R.string.knowledge_scope_chat)) },
+                            onClick = { menu = false; viewModel.openKnowledgeScope() }, enabled = state.activeGeneration?.active != true)
+                        DropdownMenuItem(text = { Text(stringResource(R.string.context_management)) },
+                            onClick = { menu = false; viewModel.openContextManager() },
+                            enabled = state.activeGeneration?.active != true)
                         DropdownMenuItem(text = { Text(stringResource(R.string.generate_title)) }, onClick = { menu = false; viewModel.generateTitle() }, leadingIcon = { Icon(Icons.Outlined.AutoAwesome, null) })
                         DropdownMenuItem(text = { Text(stringResource(R.string.regenerate)) }, onClick = { menu = false; viewModel.regenerateLatest() }, leadingIcon = { Icon(Icons.Outlined.Refresh, null) })
                         DropdownMenuItem(
@@ -1796,9 +1875,12 @@ private fun ChatPane(
             lineSpacing = chatLineSpacing,
             processExpandedByDefault = state.showProcess,
             onRegenerate = viewModel::regenerateLatest,
+            onEditQuestion = viewModel::openQuestionEditor,
             bookmarkedIds = state.bookmarks.map { it.messageId }.toSet(),
             notedMessageIds = state.notes.mapNotNull { it.sourceMessageId }.toSet(),
             scrollToMessageId = state.scrollToMessageId,
+            highlightMessageId = state.highlightMessageId,
+            onHighlightConsumed = viewModel::clearSearchHighlight,
             onScrollConsumed = viewModel::consumeScrollTarget,
             onBookmark = viewModel::toggleBookmark,
             onSaveNote = viewModel::saveMessageAsNote,
@@ -1823,6 +1905,7 @@ private fun ChatPane(
         )
         Composer(
             state = state,
+            onTextChanged = viewModel::setComposerText,
             onAttachments = viewModel::addAttachments,
             onRemoveAttachment = viewModel::removeAttachment,
             onCameraFailure = viewModel::reportCameraCaptureFailure,
@@ -1898,9 +1981,12 @@ private fun MessageList(
     lineSpacing: Float,
     processExpandedByDefault: Boolean,
     onRegenerate: () -> Unit,
+    onEditQuestion: (ChatMessage) -> Unit,
     bookmarkedIds: Set<String>,
     notedMessageIds: Set<String>,
     scrollToMessageId: String?,
+    highlightMessageId: String?,
+    onHighlightConsumed: () -> Unit,
     onScrollConsumed: () -> Unit,
     onBookmark: (String) -> Unit,
     onSaveNote: (ChatMessage) -> Unit,
@@ -1924,11 +2010,17 @@ private fun MessageList(
         } == true
     } }
     var followStreaming by rememberSaveable { mutableStateOf(true) }
+    var searchPositionPinned by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(listState.interactionSource) {
+        listState.interactionSource.interactions.collect { interaction ->
+            if (interaction is DragInteraction.Start) searchPositionPinned = false
+        }
+    }
     LaunchedEffect(listState) {
         snapshotFlow { listState.isScrollInProgress to atBottom }
             .collect { (scrolling, bottom) ->
                 if (scrolling && !bottom) followStreaming = false
-                if (bottom) followStreaming = true
+                if (bottom && !searchPositionPinned) followStreaming = true
             }
     }
     LaunchedEffect(
@@ -1940,10 +2032,17 @@ private fun MessageList(
     ) {
         if (messages.isNotEmpty() && followStreaming) listState.scrollToItem(messages.lastIndex, Int.MAX_VALUE)
     }
-    LaunchedEffect(scrollToMessageId) {
+    LaunchedEffect(highlightMessageId) {
+        if (highlightMessageId != null) { kotlinx.coroutines.delay(2500); onHighlightConsumed() }
+    }
+    LaunchedEffect(scrollToMessageId, messages.size) {
         val index = messages.indexOfFirst { it.id == scrollToMessageId }
-        if (index >= 0) listState.animateScrollToItem(index)
-        if (scrollToMessageId != null) onScrollConsumed()
+        if (index >= 0) {
+            searchPositionPinned = highlightMessageId != null
+            followStreaming = false
+            listState.animateScrollToItem(index)
+            onScrollConsumed()
+        }
     }
     Box(modifier) {
         LazyColumn(
@@ -1959,6 +2058,7 @@ private fun MessageList(
                     val isLastAssistant = message.id == latestAssistantId
                     MessageItem(
                         message = message,
+                        highlighted = message.id == highlightMessageId,
                         generation = if (isLastAssistant) generation else null,
                         assistantNickname = assistantNickname,
                         modelRemoteId = modelRemoteId,
@@ -1970,6 +2070,8 @@ private fun MessageList(
                         processExpandedByDefault = processExpandedByDefault,
                         isLatestAssistant = isLastAssistant,
                         onRegenerate = onRegenerate,
+                        onEditQuestion = { onEditQuestion(message) },
+                        canEditQuestion = !generationActive,
                         bookmarked = message.id in bookmarkedIds,
                         savedAsNote = message.id in notedMessageIds,
                         onBookmark = { onBookmark(message.id) },
@@ -1986,7 +2088,7 @@ private fun MessageList(
             }
         }
         if (!followStreaming && messages.isNotEmpty()) FloatingActionButton(
-            onClick = { followStreaming = true },
+            onClick = { searchPositionPinned = false; followStreaming = true },
             modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp).size(44.dp),
         ) { Icon(Icons.Outlined.KeyboardArrowDown, stringResource(R.string.back_to_bottom)) }
     }
@@ -2012,6 +2114,7 @@ private fun ContextBoundary() {
 @Composable
 private fun MessageItem(
     message: ChatMessage,
+    highlighted: Boolean = false,
     generation: GenerationState?,
     assistantNickname: String,
     modelRemoteId: String?,
@@ -2023,6 +2126,8 @@ private fun MessageItem(
     processExpandedByDefault: Boolean,
     isLatestAssistant: Boolean,
     onRegenerate: () -> Unit,
+    onEditQuestion: () -> Unit,
+    canEditQuestion: Boolean,
     bookmarked: Boolean,
     savedAsNote: Boolean,
     onBookmark: () -> Unit,
@@ -2060,7 +2165,7 @@ private fun MessageItem(
     var expanded by rememberSaveable(message.id) { mutableStateOf(processExpandedByDefault) }
     val messageBody: @Composable (Modifier) -> Unit = { modifier ->
         Surface(
-            color = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+            color = if (highlighted) MaterialTheme.colorScheme.secondaryContainer else if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(8.dp),
             modifier = modifier.testTag(UiTestTags.messageBody(message.id)),
         ) {
@@ -2274,6 +2379,13 @@ private fun MessageItem(
                         }
                     }
                     if (expanded) ProcessDetails(events, message.status, onKnowledgeCitation)
+                }
+                if (isUser) Row(Modifier.align(Alignment.End)) {
+                    IconButton(onClick = onEditQuestion, enabled = canEditQuestion,
+                        modifier = Modifier.size(32.dp).testTag("edit_question_${message.id}")) {
+                        Icon(Icons.Outlined.Edit, stringResource(R.string.edit_question), Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
                 }
                 if (!isUser && !streaming && speechReady) SpeechPlaybackBar(
                     loading = tts.loading,
@@ -2549,6 +2661,8 @@ private fun ProcessDetails(
                 Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
                         when (event.type) {
+                            "context_compression" -> stringResource(R.string.compressing_context)
+                            "context_compressed" -> stringResource(R.string.context_compressed)
                             "thinking" -> stringResource(R.string.thinking)
                             "tool_started" -> if (event.name == "read_url") stringResource(R.string.read_url_validating) else "${event.name} · ${stringResource(R.string.tool_started)}"
                             "tool_completed" -> if (event.name == "read_url") stringResource(R.string.read_url_success) else "${event.name} · ${stringResource(R.string.tool_completed)}"
@@ -2569,6 +2683,7 @@ private fun ProcessDetails(
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold,
                     )
+                    event.usage?.let { Text(stringResource(R.string.context_summary_usage, it.inputTokens, it.outputTokens), style = MaterialTheme.typography.bodySmall) }
                     if (event.knowledgeCitations.isNotEmpty()) {
                         MarkdownContent(
                             markdown = event.knowledgeCitations.joinToString("  \n") { it.marker },
@@ -2676,6 +2791,7 @@ private fun LinkedPlainText(value: String) {
 @Composable
 private fun Composer(
     state: AppUiState,
+    onTextChanged: (String) -> Unit,
     onAttachments: (List<PendingAttachment>) -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onCameraFailure: () -> Unit,
@@ -2683,7 +2799,7 @@ private fun Composer(
     onSend: (String) -> Boolean,
     onStop: () -> Unit,
 ) {
-    var value by rememberSaveable(state.activeConversationId) { mutableStateOf("") }
+    val value = state.composerText
     var attachmentMenu by remember { mutableStateOf(false) }
     var notePicker by remember { mutableStateOf(false) }
     var cameraCapturePath by rememberSaveable { mutableStateOf<String?>(null) }
@@ -2697,7 +2813,7 @@ private fun Composer(
     LaunchedEffect(draftRecovery?.requestId, state.activeConversationId) {
         if (draftRecovery != null && draftRecovery.conversationId == state.activeConversationId) {
             if (value.isEmpty()) {
-                value = draftRecovery.content
+                onTextChanged(draftRecovery.content)
             }
             if (value == draftRecovery.content) onDraftRecoveryConsumed(draftRecovery.requestId)
         }
@@ -2768,7 +2884,7 @@ private fun Composer(
                     }
                     BasicTextField(
                         value = value,
-                        onValueChange = { value = it },
+                        onValueChange = onTextChanged,
                         enabled = !generating,
                         textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
@@ -2791,7 +2907,6 @@ private fun Composer(
                         onClick = {
                             if (generating) onStop() else if (!cameraProcessing && (value.isNotBlank() || state.pendingAttachments.isNotEmpty())) {
                                 if (onSend(value)) {
-                                    value = ""
                                     focus.clearFocus()
                                 }
                             }
@@ -2932,13 +3047,15 @@ private fun AttachmentPreview(attachments: List<MessageAttachment>) {
 }
 
 private fun pendingAttachment(context: android.content.Context, uri: Uri): PendingAttachment? = runCatching {
+    // SAF and the system photo picker can retain read access for persisted composer drafts.
+    runCatching { context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
     var name = uri.lastPathSegment?.substringAfterLast('/').orEmpty().ifBlank { "attachment" }
     var size = -1L
     context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
         if (cursor.moveToFirst()) {
             cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let { name = cursor.getString(it) ?: name }
             cursor.getColumnIndex(OpenableColumns.SIZE).takeIf { it >= 0 }?.let { if (!cursor.isNull(it)) size = cursor.getLong(it) }
-                        }
+        }
     }
     PendingAttachment(uri.toString(), name, context.contentResolver.getType(uri).orEmpty().ifBlank { "application/octet-stream" }, size)
 }.getOrNull()
@@ -3265,3 +3382,12 @@ private fun visionStatusLabel(status: VisionStatus): String = stringResource(whe
 })
 
 private fun displayTitle(conversation: Conversation, fallback: String): String = conversation.title.ifBlank { fallback }
+
+private fun activityResultOwner(context: android.content.Context): ActivityResultRegistryOwner? {
+    var candidate = context
+    while (true) {
+        if (candidate is ActivityResultRegistryOwner) return candidate
+        if (candidate !is ContextWrapper || candidate.baseContext === candidate) return null
+        candidate = candidate.baseContext
+    }
+}

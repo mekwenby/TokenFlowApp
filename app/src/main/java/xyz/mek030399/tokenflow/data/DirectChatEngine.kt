@@ -12,6 +12,9 @@ class DirectChatEngine(
     private val gateway: ModelGateway,
     private val tools: ToolRunner,
 ) {
+    suspend fun openSession(options: ToolOptions, maxToolCalls: Int): ToolSession? =
+        if (maxToolCalls > 0) tools.openSession(options) else null
+
     fun run(
         initial: ModelCallRequest,
         enableSearch: Boolean,
@@ -28,6 +31,7 @@ class DirectChatEngine(
         initial: ModelCallRequest,
         options: ToolOptions,
         maxToolCalls: Int,
+        preparedSession: ToolSession? = null,
     ): Flow<EngineEvent> = flow {
         val transcript = initial.messages.toMutableList()
         val output = StringBuilder()
@@ -37,7 +41,7 @@ class DirectChatEngine(
         var thinkingEffort = initial.thinkingEffort
         var round = 0
         val toolBudget = maxToolCalls.coerceIn(0, 20)
-        val toolSession = if (toolBudget > 0) tools.openSession(options) else null
+        val toolSession = preparedSession ?: openSession(options, toolBudget)
 
         try {
             toolSession?.initializationWarnings.orEmpty().forEach { warning ->
@@ -64,6 +68,12 @@ class DirectChatEngine(
                     messages = transcript.toList(),
                     tools = definitions,
                 )
+                initial.model.contextWindowTokens?.let { capacity ->
+                    require(ContextBuilder.estimate(callRequest.systemPrompt, callRequest.messages, callRequest.tools) +
+                        callRequest.maxOutputTokens <= capacity.toLong()) {
+                        "Estimated context exceeds the model capacity. Reduce attachments or compress the conversation."
+                    }
+                }
                 try {
                     gateway.stream(callRequest).collect { event ->
                         when (event) {
@@ -192,7 +202,7 @@ class DirectChatEngine(
 
             emit(EngineEvent.Done(output.toString(), totalUsage, processEvents.toList()))
         } finally {
-            toolSession?.close()
+            if (preparedSession == null) toolSession?.close()
         }
     }
 

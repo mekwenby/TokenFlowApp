@@ -6,10 +6,13 @@
 
 ```mermaid
 flowchart LR
-    UI["Jetpack Compose UI"] --> VM["AppViewModel\nStateFlow + generation jobs"]
+    UI["Jetpack Compose UI"] --> VM["AppViewModel\nStateFlow + drafts"]
     VM --> DS["ChatDataSource"]
+    VM --> Coordinator["Application generation coordinator"]
+    Coordinator --> DS
+    Coordinator --> FGS["dataSync foreground service\nnotifications and stop actions"]
     DS --> Repo["ChatRepository"]
-    Repo --> DB["Room v7"]
+    Repo --> DB["Room v10"]
     Repo --> Files["App private files"]
     Repo --> Engine["DirectChatEngine"]
     Engine --> Gateway["ModelGateway adapters"]
@@ -51,8 +54,8 @@ flowchart LR
 1. UI 将正文、附件、会话配置和手动知识片段交给 `AppViewModel`。
 2. ViewModel 为当前会话启动独立 coroutine job；不同会话的生成任务互不复用。
 3. Repository 在写入新用户消息前解析附件，并在知识库模式开启时执行本地检索。
-4. 用户消息及其 metadata 先写入 Room；metadata 固定本轮知识片段 ID 和视觉描述，保证重试、历史重载和分支一致。
-5. Repository 根据最近一次“清空上下文”边界构造历史，注入系统提示词、本地知识和附件内容。
+4. 准备用户消息与 metadata，固定本轮知识片段 ID 和视觉描述；此时仅准备附件私有副本，不提交用户消息，保证压缩失败可以完整恢复草稿。
+5. Repository 根据最近一次“清空上下文”边界和 `ContextPolicy` 构造历史，注入系统提示词、本地知识和附件内容；实际工具 session 在提交前准备并复用，需要时先生成有界的滚动摘要。新用户消息、附件索引、摘要和回复占位在同一 Room 事务提交，失败则恢复草稿。
 6. `DirectChatEngine` 调用选定协议的 `ModelGateway`，把不同供应商事件统一为文本、思考、工具、usage 和完成/错误事件。
 7. 工具调用由 `WebToolExecutor` 统一分派。每次生成创建独立且可关闭的 `ToolSession`：本地/网页工具按既有边界运行；会话启用 Infinite Cloud 时，附件先上传，普通脚本通过不落任务表的即时协议执行。只有当前用户消息明确要求后台任务时才暴露持久任务工具。远端 MCP tools 只发现一次，并在该 session 内复用已验证的 SSH/MCP channel。结果回送给模型，初始化警告和过程事件持续合并到当前 Assistant metadata，结束或取消时统一释放 channel。
 8. 流式正文和状态实时更新 UI；完成、失败或中断时都持久化最终正文、过程、Token usage、知识引用以及生成时的助手昵称和模型身份快照。
@@ -84,7 +87,7 @@ flowchart LR
 
 ## 持久化边界
 
-- 结构化数据存放于 Room v7。
+- 结构化数据存放于 Room v10。
 - Infinite Cloud 私钥、口令、MCP 环境值和 HTTP 请求头值只进入 `SecretStore`；Room 保存服务器、固定指纹、非敏感 MCP 定义和任务索引。
 - Assistant/User 扩展信息存放在消息行内 JSON metadata；可选字段使用默认值兼容旧记录，通常不需要修改 Room 表。
 - 附件、知识原文件和头像放在 App 私有文件目录；Room 只保存索引和路径。
@@ -115,3 +118,17 @@ Chat 的会话列表与“功能与设置”入口互斥占用侧栏剩余高度
 - Provider Base URL 与 URL Reader 的安全策略不同，不要共用一套宽松校验。
 - 过程、usage、citation 和消息正文必须在完成、错误与取消路径上保持一致落盘。
 - 删除会话依赖 Room 外键级联删除消息、附件和收藏；UI 还应立即过滤陈旧状态。
+
+## 搜索与分享入口
+
+`searchMessages` 用 Room 参数化子串查询和时间/消息 ID 游标返回有界片段。ViewModel 在 300 ms 防抖后查询，以版本号阻止过期结果覆盖新请求。搜索导航先载入目标会话，再发布滚动目标，避免空列表消费定位事件。
+
+`ContextBuilder` 统一轮次选择、摘要来源校验和 Token 估算；`ContextCompressor` 按模型容量分批合并历史，通过可注入的无工具模型调用返回候选。手动摘要须显式保存，自动摘要和本轮消息一起提交。工具 session 只发现一次，后续工具轮次在发出请求前再次检查容量。
+
+`MainActivity` 接受系统分享 Intent，并使用可恢复的事件 ID 去重。`ShareDraftStore` 拥有附件副本与原子草稿状态；ViewModel 按会话管理文字和附件，输入框不再拥有独立文本状态。分享目标选择只追加草稿，模型初始化完成前保留待导入内容。
+
+## 应用级生成任务与编辑分支
+
+GenerationCoordinator 使用 Application 生命周期的 CoroutineScope 持有请求与准备阶段，GenerationService 只负责前台提升、状态通知和停止命令；ViewModel 观察完整快照，重建后不重新发请求。启动前等待前台服务成功提升；未能提升时恢复提交草稿。收尾先检查数据库中的 requestId 接受状态并原子恢复/清理草稿，再发布非运行状态。进程恢复仅标记中断，不恢复网络调用。
+
+编辑提问通过 prepareEditedQuestion 创建保留有效前缀的分支，regenerateEditedQuestion 刷新已保存的提问引用并使用共同的发送预处理。Room v10 只新增会话 knowledgeScopeJson 列，以兼容默认值表示全部知识文档；9 → 10 为显式附加迁移。

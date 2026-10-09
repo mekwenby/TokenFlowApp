@@ -11,10 +11,13 @@
 ## 主要功能
 
 - 支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages 兼容接口。
-- 提供流式对话、思考与工具过程、停止、重试、分支、上下文清理和多会话并发生成。
+- 提供流式对话、思考与工具过程、停止、重试、编辑提问并生成新分支、上下文清理和多会话并发生成。
+- 后台生成由应用级前台服务托管，离开页面仍可继续；通知提供停止操作，后台完成后可打开对应会话。
+- 全局消息正文搜索支持归档会话、命中高亮与消息定位；上下文可预览、限制近期轮数，或按会话开启自动摘要压缩。
+- 支持 Android 文字、网址、图片和文档分享，选择会话或智能体后追加到可编辑草稿，不自动发送。
 - 助手消息显示可在全局设置中修改的昵称，并保留生成回复时实际使用的模型 ID。
 - 支持图片、相机、PDF、Word、Excel、纯文本和源码附件，以及视觉模型兜底。
-- 内置收藏、Markdown 笔记、智能体和本地知识库；笔记支持逐篇导入和导出 `.md`，知识引用可在 App 内定位并预览原文。
+- 内置收藏、Markdown 笔记、智能体和本地 FTS 知识库；知识检索可按会话选择全部或指定文档范围，引用可在 App 内定位并预览原文。笔记支持逐篇导入和导出 `.md`。
 - 模型可调用完全在设备内执行的科学计算器和单位换算工具，无需联网工具服务。
 - 可选 Exa 联网搜索、内置或 InfoFlow URL 读取，以及 Xiaomi MiMo 语音生成。
 - Infinite Cloud 可通过固定主机指纹的 SSH 连接 Linux，即时运行 Shell/Python/JavaScript、按用户明确要求创建后台任务、管理远程文件，并调用远端 stdio 或 Streamable HTTP MCP 工具。
@@ -27,14 +30,14 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 版本 | `2.5.4`（`versionCode 21`） |
+| 版本 | `2.6.0`（`versionCode 22`） |
 | 正式包名 | `xyz.mek030399.tokenflow` |
 | Debug 包名 | `xyz.mek030399.tokenflow.debug` |
 | 正式证书 SHA-256 | `FEC865BEDC77C742B0E1B3D93A05FCEEBFA6075F46E1C8242B8F2261F0767AFE` |
 | Android | `minSdk 26`，`targetSdk 36`，`compileSdk 36` |
 | 构建工具 | Gradle `9.4.1`，AGP `9.2.1`，Build Tools `36.0.0` |
 | 语言与 UI | Kotlin `2.3.10`，Java 目标 `17`，Compose BOM `2026.06.01` |
-| 本地数据库 | Schema v7（AndroidX Room `2.8.4`），显式迁移 `1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7` |
+| 本地数据库 | Schema v10（AndroidX Room `2.8.4`），显式迁移 `1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 9 -> 10`，兼容旧结构预发布 `8 -> 9` |
 | 模型协议 | OpenAI Chat Completions、OpenAI Responses、Anthropic Messages |
 
 版本和 SDK 值以 [`app/build.gradle.kts`](app/build.gradle.kts) 为准；数据库版本以 [`LocalDatabase.kt`](app/src/main/java/xyz/mek030399/tokenflow/data/LocalDatabase.kt) 为准。
@@ -135,7 +138,7 @@ TokenFlowApp/
 ├── .github/workflows/               # GitHub CI 和正式 APK 自动发布
 ├── app/
 │   ├── build.gradle.kts             # App 版本、SDK、依赖、签名和构建变体
-│   ├── schemas/                     # Room schema 3/4/5/6/7 快照
+│   ├── schemas/                     # Room schema 3/4/5/6/7/9/10 快照
 │   └── src/
 │       ├── main/                    # App 源码和资源
 │       ├── test/                    # JVM 单元测试与 Python helper 回归

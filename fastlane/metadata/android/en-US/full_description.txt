@@ -4,8 +4,14 @@ Features include:
 
 * OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages compatible APIs
 * Streaming conversations, reasoning and tool progress, retry, branching, context cleanup, and concurrent generation
+* Message body search across all conversations, including archived chats, with highlighted matches and navigation to the source
+* Context management with recent-turn limits, editable summaries, and optional automatic compression using your selected model
+* Android sharing for text, images, and documents, imported into editable drafts for review before sending
+* Edit a question and regenerate in a new branch while preserving the original conversation
+* Background generation with completion notifications and stop controls
 * Image, camera, PDF, Word, Excel, text, and source-code attachments
 * Favorites, Markdown notes, agents, and a locally indexed knowledge library
+* Select all or specific knowledge documents per conversation for local keyword search and knowledge tool calls
 * Optional web search, URL reading, and text-to-speech tools
 * English and Chinese interfaces, light and dark themes, and responsive phone and tablet layouts
 

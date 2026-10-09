@@ -52,6 +52,7 @@ data class ModelEntity(
     val visionCheckedAt: Long?,
     val createdAt: Long,
     val updatedAt: Long,
+    val contextWindowTokens: Int? = null,
 )
 
 @Entity(
@@ -95,6 +96,18 @@ data class ConversationEntity(
     val createdAt: Long,
     val updatedAt: Long,
     val lastMessageAt: Long?,
+    @ColumnInfo(defaultValue = "'{}'") val contextPolicyJson: String = "{}",
+    @ColumnInfo(defaultValue = "'{}'") val knowledgeScopeJson: String = "{}",
+)
+
+@Entity(
+    tableName = "context_summaries",
+    foreignKeys = [ForeignKey(entity = ConversationEntity::class, parentColumns = ["id"],
+        childColumns = ["conversationId"], onDelete = ForeignKey.CASCADE)],
+)
+data class ContextSummaryEntity(
+    @androidx.room.PrimaryKey val conversationId: String,
+    val payloadJson: String,
 )
 
 @Entity(tableName = "app_settings")
@@ -190,8 +203,8 @@ data class NoteEntity(
 private const val NOTE_TEXT_CHUNK_BYTES = 64 * 1024
 private const val NOTE_READ_PROJECTION = "id, sourceMessageId, sourceConversationId, createdAt, updatedAt, " +
     "length(CAST(title AS BLOB)) AS titleByteCount, length(CAST(body AS BLOB)) AS bodyByteCount, " +
-    "substr(CAST(title AS BLOB), 1, $NOTE_TEXT_CHUNK_BYTES) AS titlePrefix, " +
-    "substr(CAST(body AS BLOB), 1, $NOTE_TEXT_CHUNK_BYTES) AS bodyPrefix"
+    "NULLIF(substr(CAST(title AS BLOB), 1, $NOTE_TEXT_CHUNK_BYTES), X'') AS titlePrefix, " +
+    "NULLIF(substr(CAST(body AS BLOB), 1, $NOTE_TEXT_CHUNK_BYTES), X'') AS bodyPrefix"
 
 data class NoteReadRow(
     val id: String,
@@ -201,22 +214,22 @@ data class NoteReadRow(
     val updatedAt: Long,
     val titleByteCount: Int,
     val bodyByteCount: Int,
-    val titlePrefix: ByteArray,
-    val bodyPrefix: ByteArray,
+    val titlePrefix: ByteArray?,
+    val bodyPrefix: ByteArray?,
 )
 
-data class NoteTextChunk(val titleBytes: ByteArray, val bodyBytes: ByteArray)
+data class NoteTextChunk(val titleBytes: ByteArray?, val bodyBytes: ByteArray?)
 
 private suspend fun LocalDao.restoreNote(row: NoteReadRow): NoteEntity {
-    val title = ByteArrayOutputStream(row.titleByteCount).apply { write(row.titlePrefix) }
-    val body = ByteArrayOutputStream(row.bodyByteCount).apply { write(row.bodyPrefix) }
+    val title = ByteArrayOutputStream(row.titleByteCount).apply { write(row.titlePrefix ?: byteArrayOf()) }
+    val body = ByteArrayOutputStream(row.bodyByteCount).apply { write(row.bodyPrefix ?: byteArrayOf()) }
     var offset = NOTE_TEXT_CHUNK_BYTES + 1
     while (offset <= maxOf(row.titleByteCount, row.bodyByteCount)) {
         val chunk = checkNotNull(noteTextChunk(row.id, offset, NOTE_TEXT_CHUNK_BYTES)) {
             "The note disappeared during its read transaction"
         }
-        title.write(chunk.titleBytes)
-        body.write(chunk.bodyBytes)
+        title.write(chunk.titleBytes ?: byteArrayOf())
+        body.write(chunk.bodyBytes ?: byteArrayOf())
         offset += NOTE_TEXT_CHUNK_BYTES
     }
     check(title.size() == row.titleByteCount && body.size() == row.bodyByteCount)
@@ -760,6 +773,56 @@ interface LocalDao {
     @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt, id")
     suspend fun messages(conversationId: String): List<MessageEntity>
 
+    @Query("""
+        SELECT m.id AS messageId, m.conversationId, c.title AS conversationTitle,
+            c.archivedAt, m.role, m.createdAt,
+            substr(m.content, max(1, instr(lower(m.content), lower(:query)) - 60), 400) AS snippet
+        FROM messages m JOIN conversations c ON c.id = m.conversationId
+        WHERE m.role IN ('user', 'assistant') AND m.status NOT IN ('generating', 'preparing')
+            AND instr(lower(m.content), lower(:query)) > 0
+            AND (:beforeTime IS NULL OR m.createdAt < :beforeTime
+                OR (m.createdAt = :beforeTime AND m.id < :beforeId))
+        ORDER BY m.createdAt DESC, m.id DESC LIMIT :limit
+    """)
+    suspend fun searchMessages(query: String, beforeTime: Long?, beforeId: String?, limit: Int): List<MessageSearchHit>
+
+    @Query("SELECT * FROM context_summaries WHERE conversationId = :conversationId")
+    suspend fun contextSummary(conversationId: String): ContextSummaryEntity?
+
+    @Upsert
+    suspend fun putContextSummary(summary: ContextSummaryEntity)
+
+    @Query("DELETE FROM context_summaries WHERE conversationId = :conversationId")
+    suspend fun deleteContextSummary(conversationId: String)
+
+    @Transaction
+    suspend fun commitPreparedTurn(user: MessageEntity?, attachments: List<MessageAttachmentEntity>, summary: ContextSummaryEntity?,
+        assistant: MessageEntity? = null, replacedMessageId: String? = null) {
+        replacedMessageId?.let { deleteMessage(it) }
+        user?.let { putMessages(listOf(it)) }
+        if (attachments.isNotEmpty()) putAttachments(attachments)
+        summary?.let { putContextSummary(it) }
+        assistant?.let {
+            putMessages(listOf(it))
+            updateConversationGenerationState(it.conversationId, "generating", "", it.createdAt, it.createdAt)
+        }
+    }
+
+    @Query("SELECT EXISTS(SELECT 1 FROM messages WHERE role = 'user' AND requestId = :requestId)")
+    suspend fun isRequestAccepted(requestId: String): Boolean
+
+    @Transaction
+    suspend fun saveContextConfiguration(id: String, summary: ContextSummaryEntity?, policyJson: String) {
+        if (summary == null) deleteContextSummary(id) else putContextSummary(summary)
+        check(updateConversation(id) { it.copy(contextPolicyJson = policyJson) } != null)
+    }
+
+    @Transaction
+    suspend fun putContextBoundary(boundary: MessageEntity) {
+        putMessages(listOf(boundary))
+        deleteContextSummary(boundary.conversationId)
+    }
+
     @Query("SELECT * FROM message_attachments WHERE messageId IN (:messageIds) ORDER BY createdAt, id")
     suspend fun attachmentsForMessages(messageIds: List<String>): List<MessageAttachmentEntity>
 
@@ -786,10 +849,12 @@ interface LocalDao {
         conversation: ConversationEntity,
         messages: List<MessageEntity>,
         attachments: List<MessageAttachmentEntity>,
+        summary: ContextSummaryEntity? = null,
     ) {
         putConversation(conversation)
         putMessages(messages)
         if (attachments.isNotEmpty()) putAttachments(attachments)
+        summary?.let { putContextSummary(it) }
     }
 
     @Query("DELETE FROM messages WHERE id = :id")
@@ -826,8 +891,8 @@ interface LocalDao {
     suspend fun noteReadRowForSourceMessage(messageId: String): NoteReadRow?
 
     @Query(
-        "SELECT substr(CAST(title AS BLOB), :byteOffset, :byteCount) AS titleBytes, " +
-            "substr(CAST(body AS BLOB), :byteOffset, :byteCount) AS bodyBytes FROM notes WHERE id = :id",
+        "SELECT NULLIF(substr(CAST(title AS BLOB), :byteOffset, :byteCount), X'') AS titleBytes, " +
+            "NULLIF(substr(CAST(body AS BLOB), :byteOffset, :byteCount), X'') AS bodyBytes FROM notes WHERE id = :id",
     )
     suspend fun noteTextChunk(id: String, byteOffset: Int, byteCount: Int): NoteTextChunk?
 
@@ -936,6 +1001,9 @@ interface LocalDao {
     @Query("SELECT kc.* FROM knowledge_chunks kc JOIN knowledge_chunks_fts fts ON fts.rowid = kc.id WHERE knowledge_chunks_fts MATCH :query LIMIT :limit")
     suspend fun searchKnowledgeChunks(query: String, limit: Int): List<KnowledgeChunkEntity>
 
+    @Query("SELECT kc.* FROM knowledge_chunks kc JOIN knowledge_chunks_fts fts ON fts.rowid = kc.id JOIN knowledge_documents kd ON kd.id = kc.documentId WHERE knowledge_chunks_fts MATCH :query AND kd.status = 'ready' AND (:allDocuments OR kc.documentId IN (:documentIds)) LIMIT :limit")
+    suspend fun searchKnowledgeChunksScoped(query: String, allDocuments: Boolean, documentIds: List<String>, limit: Int): List<KnowledgeChunkEntity>
+
     @Transaction
     suspend fun replaceKnowledgeChunks(documentId: String, chunks: List<KnowledgeChunkEntity>) {
         deleteKnowledgeFts(documentId)
@@ -997,8 +1065,9 @@ interface LocalDao {
         CloudMcpServerEntity::class,
         CloudTaskEntity::class,
         CloudArtifactDeliveryEntity::class,
+        ContextSummaryEntity::class,
     ],
-    version = 7,
+    version = 10,
     exportSchema = true,
 )
 abstract class TokenFlowDatabase : RoomDatabase() {
@@ -1017,6 +1086,9 @@ abstract class TokenFlowDatabase : RoomDatabase() {
             MIGRATION_5_6,
             MIGRATION_6_7,
             PRE_RELEASE_DOWNGRADE_8_7,
+            MIGRATION_7_9,
+            MIGRATION_8_9,
+            MIGRATION_9_10,
         ).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -1160,6 +1232,28 @@ abstract class TokenFlowDatabase : RoomDatabase() {
                 // Room validates the complete v7 schema after this compatibility bridge.
             }
         }
+
+        private fun addContextManagement(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE models ADD COLUMN contextWindowTokens INTEGER")
+            db.execSQL("ALTER TABLE conversations ADD COLUMN contextPolicyJson TEXT NOT NULL DEFAULT '{}'")
+            db.execSQL("CREATE TABLE IF NOT EXISTS context_summaries (conversationId TEXT NOT NULL, payloadJson TEXT NOT NULL, PRIMARY KEY(conversationId), FOREIGN KEY(conversationId) REFERENCES conversations(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+        }
+
+        val MIGRATION_7_9 = object : Migration(7, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) = addContextManagement(db)
+        }
+
+        // v8 was a pre-release label for the v7 structure; do not reuse that version.
+        // Additive migration leaves incompatible legacy columns intact for Room to reject.
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) = addContextManagement(db)
+        }
+
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE conversations ADD COLUMN knowledgeScopeJson TEXT NOT NULL DEFAULT '{}'")
+            }
+        }
     }
 }
 
@@ -1180,10 +1274,11 @@ fun ModelEntity.toDomain() = ModelProfile(
     visionCheckedAt = visionCheckedAt,
     createdAt = createdAt,
     updatedAt = updatedAt,
+    contextWindowTokens = contextWindowTokens,
 )
 
 fun ModelProfile.toEntity() = ModelEntity(
-    id, providerId, remoteId, displayName, maxOutputTokens, isDefault, visionStatus.name, visionCheckedAt, createdAt, updatedAt,
+    id, providerId, remoteId, displayName, maxOutputTokens, isDefault, visionStatus.name, visionCheckedAt, createdAt, updatedAt, contextWindowTokens,
 )
 
 fun ConversationEntity.toDomain() = Conversation(
@@ -1216,6 +1311,8 @@ fun ConversationEntity.toDomain() = Conversation(
     createdAt = createdAt,
     updatedAt = updatedAt,
     lastMessageAt = lastMessageAt,
+    contextPolicy = runCatching { ConfigArchiveCodec.defaultJson.decodeFromString<ContextPolicy>(contextPolicyJson) }.getOrDefault(ContextPolicy()),
+    knowledgeScope = runCatching { ConfigArchiveCodec.defaultJson.decodeFromString<KnowledgeScope>(knowledgeScopeJson) }.getOrDefault(KnowledgeScope()),
 )
 
 fun Conversation.toEntity() = ConversationEntity(
@@ -1249,6 +1346,8 @@ fun Conversation.toEntity() = ConversationEntity(
     createdAt = createdAt,
     updatedAt = updatedAt,
     lastMessageAt = lastMessageAt,
+    contextPolicyJson = ConfigArchiveCodec.defaultJson.encodeToString(contextPolicy),
+    knowledgeScopeJson = ConfigArchiveCodec.defaultJson.encodeToString(knowledgeScope),
 )
 
 fun MessageEntity.toDomain() = ChatMessage(

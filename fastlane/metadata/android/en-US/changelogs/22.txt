@@ -1,0 +1,7 @@
+Search message text across chats, including archived chats, with highlighted matches.
+Manage context with recent turns and manual or automatic summaries.
+Share text, images and documents into editable drafts from Android.
+Edit questions and regenerate in a branch while preserving the original chat.
+Continue generating in the background with completion alerts and stop controls.
+Choose knowledge documents per chat.
+Refine the chat list, archived titles and MCP navigation.

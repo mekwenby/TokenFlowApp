@@ -215,18 +215,30 @@ class KnowledgeStore(
         )
     }
 
-    suspend fun snippets(ids: List<Long>): List<KnowledgeSnippet> {
+    suspend fun snippets(ids: List<Long>, scope: KnowledgeScope = KnowledgeScope()): List<KnowledgeSnippet> {
         if (ids.isEmpty()) return emptyList()
-        return dao.knowledgeChunks(ids.distinct()).mapNotNull { chunk ->
-            dao.knowledgeDocument(chunk.documentId)?.let { document -> chunk.toSnippet(document, 0) }
+        return dao.knowledgeChunks(ids.distinct()).filter { scope.includes(it.documentId) }.mapNotNull { chunk ->
+            dao.knowledgeDocument(chunk.documentId)?.takeIf { it.status == "ready" }
+                ?.let { document -> chunk.toSnippet(document, 0) }
         }.sortedBy { ids.indexOf(it.chunkId) }
     }
 
-    suspend fun search(query: String, limit: Int = 5): List<KnowledgeSnippet> {
+    suspend fun search(
+        query: String,
+        limit: Int = 5,
+        scope: KnowledgeScope = KnowledgeScope(),
+    ): List<KnowledgeSnippet> = withContext(Dispatchers.IO) {
+        if (query.isBlank() || scope.mode == KnowledgeScopeMode.SELECTED && scope.documentIds.isEmpty()) {
+            return@withContext emptyList()
+        }
+        lexicalSearch(query, scope).take(limit.coerceIn(1, 5))
+    }
+
+    private suspend fun lexicalSearch(query: String, scope: KnowledgeScope): List<KnowledgeSnippet> {
         val terms = tokenize(query).distinct().take(12)
         if (terms.isEmpty()) return emptyList()
         val fts = terms.joinToString(" OR ") { "\"${it.replace("\"", "\"\"")}\"" }
-        return dao.searchKnowledgeChunks(fts, 40).mapNotNull { chunk ->
+        return dao.searchKnowledgeChunksScoped(fts, scope.mode == KnowledgeScopeMode.ALL, scope.documentIds, 40).mapNotNull { chunk ->
             val document = dao.knowledgeDocument(chunk.documentId) ?: return@mapNotNull null
             val normalized = chunk.text.lowercase(Locale.ROOT)
             val score = terms.sumOf { term ->
@@ -240,7 +252,6 @@ class KnowledgeStore(
             } + if (normalized.contains(query.trim().lowercase(Locale.ROOT))) 8 else 0
             chunk.toSnippet(document, score)
         }.sortedWith(compareByDescending<KnowledgeSnippet> { it.score }.thenBy { it.documentName }.thenBy { it.position })
-            .take(limit.coerceIn(1, 5))
     }
 
     private suspend fun extractBounded(file: File, extension: String, maxChars: Int): BoundedText {

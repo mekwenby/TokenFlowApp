@@ -39,7 +39,7 @@ class NoteMarkdownFileStoreAndroidTest {
 
         val imported = store.read(uriFor(source).toString())
 
-        assertEquals("source.release", imported.title)
+        assertEquals(source.name.dropLast(3), imported.title)
         assertEquals(body, imported.body)
 
         val destination = createFile("export.md")

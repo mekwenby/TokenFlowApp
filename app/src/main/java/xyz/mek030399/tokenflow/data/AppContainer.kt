@@ -1,8 +1,16 @@
 package xyz.mek030399.tokenflow.data
 
 import android.content.Context
+import android.app.Application
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import xyz.mek030399.tokenflow.background.AndroidGenerationRuntime
+import xyz.mek030399.tokenflow.background.GenerationCoordinator
 
 class AppContainer(context: Context) {
+    val generationRuntime = AndroidGenerationRuntime(context.applicationContext as Application)
+    val generationCoordinator = GenerationCoordinator(CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate), generationRuntime)
     @Suppress("unused")
     private val cameraCaptureStore = CameraCaptureStore(context)
     val json = DirectApiTransport.defaultJson
@@ -11,6 +19,7 @@ class AppContainer(context: Context) {
     private val gateway = ModelGateway(DirectApiTransport(json), json)
     private val knowledgeStore = KnowledgeStore(context, database.localDao())
     internal val noteMarkdownFiles: NoteMarkdownFileAccess = NoteMarkdownFileStore(context)
+    internal val shareDrafts = ShareDraftStore(context)
     private val exaClient = ExaClient(json)
     private val builtInUrlReader = UrlReader(context, json)
     private val infiniteCloud = InfiniteCloudManager(context, database.localDao(), secrets, json)

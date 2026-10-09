@@ -96,6 +96,7 @@ data class ModelProfile(
     @SerialName("vision_checked_at") val visionCheckedAt: Long? = null,
     @SerialName("created_at") val createdAt: Long = System.currentTimeMillis(),
     @SerialName("updated_at") val updatedAt: Long = System.currentTimeMillis(),
+    @SerialName("context_window_tokens") val contextWindowTokens: Int? = null,
 )
 
 @Serializable
@@ -138,6 +139,8 @@ data class Conversation(
     @SerialName("created_at") val createdAt: Long = System.currentTimeMillis(),
     @SerialName("updated_at") val updatedAt: Long = System.currentTimeMillis(),
     @SerialName("last_message_at") val lastMessageAt: Long? = null,
+    @SerialName("context_policy") val contextPolicy: ContextPolicy = ContextPolicy(),
+    @SerialName("knowledge_scope") val knowledgeScope: KnowledgeScope = KnowledgeScope(),
 )
 
 @Serializable
@@ -222,6 +225,8 @@ data class ConversationWriteRequest(
     val archivedAt: Long? = null,
     val updatePinnedAt: Boolean = false,
     val updateArchivedAt: Boolean = false,
+    val contextPolicy: ContextPolicy? = null,
+    val knowledgeScope: KnowledgeScope? = null,
 )
 
 data class SendMessageRequest(
@@ -233,8 +238,10 @@ data class SendMessageRequest(
     val timeZone: String,
     val requestId: String,
     val attachments: List<PendingAttachment> = emptyList(),
+    val knowledgeScope: KnowledgeScope = KnowledgeScope(),
 )
 
+@Serializable
 data class PendingAttachment(
     val uri: String,
     val displayName: String,
@@ -245,7 +252,8 @@ data class PendingAttachment(
     val inlineText: String? = null,
 )
 
-enum class PendingAttachmentOrigin { PICKER, CAMERA, NOTE }
+@Serializable
+enum class PendingAttachmentOrigin { PICKER, CAMERA, NOTE, SHARE }
 
 @Serializable
 data class MessageAttachment(
@@ -425,6 +433,19 @@ data class KnowledgeSnippet(
 )
 
 @Serializable
+enum class KnowledgeScopeMode { ALL, SELECTED }
+
+@Serializable
+data class KnowledgeScope(
+    val mode: KnowledgeScopeMode = KnowledgeScopeMode.ALL,
+    @SerialName("document_ids") val documentIds: List<String> = emptyList(),
+) {
+    fun includes(documentId: String): Boolean = mode == KnowledgeScopeMode.ALL || documentId in documentIds
+
+    fun normalized(): KnowledgeScope = copy(documentIds = documentIds.filter(String::isNotBlank).distinct())
+}
+
+@Serializable
 data class KnowledgeCitation(
     @SerialName("chunk_id") val chunkId: Long,
     @SerialName("document_id") val documentId: String,
@@ -467,6 +488,7 @@ data class ToolOptions(
     val messageId: String = "",
     val allowCloudTaskCreation: Boolean = false,
     val remoteAttachments: List<RemoteAttachmentMapping> = emptyList(),
+    val knowledgeScope: KnowledgeScope = KnowledgeScope(),
 )
 
 data class UrlReadDiagnostic(
@@ -514,6 +536,7 @@ data class ProcessEvent(
     val content: String = "",
     val ok: Boolean = true,
     @SerialName("knowledge_citations") val knowledgeCitations: List<KnowledgeCitation> = emptyList(),
+    val usage: SerializableUsage? = null,
 )
 
 @Serializable
@@ -575,7 +598,7 @@ data class ProtocolReplayItem(
 
 sealed interface CanonicalContentPart {
     data class Text(val text: String) : CanonicalContentPart
-    data class Image(val mimeType: String, val base64: String) : CanonicalContentPart
+    data class Image(val mimeType: String, val base64: String, val width: Int? = null, val height: Int? = null) : CanonicalContentPart
     data class Document(val fileName: String, val text: String) : CanonicalContentPart
 }
 

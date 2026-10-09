@@ -236,144 +236,6 @@ class AppViewModelTest {
     }
 
     @Test
-    fun pendingQuestionEditSurvivesUiClearingWithoutReplacingTheOriginalComposerDraft() = runTest(dispatcher) {
-        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
-        val coordinator = GenerationCoordinator(applicationScope)
-        val prepare = CompletableDeferred<Unit>()
-        val reply = CompletableDeferred<Unit>()
-        val source = Conversation(id = "edited-source", model = "model-1")
-        val question = ChatMessage(id = "edited-question", conversationId = source.id, role = "user", content = "Original question")
-        val originalReply = ChatMessage(id = "original-answer", conversationId = source.id, role = "assistant", content = "Original answer")
-        val fake = FakeChatDataSource(true).apply {
-            conversations += source
-            messageMap[source.id] = listOf(question, originalReply)
-            editPreparationGate = prepare
-            sendMessageGate = reply
-        }
-        val original = AppViewModel(fake, generationCoordinator = coordinator)
-        val originalOwner = ViewModelStore().apply { put("app", original) }
-        advanceUntilIdle()
-        original.openConversation(source.id)
-        advanceUntilIdle()
-        val attachment = cameraDraft("unrelated-original-draft")
-        original.setComposerText("Unsent original draft")
-        original.addAttachments(listOf(attachment))
-        original.openQuestionEditor(question)
-        original.submitEditedQuestion("Edited question")
-        runCurrent()
-        val runId = coordinator.snapshots.value.getValue(source.id).runId
-        assertEquals(0, fake.editedGenerationCalls)
-        originalOwner.clear()
-        val recreated = AppViewModel(fake, generationCoordinator = coordinator)
-        val recreatedOwner = ViewModelStore().apply { put("app", recreated) }
-        advanceUntilIdle()
-        assertEquals("Edited question", recreated.state.value.editingQuestion?.content)
-        assertTrue(recreated.state.value.questionEditBusy)
-        assertEquals("Unsent original draft", recreated.state.value.drafts[source.id]?.text)
-        assertEquals(listOf(attachment), recreated.state.value.drafts[source.id]?.attachments)
-        prepare.complete(Unit)
-        runCurrent()
-        val branch = fake.conversations.single { it.id != source.id }
-        assertEquals(branch.id, recreated.state.value.activeConversationId)
-        assertEquals(runId, coordinator.snapshots.value.getValue(branch.id).runId)
-        assertFalse(coordinator.snapshots.value.containsKey(source.id))
-        assertFalse(recreated.state.value.generations.containsKey(source.id))
-        assertEquals(1, fake.editedGenerationCalls)
-        assertEquals("Edited question", fake.editedGenerationContent)
-        assertEquals(listOf(question, originalReply), fake.messageMap[source.id])
-        assertEquals("Unsent original draft", recreated.state.value.drafts[source.id]?.text)
-        assertFalse(attachment in fake.discardedAttachments)
-        reply.complete(Unit)
-        advanceUntilIdle()
-        assertEquals(1, recreated.state.value.activeMessages.count { it.role == "user" && it.content == "Edited question" })
-        assertEquals("completed", recreated.state.value.activeMessages.last().status)
-        recreated.openConversation(source.id)
-        advanceUntilIdle()
-        assertEquals("Unsent original draft", recreated.state.value.composerText)
-        assertEquals(listOf(attachment), recreated.state.value.pendingAttachments)
-        recreatedOwner.clear()
-        applicationScope.cancel()
-    }
-
-    @Test
-    fun failedEditPreparationRestoresTheProposedEditAfterRecreationAndAllowsExplicitRetry() = runTest(dispatcher) {
-        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
-        val coordinator = GenerationCoordinator(applicationScope)
-        val prepare = CompletableDeferred<Unit>()
-        val source = Conversation(id = "edit-retry-source", model = "model-1")
-        val question = ChatMessage(id = "edit-retry-question", conversationId = source.id, role = "user", content = "Original question")
-        val fake = FakeChatDataSource(true).apply {
-            conversations += source
-            messageMap[source.id] = listOf(question)
-            editPreparationGate = prepare
-            editPreparationFailure = IllegalStateException("Copy failed")
-        }
-        val original = AppViewModel(fake, generationCoordinator = coordinator)
-        val originalOwner = ViewModelStore().apply { put("app", original) }
-        advanceUntilIdle()
-        original.openConversation(source.id)
-        advanceUntilIdle()
-        original.setComposerText("Keep original draft")
-        original.openQuestionEditor(question)
-        original.submitEditedQuestion("Edited retry question")
-        runCurrent()
-        originalOwner.clear()
-        prepare.complete(Unit)
-        advanceUntilIdle()
-        val recreated = AppViewModel(fake, generationCoordinator = coordinator)
-        val recreatedOwner = ViewModelStore().apply { put("app", recreated) }
-        advanceUntilIdle()
-        assertEquals("Edited retry question", recreated.state.value.editingQuestion?.content)
-        assertEquals(UiText.Dynamic("Copy failed"), recreated.state.value.questionEditError)
-        assertFalse(recreated.state.value.questionEditBusy)
-        assertEquals("Keep original draft", recreated.state.value.composerText)
-        assertEquals(0, fake.editedGenerationCalls)
-        fake.editPreparationFailure = null
-        recreated.submitEditedQuestion(recreated.state.value.editingQuestion!!.content)
-        advanceUntilIdle()
-        assertEquals(1, fake.editedGenerationCalls)
-        assertEquals("Edited retry question", fake.editedGenerationContent)
-        assertEquals("Keep original draft", recreated.state.value.drafts[source.id]?.text)
-        assertEquals(listOf(question), fake.messageMap[source.id])
-        recreatedOwner.clear()
-        applicationScope.cancel()
-    }
-
-    @Test
-    fun cancellingManagedEditKeepsItsTextSeparateFromTheOriginalDraft() = runTest(dispatcher) {
-        val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
-        val coordinator = GenerationCoordinator(applicationScope)
-        val source = Conversation(id = "edit-cancel-source", model = "model-1")
-        val question = ChatMessage(id = "edit-cancel-question", conversationId = source.id, role = "user", content = "Original")
-        val fake = FakeChatDataSource(true).apply {
-            conversations += source
-            messageMap[source.id] = listOf(question)
-            editPreparationGate = CompletableDeferred()
-        }
-        val viewModel = AppViewModel(fake, generationCoordinator = coordinator)
-        val owner = ViewModelStore().apply { put("app", viewModel) }
-        advanceUntilIdle()
-        viewModel.openConversation(source.id)
-        advanceUntilIdle()
-        viewModel.setComposerText("Unrelated unsent draft")
-        viewModel.openQuestionEditor(question)
-        viewModel.submitEditedQuestion("Cancelled edit text")
-        runCurrent()
-        viewModel.stopGeneration(source.id)
-        advanceUntilIdle()
-        assertEquals("Cancelled edit text", viewModel.state.value.editingQuestion?.content)
-        assertFalse(viewModel.state.value.questionEditBusy)
-        assertEquals("Unrelated unsent draft", viewModel.state.value.composerText)
-        assertEquals(0, fake.editedGenerationCalls)
-        assertEquals(1, fake.conversations.size)
-        viewModel.closeQuestionEditor()
-        runCurrent()
-        assertFalse(coordinator.snapshots.value.containsKey(source.id))
-        owner.clear()
-        applicationScope.cancel()
-    }
-
-    @Test
     fun deletedFinishedConversationIsNotReintroducedByAnotherManagedStream() = runTest(dispatcher) {
         val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
         val coordinator = GenerationCoordinator(applicationScope)
@@ -2762,11 +2624,6 @@ private class FakeChatDataSource(withModel: Boolean, modelVisionStatus: VisionSt
     var sendMessageContinuationGate: CompletableDeferred<Unit>? = null
     var cancellationCleanupGate: CompletableDeferred<Unit>? = null
     var sendMessageCalls = 0
-    var editPreparationGate: CompletableDeferred<Unit>? = null
-    var editPreparationFailure: Throwable? = null
-    var editPreparationCalls = 0
-    var editedGenerationCalls = 0
-    var editedGenerationContent: String? = null
     var regenerateCalls = 0
     var noteSummaryFailure: Throwable? = null
     var noteSummaryModelId: String? = null
@@ -2911,38 +2768,6 @@ private class FakeChatDataSource(withModel: Boolean, modelVisionStatus: VisionSt
             content = "Branched answer",
         ))
         return branch
-    }
-
-    override suspend fun prepareEditedQuestion(messageId: String, newContent: String): ConversationDetail {
-        editPreparationCalls++
-        editPreparationGate?.await()
-        editPreparationFailure?.let { throw it }
-        val sourceMessage = messageMap.values.flatten().single { it.id == messageId }
-        val source = conversations.single { it.id == sourceMessage.conversationId }
-        val branch = source.copy(id = "edited-branch-$editPreparationCalls", title = newContent,
-            branchedFromConversationId = source.id, branchedFromMessageId = messageId)
-        val original = messageMap.getValue(source.id)
-        val prefix = original.takeWhile { it.id != messageId } + sourceMessage
-        val copied = prefix.map { it.copy(id = "${branch.id}-${it.id}", conversationId = branch.id,
-            content = if (it.id == messageId) newContent else it.content) }
-        conversations += branch
-        messageMap[branch.id] = copied
-        return ConversationDetail(branch, copied)
-    }
-
-    override fun regenerateEditedQuestion(id: String, request: SendMessageRequest): Flow<ChatEvent> = flow {
-        editedGenerationCalls++
-        val prefix = messageMap.getValue(id)
-        val user = prefix.last().copy(requestId = request.requestId)
-        editedGenerationContent = user.content
-        val assistant = ChatMessage(id = "edited-answer-$id", conversationId = id, requestId = request.requestId,
-            role = "assistant", status = "generating")
-        emit(ChatEvent.UserMessage(user))
-        emit(ChatEvent.AssistantMessage(assistant))
-        emit(ChatEvent.Delta("Edited response"))
-        sendMessageGate?.await()
-        messageMap[id] = prefix.dropLast(1) + user + assistant.copy(content = "Edited response", status = "completed")
-        emit(ChatEvent.Done(Usage(3, 4), false))
     }
 
     override suspend fun updateConversation(id: String, request: ConversationWriteRequest): Conversation {

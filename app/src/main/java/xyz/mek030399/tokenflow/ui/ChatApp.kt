@@ -1875,7 +1875,6 @@ private fun ChatPane(
             lineSpacing = chatLineSpacing,
             processExpandedByDefault = state.showProcess,
             onRegenerate = viewModel::regenerateLatest,
-            onEditQuestion = viewModel::openQuestionEditor,
             bookmarkedIds = state.bookmarks.map { it.messageId }.toSet(),
             notedMessageIds = state.notes.mapNotNull { it.sourceMessageId }.toSet(),
             scrollToMessageId = state.scrollToMessageId,
@@ -1981,7 +1980,6 @@ private fun MessageList(
     lineSpacing: Float,
     processExpandedByDefault: Boolean,
     onRegenerate: () -> Unit,
-    onEditQuestion: (ChatMessage) -> Unit,
     bookmarkedIds: Set<String>,
     notedMessageIds: Set<String>,
     scrollToMessageId: String?,
@@ -2070,8 +2068,6 @@ private fun MessageList(
                         processExpandedByDefault = processExpandedByDefault,
                         isLatestAssistant = isLastAssistant,
                         onRegenerate = onRegenerate,
-                        onEditQuestion = { onEditQuestion(message) },
-                        canEditQuestion = !generationActive,
                         bookmarked = message.id in bookmarkedIds,
                         savedAsNote = message.id in notedMessageIds,
                         onBookmark = { onBookmark(message.id) },
@@ -2126,8 +2122,6 @@ private fun MessageItem(
     processExpandedByDefault: Boolean,
     isLatestAssistant: Boolean,
     onRegenerate: () -> Unit,
-    onEditQuestion: () -> Unit,
-    canEditQuestion: Boolean,
     bookmarked: Boolean,
     savedAsNote: Boolean,
     onBookmark: () -> Unit,
@@ -2379,13 +2373,6 @@ private fun MessageItem(
                         }
                     }
                     if (expanded) ProcessDetails(events, message.status, onKnowledgeCitation)
-                }
-                if (isUser) Row(Modifier.align(Alignment.End)) {
-                    IconButton(onClick = onEditQuestion, enabled = canEditQuestion,
-                        modifier = Modifier.size(32.dp).testTag("edit_question_${message.id}")) {
-                        Icon(Icons.Outlined.Edit, stringResource(R.string.edit_question), Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer)
-                    }
                 }
                 if (!isUser && !streaming && speechReady) SpeechPlaybackBar(
                     loading = tts.loading,

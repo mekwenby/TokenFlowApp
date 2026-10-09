@@ -1,0 +1,2 @@
+Remove question editing and branch regeneration from user messages.
+Keep regular response retry, manual conversation branching, background generation, message search, context management, Android sharing, and knowledge document scopes.

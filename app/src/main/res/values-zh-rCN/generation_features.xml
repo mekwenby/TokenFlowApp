@@ -1,10 +1,4 @@
 <resources>
-    <string name="edit_question">编辑提问并重新生成</string>
-    <string name="edit_question_title">编辑提问</string>
-    <string name="edit_question_notice">编辑后将在新会话分支中重新生成，原会话、后续消息和附件均会保留。</string>
-    <string name="edit_question_submit">在新分支重新生成</string>
-    <string name="edit_question_retry">重试此提问</string>
-    <string name="edit_question_failed">无法准备编辑后的会话，修改内容仍保留在编辑框中。</string>
     <string name="generation_channel_ongoing_name">后台生成</string>
     <string name="generation_channel_completed_name">生成结果</string>
     <string name="generation_notification_ongoing_title">正在生成回复</string>

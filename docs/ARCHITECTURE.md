@@ -127,8 +127,8 @@ Chat 的会话列表与“功能与设置”入口互斥占用侧栏剩余高度
 
 `MainActivity` 接受系统分享 Intent，并使用可恢复的事件 ID 去重。`ShareDraftStore` 拥有附件副本与原子草稿状态；ViewModel 按会话管理文字和附件，输入框不再拥有独立文本状态。分享目标选择只追加草稿，模型初始化完成前保留待导入内容。
 
-## 应用级生成任务与编辑分支
+## 应用级生成任务
 
 GenerationCoordinator 使用 Application 生命周期的 CoroutineScope 持有请求与准备阶段，GenerationService 只负责前台提升、状态通知和停止命令；ViewModel 观察完整快照，重建后不重新发请求。启动前等待前台服务成功提升；未能提升时恢复提交草稿。收尾先检查数据库中的 requestId 接受状态并原子恢复/清理草稿，再发布非运行状态。进程恢复仅标记中断，不恢复网络调用。
 
-编辑提问通过 prepareEditedQuestion 创建保留有效前缀的分支，regenerateEditedQuestion 刷新已保存的提问引用并使用共同的发送预处理。Room v10 只新增会话 knowledgeScopeJson 列，以兼容默认值表示全部知识文档；9 → 10 为显式附加迁移。
+Room v10 只新增会话 knowledgeScopeJson 列，以兼容默认值表示全部知识文档；9 → 10 为显式附加迁移。

@@ -156,108 +156,21 @@ class TokenFlowAppTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun editingAQuestionGeneratesANewBranchAndPreservesOriginalHistoryAndDraft() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val source = Conversation(id = "edit-source", title = "Original conversation", model = "model-1")
-        val original = listOf(
-            ChatMessage(id = "edit-prior-user", conversationId = source.id, role = "user", content = "Prior question", createdAt = 1),
-            ChatMessage(id = "edit-prior-answer", conversationId = source.id, role = "assistant", content = "Prior answer", createdAt = 2),
-            ChatMessage(id = "edit-target", conversationId = source.id, role = "user", content = "Original question", createdAt = 3),
-            ChatMessage(id = "edit-old-answer", conversationId = source.id, role = "assistant", content = "Original answer", createdAt = 4),
-        )
-        val fake = UiFakeDataSource(withModel = true).apply { conversations += source; seedMessages(source.id, original) }
-        var editedTarget: String? = null
-        var generatedQuestion: String? = null
-        var generationRequest: SendMessageRequest? = null
-        val repository = object : ChatDataSource by fake {
-            override suspend fun prepareEditedQuestion(messageId: String, newContent: String): ConversationDetail {
-                editedTarget = messageId
-                val branch = source.copy(id = "edited-branch", title = newContent,
-                    branchedFromConversationId = source.id, branchedFromMessageId = messageId)
-                val prefix = original.takeWhile { it.id != messageId } + original.single { it.id == messageId }
-                val copied = prefix.map { message -> message.copy(id = "branch-${message.id}", conversationId = branch.id,
-                    content = if (message.id == messageId) newContent else message.content) }
-                fake.conversations += branch
-                fake.seedMessages(branch.id, copied)
-                return ConversationDetail(branch, copied)
-            }
-
-            override fun regenerateEditedQuestion(id: String, request: SendMessageRequest): Flow<ChatEvent> = flow {
-                generationRequest = request
-                val detail = fake.conversation(id)
-                val user = detail.messages.last().copy(requestId = request.requestId)
-                generatedQuestion = user.content
-                val assistant = ChatMessage(id = "edited-reply", conversationId = id, requestId = request.requestId,
-                    role = "assistant", status = "generating")
-                emit(ChatEvent.UserMessage(user))
-                emit(ChatEvent.AssistantMessage(assistant))
-                emit(ChatEvent.Delta("Reply to edited question"))
-                fake.seedMessages(id, detail.messages.dropLast(1) + user + assistant.copy(
-                    content = "Reply to edited question", status = "completed"))
-                emit(ChatEvent.Done(Usage(10, 5), false))
-            }
+    fun userMessagesDoNotExposeQuestionEditingAction() {
+        val conversation = Conversation(id = "no-question-edit", title = "No question edit", model = "model-1")
+        val question = ChatMessage(id = "plain-question", conversationId = conversation.id, role = "user", content = "Original question")
+        val fake = UiFakeDataSource(withModel = true).apply {
+            conversations += conversation
+            seedMessages(conversation.id, listOf(question))
         }
-        val viewModel = AppViewModel(repository)
-        val owner = ViewModelStore().apply { put("editing", viewModel) }
+        val viewModel = AppViewModel(fake)
+        val owner = ViewModelStore().apply { put("no-question-edit", viewModel) }
         try {
             composeRule.setContent { TokenFlowApp(viewModel) }
             composeRule.waitUntil(5_000) { viewModel.state.value.phase == AppPhase.READY }
-            composeRule.runOnIdle { viewModel.openConversation(source.id) }
-            composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages.size == original.size }
-            composeRule.runOnIdle { viewModel.setComposerText("Unsent original draft") }
-            composeRule.onNodeWithTag("edit_question_edit-target").performScrollTo().performClick()
-            composeRule.onNodeWithTag("question_edit_input").assert(
-                SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString("Original question")))
-            composeRule.onNodeWithTag("question_edit_input").performTextClearance()
-            composeRule.onNodeWithTag("question_edit_input").performTextInput("Edited question")
-            composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.edit_question_submit)).performClick()
-            composeRule.waitUntil(5_000) { viewModel.state.value.activeConversationId == "edited-branch" &&
-                viewModel.state.value.activeMessages.any { it.content == "Reply to edited question" } &&
-                viewModel.state.value.activeGeneration?.active == false }
-            assertEquals("edit-target", editedTarget)
-            assertEquals("Edited question", generatedQuestion)
-            assertNotNull(generationRequest?.requestId)
-            assertEquals(1, viewModel.state.value.activeMessages.count { it.role == "user" && it.content == "Edited question" })
-            assertFalse(viewModel.state.value.activeMessages.any { it.content == "Original answer" })
-            assertEquals(original, runBlocking { fake.conversation(source.id) }.messages)
-            assertEquals("Unsent original draft", viewModel.state.value.drafts[source.id]?.text)
-            composeRule.runOnIdle { viewModel.openConversation(source.id) }
-            composeRule.waitUntil(5_000) { viewModel.state.value.activeConversationId == source.id &&
-                viewModel.state.value.activeMessages.map { it.id } == original.map { it.id } }
-            composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).assertTextEquals("Unsent original draft")
-        } finally { owner.clear() }
-    }
-
-    @Test
-    fun cancellingQuestionEditingKeepsOriginalMessageAndUnsentDraft() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val source = Conversation(id = "cancel-edit", title = "Cancel edit", model = "model-1")
-        val question = ChatMessage(id = "cancel-edit-question", conversationId = source.id, role = "user", content = "Original question")
-        val fake = UiFakeDataSource(withModel = true).apply { conversations += source; seedMessages(source.id, listOf(question)) }
-        var editingCalls = 0
-        val repository = object : ChatDataSource by fake {
-            override suspend fun prepareEditedQuestion(messageId: String, newContent: String): ConversationDetail {
-                editingCalls++
-                error("Cancelled editing must not reach the repository")
-            }
-        }
-        val viewModel = AppViewModel(repository)
-        val owner = ViewModelStore().apply { put("editing", viewModel) }
-        try {
-            composeRule.setContent { TokenFlowApp(viewModel) }
-            composeRule.waitUntil(5_000) { viewModel.state.value.phase == AppPhase.READY }
-            composeRule.runOnIdle { viewModel.openConversation(source.id) }
-            composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages.size == 1 }
-            composeRule.runOnIdle { viewModel.setComposerText("Keep this draft") }
-            composeRule.onNodeWithTag("edit_question_${question.id}").performScrollTo().performClick()
-            composeRule.onNodeWithTag("question_edit_input").performTextClearance()
-            composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.edit_question_submit)).assertIsNotEnabled()
-            composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.cancel)).performClick()
-            composeRule.waitUntil(5_000) { viewModel.state.value.editingQuestion == null }
-            assertEquals(0, editingCalls)
-            assertEquals(listOf(question), viewModel.state.value.activeMessages)
-            assertEquals(1, fake.conversations.size)
-            composeRule.onNodeWithTag(UiTestTags.MESSAGE_INPUT).assertTextEquals("Keep this draft")
+            composeRule.runOnIdle { viewModel.openConversation(conversation.id) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.activeMessages == listOf(question) }
+            composeRule.onAllNodesWithTag("edit_question_${question.id}").assertCountEquals(0)
         } finally { owner.clear() }
     }
 

@@ -21,7 +21,6 @@ import kotlinx.coroutines.withContext
 import xyz.mek030399.tokenflow.data.ChatEvent
 import xyz.mek030399.tokenflow.data.ChatMessage
 import xyz.mek030399.tokenflow.data.ComposerDraft
-import xyz.mek030399.tokenflow.data.EditedQuestionSubmission
 import xyz.mek030399.tokenflow.data.ProcessEvent
 import xyz.mek030399.tokenflow.data.Usage
 import java.util.concurrent.atomic.AtomicBoolean
@@ -43,7 +42,6 @@ data class GenerationSnapshot(
     val revision: Long = 0,
     val submittedDraft: ComposerDraft? = null,
     val originConversationId: String = conversationId,
-    val editedQuestion: EditedQuestionSubmission? = null,
 ) {
     val active: Boolean get() = status == GenerationStatus.STARTING ||
         status == GenerationStatus.RUNNING || status == GenerationStatus.STOPPING
@@ -102,10 +100,9 @@ class GenerationCoordinator(
         resolveConversationId: suspend () -> String,
         onResolved: suspend (String, String) -> Unit = { _, _ -> },
         onSettled: suspend (GenerationSnapshot) -> Unit = {},
-        editedQuestion: EditedQuestionSubmission? = null,
         stream: (String) -> Flow<ChatEvent>,
     ): Job? = startInternal(provisionalConversationId, requestId, beforeStart, onSettled, submittedDraft,
-        resolveConversationId, onResolved, editedQuestion, stream)
+        resolveConversationId, onResolved, stream)
 
     private fun startInternal(
         conversationId: String,
@@ -115,14 +112,13 @@ class GenerationCoordinator(
         submittedDraft: ComposerDraft?,
         resolveConversationId: (suspend () -> String)? = null,
         onResolved: suspend (String, String) -> Unit = { _, _ -> },
-        editedQuestion: EditedQuestionSubmission? = null,
         stream: (String) -> Flow<ChatEvent>,
     ): Job? = synchronized(lock) {
         if (jobs[conversationId]?.isActive == true || mutableSnapshots.value[conversationId]?.active == true) {
             return@synchronized null
         }
         val initial = GenerationSnapshot(conversationId, ++nextRunId, requestId, GenerationStatus.STARTING,
-            submittedDraft = submittedDraft, editedQuestion = editedQuestion)
+            submittedDraft = submittedDraft)
         put(initial)
         try {
             lifecycle.onStarting(initial)

@@ -80,7 +80,6 @@ internal fun MessageSearchScreen(state: AppUiState, viewModel: AppViewModel, sho
 
 @Composable
 internal fun ConversationFeatureDialogs(state: AppUiState, viewModel: AppViewModel) {
-    if (state.editingQuestion != null) QuestionEditDialog(state, viewModel)
     if (state.knowledgeScopeOpen) KnowledgeScopeDialog(state, viewModel)
     if (state.contextOpen) ContextManagementDialog(state, viewModel)
     if (state.incomingShare != null && state.shareVisible && state.phase != AppPhase.LOADING) ShareImportDialog(state, viewModel)

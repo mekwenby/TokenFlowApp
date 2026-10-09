@@ -3,7 +3,6 @@ package xyz.mek030399.tokenflow.ui
 import androidx.annotation.StringRes
 import android.content.Intent
 import xyz.mek030399.tokenflow.data.ComposerDraft
-import xyz.mek030399.tokenflow.data.EditedQuestionSubmission
 import xyz.mek030399.tokenflow.data.IncomingShare
 import xyz.mek030399.tokenflow.data.SavedShareState
 import xyz.mek030399.tokenflow.data.ShareDraftStore
@@ -265,9 +264,6 @@ data class AppUiState(
     val knowledgeSearchBusy: Boolean = false,
     val knowledgeSearchError: UiText? = null,
     val knowledgeScopeOpen: Boolean = false,
-    val editingQuestion: ChatMessage? = null,
-    val questionEditBusy: Boolean = false,
-    val questionEditError: UiText? = null,
     val pendingKnowledgeChunkIds: List<Long> = emptyList(),
     val knowledgeSourcePreview: KnowledgeSnippet? = null,
     val cloudServers: List<CloudServerProfile> = emptyList(),
@@ -2040,58 +2036,6 @@ class AppViewModel internal constructor(
         }
     }
 
-    fun openQuestionEditor(message: ChatMessage) {
-        if (message.role != "user" || isGenerating(message.conversationId) || mutableState.value.contextBusy) return
-        mutableState.update { it.copy(editingQuestion = message, questionEditError = null) }
-    }
-
-    fun closeQuestionEditor() {
-        if (!mutableState.value.questionEditBusy) {
-            val message = mutableState.value.editingQuestion
-            message?.let {
-                generationCoordinator?.snapshots?.value?.get(it.conversationId)?.takeIf { snapshot ->
-                    !snapshot.active && snapshot.editedQuestion?.message?.id == it.id
-                }?.let { generationCoordinator?.discardFinished(it.conversationId) }
-            }
-            mutableState.update { it.copy(editingQuestion = null, questionEditError = null) }
-        }
-    }
-
-    fun submitEditedQuestion(content: String) {
-        val current = mutableState.value
-        val message = current.editingQuestion ?: return
-        if (current.questionEditBusy || isGenerating(message.conversationId)) return
-        if (content.isBlank() && current.attachments[message.conversationId].orEmpty().none { it.messageId == message.id }) return
-        mutableState.update { it.copy(questionEditBusy = true, questionEditError = null) }
-        if (generationCoordinator != null) {
-            rememberActiveDraft()
-            launchManagedQuestionEdit(EditedQuestionSubmission(message.copy(content = content),
-                mutableState.value.drafts[message.conversationId]))
-            return
-        }
-        viewModelScope.launch {
-            try {
-                val detail = repository.prepareEditedQuestion(message.id, content)
-                rememberActiveDraft()
-                mutableState.update { it.copy(conversations = upsertConversation(it.conversations, detail.conversation),
-                    messages = it.messages + (detail.conversation.id to detail.messages),
-                    attachments = it.attachments + (detail.conversation.id to detail.attachments),
-                    editingQuestion = null, questionEditBusy = false) }
-                openConversation(detail.conversation.id)
-                val request = SendMessageRequest(enableSearch = detail.conversation.enableSearch,
-                    enableRead = detail.conversation.enableRead, enableKnowledge = detail.conversation.enableKnowledge,
-                    knowledgeScope = detail.conversation.knowledgeScope, timeZone = TimeZone.getDefault().id,
-                    requestId = UUID.randomUUID().toString())
-                val appRepository = repository
-                launchGeneration(detail.conversation.id, requestId = request.requestId) {
-                    appRepository.regenerateEditedQuestion(detail.conversation.id, request)
-                }
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (error: Throwable) { mutableState.update { it.copy(questionEditError = readableError(error)) } }
-            finally { mutableState.update { it.copy(questionEditBusy = false) } }
-        }
-    }
-
     fun openNotifiedConversation(id: String) {
         val navigationVersion = invalidateSearchNavigation()
         viewModelScope.launch {
@@ -2288,9 +2232,8 @@ class AppViewModel internal constructor(
             requestId = UUID.randomUUID().toString(),
         )
         val appRepository = repository
-        val awaitingReply = mutableState.value.activeMessages.lastOrNull()?.role == "user"
         launchGeneration(id, requestId = request.requestId) {
-            if (awaitingReply) appRepository.regenerateEditedQuestion(id, request) else appRepository.regenerate(id, request)
+            appRepository.regenerate(id, request)
         }
     }
 
@@ -2755,65 +2698,20 @@ class AppViewModel internal constructor(
         val finishedRuns = mutableSetOf<Long>()
         val resolvedRuns = mutableSetOf<Long>()
         val initialRestoreRuns = mutableSetOf<Long>()
-        val resolvedEditRuns = mutableSetOf<Long>()
-        val finishedEditPreparations = mutableSetOf<Long>()
         var firstSnapshot = true
         viewModelScope.launch {
             draftsLoaded.await()
             coordinator.snapshots.collect { snapshots ->
                 if (firstSnapshot) {
                     initialRestoreRuns += snapshots.values.filter { it.active && it.originConversationId == NEW_DRAFT_KEY }.map { it.runId }
-                    snapshots.values.filter { it.editedQuestion != null &&
-                        (it.active || it.conversationId == it.originConversationId) }
-                        .maxByOrNull { it.runId }?.let { initialRestoreRuns += it.runId }
                     firstSnapshot = false
                 }
                 snapshots.values.filter { it.active }.forEach { activeRuns += it.runId }
-                val resolvedEdits = snapshots.values.filter { it.editedQuestion != null &&
-                    it.conversationId != it.originConversationId && resolvedEditRuns.add(it.runId) }
-                val failedEditPreparations = snapshots.values.filter { it.editedQuestion != null && !it.active &&
-                    it.conversationId == it.originConversationId && finishedEditPreparations.add(it.runId) }
-                val stateBeforeUpdate = mutableState.value
-                val selectResolvedEdits = resolvedEdits.filter { snapshot ->
-                    (stateBeforeUpdate.activeConversationId == snapshot.originConversationId && stateBeforeUpdate.questionEditBusy &&
-                        stateBeforeUpdate.editingQuestion?.id == snapshot.editedQuestion?.message?.id) ||
-                        (allowManagedSelectionRestore && snapshot.runId in initialRestoreRuns &&
-                            stateBeforeUpdate.activeConversationId == null && stateBeforeUpdate.composerText.isBlank() &&
-                            stateBeforeUpdate.pendingAttachments.isEmpty())
-                }.map { it.runId }.toSet()
                 mutableState.update { initial ->
                     var state = if (NEW_DRAFT_KEY !in snapshots) initial.copy(generations = initial.generations - NEW_DRAFT_KEY) else initial
                     snapshots.values.forEach { snapshot ->
                         val id = snapshot.conversationId
                         var drafts = state.drafts
-                        snapshot.editedQuestion?.let { edit ->
-                            val sourceId = snapshot.originConversationId
-                            if (sourceId !in drafts && edit.sourceDraft != null &&
-                                (snapshot.runId in initialRestoreRuns || id == sourceId && snapshot.active)) {
-                                drafts += sourceId to edit.sourceDraft
-                            }
-                            val restoring = allowManagedSelectionRestore && snapshot.runId in initialRestoreRuns &&
-                                (state.activeConversationId == sourceId || state.activeConversationId == null &&
-                                    state.composerText.isBlank() && state.pendingAttachments.isEmpty())
-                            if (id == sourceId && snapshot.active && restoring && state.editingQuestion == null) {
-                                state = state.copy(activeConversationId = sourceId, editingQuestion = edit.message,
-                                    questionEditBusy = true, questionEditError = null,
-                                    pendingAttachments = drafts[sourceId]?.attachments.orEmpty())
-                            }
-                            if (snapshot in failedEditPreparations && (restoring ||
-                                state.questionEditBusy && state.editingQuestion?.id == edit.message.id)) {
-                                state = state.copy(activeConversationId = if (restoring && state.activeConversationId == null) sourceId else state.activeConversationId,
-                                    editingQuestion = edit.message, questionEditBusy = false,
-                                    pendingAttachments = if (restoring) drafts[sourceId]?.attachments.orEmpty() else state.pendingAttachments,
-                                    questionEditError = snapshot.error?.let(::readableError))
-                            }
-                            if (snapshot in resolvedEdits) {
-                                if (sourceId !in snapshots) state = state.copy(generations = state.generations - sourceId)
-                                if (state.questionEditBusy && state.editingQuestion?.id == edit.message.id) {
-                                    state = state.copy(editingQuestion = null, questionEditBusy = false, questionEditError = null)
-                                }
-                            }
-                        }
                         val provisional = drafts[NEW_DRAFT_KEY]
                         if (snapshot.originConversationId == NEW_DRAFT_KEY && id != NEW_DRAFT_KEY) {
                             if (provisional?.submittedRequestId == snapshot.requestId) drafts -= NEW_DRAFT_KEY
@@ -2848,9 +2746,6 @@ class AppViewModel internal constructor(
                         )
                     }
                     state
-                }
-                resolvedEdits.forEach { snapshot ->
-                    viewModelScope.launch { loadEditedBranch(snapshot, snapshot.runId in selectResolvedEdits) }
                 }
                 initialRestoreRuns.removeAll(snapshots.values.filter { !it.active || it.conversationId != NEW_DRAFT_KEY }.map { it.runId }.toSet())
                 snapshots.values.filter { it.originConversationId == NEW_DRAFT_KEY && it.conversationId != NEW_DRAFT_KEY &&
@@ -2890,74 +2785,6 @@ class AppViewModel internal constructor(
                     }
                 }
             }
-        }
-    }
-
-    private suspend fun loadEditedBranch(snapshot: GenerationSnapshot, select: Boolean) {
-        try {
-            val detail = repository.conversation(snapshot.conversationId)
-            kotlinx.coroutines.currentCoroutineContext().ensureActive()
-            val current = mutableState.value
-            val shouldSelect = select && current.editingQuestion == null &&
-                (current.activeConversationId == snapshot.originConversationId ||
-                    allowManagedSelectionRestore && current.activeConversationId == null && current.composerText.isBlank() &&
-                        current.pendingAttachments.isEmpty()) &&
-                generationCoordinator?.snapshots?.value?.get(snapshot.originConversationId)?.active != true
-            if (shouldSelect) rememberActiveDraft()
-            mutableState.update { state ->
-                val running = generationCoordinator?.snapshots?.value?.get(snapshot.conversationId)?.takeIf { it.active }
-                var messages = detail.messages
-                listOfNotNull(running?.userMessage?.message, running?.assistantMessage).forEach { message ->
-                    val index = messages.indexOfFirst { it.id == message.id }
-                    messages = if (index < 0) messages + message else messages.toMutableList().also { it[index] = message }
-                }
-                state.copy(conversations = upsertConversation(state.conversations, detail.conversation),
-                    messages = state.messages + (snapshot.conversationId to messages),
-                    attachments = state.attachments + (snapshot.conversationId to
-                        (detail.attachments + running?.userMessage?.attachments.orEmpty()).distinctBy { it.id }),
-                    activeConversationId = if (shouldSelect) snapshot.conversationId else state.activeConversationId,
-                    config = if (shouldSelect) detail.conversation.toConfig() else state.config,
-                    enableSearch = if (shouldSelect) detail.conversation.enableSearch else state.enableSearch,
-                    enableRead = if (shouldSelect) detail.conversation.enableRead else state.enableRead,
-                    enableKnowledge = if (shouldSelect) detail.conversation.enableKnowledge else state.enableKnowledge,
-                    pendingAttachments = if (shouldSelect) state.drafts[snapshot.conversationId]?.attachments.orEmpty() else state.pendingAttachments,
-                )
-            }
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (error: Throwable) { handleError(error) }
-    }
-
-    private fun launchManagedQuestionEdit(submission: EditedQuestionSubmission) {
-        val coordinator = requireNotNull(generationCoordinator)
-        val appRepository = repository
-        val draftStore = shareDraftStore
-        val requestId = UUID.randomUUID().toString()
-        var branch: ConversationDetail? = null
-        try {
-            val started = coordinator.startResolvingConversation(
-                provisionalConversationId = submission.message.conversationId,
-                requestId = requestId,
-                editedQuestion = submission,
-                beforeStart = {
-                    submission.sourceDraft?.let { originalDraft ->
-                        draftStore?.update { saved -> saved.copy(drafts = saved.drafts +
-                            (submission.message.conversationId to originalDraft)) }
-                    }
-                },
-                resolveConversationId = {
-                    appRepository.prepareEditedQuestion(submission.message.id, submission.message.content)
-                        .also { branch = it }.conversation.id
-                },
-                stream = { id ->
-                    val conversation = requireNotNull(branch).conversation
-                    appRepository.regenerateEditedQuestion(id, SendMessageRequest(enableSearch = conversation.enableSearch,
-                        enableRead = conversation.enableRead, enableKnowledge = conversation.enableKnowledge,
-                        knowledgeScope = conversation.knowledgeScope, timeZone = TimeZone.getDefault().id, requestId = requestId))
-                },
-            )
-            if (started == null) mutableState.update { it.copy(questionEditBusy = false, questionEditError = uiText(R.string.wait_for_response)) }
-        } catch (error: Throwable) {
-            mutableState.update { it.copy(questionEditBusy = false, questionEditError = readableError(error)) }
         }
     }
 

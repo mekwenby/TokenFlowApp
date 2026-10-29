@@ -2325,8 +2325,12 @@ class TokenFlowAppTest {
         val headerBounds = header.fetchSemanticsNode().boundsInRoot
         val contentBounds = content.fetchSemanticsNode().boundsInRoot
         val expectedVerticalPadding = with(density) { 6.dp.toPx() }
-        assertEquals(expectedVerticalPadding, contentBounds.top - headerBounds.bottom, 1f)
-        assertEquals(expectedVerticalPadding, blockBounds.bottom - contentBounds.bottom, 1f)
+        // Compose may include padding in the tagged text's semantics bounds. The text
+        // layout itself excludes modifier padding, so compare the actual layout heights.
+        val actualVerticalPadding = blockBounds.height - headerBounds.height - layouts.single().size.height
+        assertEquals(expectedVerticalPadding * 2, actualVerticalPadding, 1f)
+        assertTrue(contentBounds.top >= headerBounds.bottom)
+        assertTrue(contentBounds.bottom <= blockBounds.bottom)
 
         composeRule.onNodeWithTag(UiTestTags.COPY_CODE_BLOCK).performClick()
         composeRule.runOnIdle {

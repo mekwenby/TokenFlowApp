@@ -505,4 +505,5 @@
     <string name="knowledge_search_loading">正在所选范围中检索…</string>
     <string name="knowledge_search_empty_scope">当前范围内没有找到相关片段。</string>
     <string name="knowledge_search_failed">知识检索失败，请重试。</string>
+    <string name="markdown_source_link_unavailable">［来源链接未提供］</string>
 </resources>

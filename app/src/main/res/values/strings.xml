@@ -508,4 +508,5 @@
     <string name="knowledge_search_loading">Searching within the selected range…</string>
     <string name="knowledge_search_empty_scope">No relevant passages found in this range.</string>
     <string name="knowledge_search_failed">Knowledge search failed. Try again.</string>
+    <string name="markdown_source_link_unavailable">[source link unavailable]</string>
 </resources>

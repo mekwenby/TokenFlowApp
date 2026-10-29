@@ -15,7 +15,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -52,6 +54,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
@@ -63,6 +66,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.BaselineShift
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -102,12 +106,14 @@ import org.commonmark.node.StrongEmphasis
 import org.commonmark.node.Text as MarkdownText
 import org.commonmark.node.ThematicBreak
 import org.commonmark.parser.Parser
+import org.commonmark.parser.IncludeSourceSpans
 import org.jsoup.Jsoup
 import org.jsoup.nodes.DocumentType
 import org.jsoup.parser.Parser as HtmlParser
 
 private val markdownParser: Parser = Parser.builder()
     .extensions(listOf(AutolinkExtension.create(), TablesExtension.create()))
+    .includeSourceSpans(IncludeSourceSpans.BLOCKS_AND_INLINES)
     .build()
 
 private val linkBlueLight = Color(0xFF1565C0)
@@ -148,7 +154,11 @@ internal fun scaledChatLineHeight(
     return lerp(fontSize, lineHeight, spacing)
 }
 
-internal fun parseMarkdown(markdown: String): Node = markdownParser.parse(markdown)
+internal fun parseMarkdown(markdown: String): Node {
+    val document = markdownParser.parse(markdown)
+    val compatible = repairCjkStrongEmphasis(markdown, document)
+    return if (compatible == markdown) document else markdownParser.parse(compatible)
+}
 
 @Composable
 fun MarkdownContent(
@@ -305,8 +315,9 @@ private fun InlineNodeText(
     onKnowledgeCitationClick: (Long) -> Unit,
 ) {
     val darkTheme = LocalTokenFlowDarkTheme.current
-    val annotated = remember(node, darkTheme, knowledgeCitations, knowledgeCitationLabels) {
-        inlineAnnotatedString(node, darkTheme, knowledgeCitations, knowledgeCitationLabels)
+    val unsupportedCitationLabel = stringResource(R.string.markdown_source_link_unavailable)
+    val annotated = remember(node, darkTheme, knowledgeCitations, knowledgeCitationLabels, unsupportedCitationLabel) {
+        inlineAnnotatedString(node, darkTheme, knowledgeCitations, knowledgeCitationLabels, unsupportedCitationLabel)
     }
     val uriHandler = LocalUriHandler.current
     @Suppress("DEPRECATION")
@@ -342,13 +353,15 @@ internal fun inlineAnnotatedString(
     darkTheme: Boolean = false,
     knowledgeCitations: List<KnowledgeCitation> = emptyList(),
     knowledgeCitationLabels: Map<Long, String> = emptyMap(),
+    unsupportedCitationLabel: String = "[source link unavailable]",
 ): AnnotatedString = buildAnnotatedString {
     val citationsByMarker = knowledgeCitations.associateBy(KnowledgeCitation::marker)
     data class HtmlFrame(val tag: String, val popCount: Int, val suppresses: Boolean = false)
     val htmlFrames = mutableListOf<HtmlFrame>()
     var suppressed = 0
 
-    fun appendMarkdownText(literal: String) {
+    fun appendMarkdownText(raw: String) {
+        val literal = readableProviderCitations(raw, unsupportedCitationLabel)
         var cursor = 0
         knowledgeCitationPattern.findAll(literal).forEach { match ->
             append(literal, cursor, match.range.first)
@@ -1204,27 +1217,39 @@ private fun MarkdownTable(
     onKnowledgeCitationClick: (Long) -> Unit,
 ) {
     val rows = remember(table) { tableRows(table) }
-    Column(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
-    ) {
-        rows.forEachIndexed { rowIndex, row ->
-            Row {
-                children<TableCell>(row).forEach { cell ->
-                    Box(
-                        Modifier.width(160.dp)
-                            .border(0.5.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
-                            .padding(8.dp),
-                    ) {
-                        InlineNodeText(
-                            cell,
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontWeight = if (rowIndex == 0) FontWeight.SemiBold else FontWeight.Normal,
-                            ),
-                            knowledgeCitations = knowledgeCitations,
-                            knowledgeCitationLabels = knowledgeCitationLabels,
-                            onKnowledgeCitationClick = onKnowledgeCitationClick,
-                        )
+    val columnCount = rows.maxOfOrNull { children<TableCell>(it).size }?.coerceAtLeast(1) ?: 1
+    val minimumWidth = 128.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
+    BoxWithConstraints(Modifier.fillMaxWidth().testTag("markdown_table")) {
+        val cellWidth = if (constraints.hasBoundedWidth) maxOf(minimumWidth, maxWidth / columnCount) else 160.dp
+        Column(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+        ) {
+            rows.forEachIndexed { rowIndex, row ->
+                Row(Modifier.height(IntrinsicSize.Min)) {
+                    children<TableCell>(row).forEachIndexed { columnIndex, cell ->
+                        Box(
+                            Modifier.width(cellWidth).fillMaxHeight()
+                                .testTag("markdown_table_cell_${rowIndex}_$columnIndex")
+                                .border(0.5.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+                                .padding(8.dp),
+                        ) {
+                            InlineNodeText(
+                                cell,
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontWeight = if (rowIndex == 0) FontWeight.SemiBold else FontWeight.Normal,
+                                    textAlign = when (cell.alignment) {
+                                        TableCell.Alignment.LEFT -> TextAlign.Left
+                                        TableCell.Alignment.CENTER -> TextAlign.Center
+                                        TableCell.Alignment.RIGHT -> TextAlign.Right
+                                        else -> TextAlign.Start
+                                    },
+                                ),
+                                knowledgeCitations = knowledgeCitations,
+                                knowledgeCitationLabels = knowledgeCitationLabels,
+                                onKnowledgeCitationClick = onKnowledgeCitationClick,
+                            )
+                        }
                     }
                 }
             }

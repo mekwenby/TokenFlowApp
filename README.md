@@ -18,6 +18,7 @@
 - 助手消息显示可在全局设置中修改的昵称，并保留生成回复时实际使用的模型 ID。
 - 支持图片、相机、PDF、Word、Excel、纯文本和源码附件，以及视觉模型兜底。
 - 内置收藏、Markdown 笔记、智能体和本地 FTS 知识库；知识检索可按会话选择全部或指定文档范围，引用可在 App 内定位并预览原文。笔记支持逐篇导入和导出 `.md`。
+- Markdown 表格支持同行等高和按手机宽度分配列宽，兼容中文标点旁的加粗；服务内部引用缺少公开链接时显示明确提示。
 - 模型可调用完全在设备内执行的科学计算器和单位换算工具，无需联网工具服务。
 - 可选 Exa 联网搜索、内置或 InfoFlow URL 读取，以及 Xiaomi MiMo 语音生成。
 - Infinite Cloud 可通过固定主机指纹的 SSH 连接 Linux，即时运行 Shell/Python/JavaScript、按用户明确要求创建后台任务、管理远程文件，并调用远端 stdio 或 Streamable HTTP MCP 工具。
@@ -30,7 +31,7 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 版本 | `2.6.2`（`versionCode 24`） |
+| 版本 | `2.6.3`（`versionCode 25`） |
 | 正式包名 | `xyz.mek030399.tokenflow` |
 | Debug 包名 | `xyz.mek030399.tokenflow.debug` |
 | 正式证书 SHA-256 | `FEC865BEDC77C742B0E1B3D93A05FCEEBFA6075F46E1C8242B8F2261F0767AFE` |

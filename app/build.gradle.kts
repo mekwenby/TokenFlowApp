@@ -99,8 +99,8 @@ android {
         applicationId = "xyz.mek030399.tokenflow"
         minSdk = 26
         targetSdk = 36
-        versionCode = 24
-        versionName = "2.6.2"
+        versionCode = 25
+        versionName = "2.6.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }

@@ -17,6 +17,7 @@
 - 中文标点附近的 Markdown 加粗、嵌套行内格式、转义与代码保护，以及没有 URL 的服务内部引用显示
 - Token/排版、主题、笔记重写校验和工作区状态
 - Infinite Cloud 私钥拒绝规则、工具启用边界、MCP 名称规范化和云配置归档泄密边界
+- `BuiltInAgentsTest`：内置 SYAN 的固定身份、完整提示词和默认工具配置、会话模型继承及自定义副本行为
 
 ### Instrumentation 主要覆盖
 
@@ -27,6 +28,7 @@
 - 2 MiB 及已有更大笔记的分块读取、跨块 UTF-8/NUL、标题与编辑/删除竞争、生成状态与会话设置并发
 - Compose 主要工作流和 Media3 播放状态
 - Markdown 变长单元格的同行等高、手机两列宽度、大字体重排及宽表横向滚动
+- `BuiltInAgentRepositoryTest`：打包提示词完整性、内置原版写入/删除保护、会话提示词快照，以及归档导入导出的保留 ID 边界
 
 ## 本地门禁
 
@@ -146,6 +148,7 @@ $TokenFlowDebugApk = '.\app\build\outputs\apk\debug\app-debug.apk'
 | 流式 UI | 长正文、过程、Token/cache、完成前后按钮不抖动 |
 | Markdown | 长文、表格、代码、外部 URL、本地 citation、伪造 citation |
 | 工作区 | 收藏级联、笔记重写、快照去重、知识检索过程和来源预览 |
+| 内置 SYAN | 工作区与分享入口仅一个内置项、只读详情、开始聊天与模型继承、复制保存/取消、原版保护、128K 模型的完整请求及容量不足提示 |
 | 附件 | 图片、相机 EXIF、PDF、Word、Excel、视觉兜底 |
 | 生命周期 | 进程中断恢复、旋转、软键盘、切换会话继续生成 |
 | 外观 | 中英文、六主题、字体/字间距/行间距、头像裁剪 |

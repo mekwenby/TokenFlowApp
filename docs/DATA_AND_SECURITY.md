@@ -36,7 +36,7 @@ App 是本地 BYOK 客户端，但“本地”不表示所有内容只留在设�
 | `app_settings` | 默认模型、工具、提示词和全局设置 |
 | `bookmarks` | Assistant 消息收藏 |
 | `notes` | Markdown 笔记及可选来源消息 ID |
-| `agents` | 智能体配置 |
+| `agents` | 自定义智能体配置，不含 App 内置原版 |
 | `knowledge_documents` | 知识文件索引、状态和可选 `sourceNoteId` |
 | `knowledge_chunks` | 文档分块正文和位置 |
 | `knowledge_chunks_fts` | 本地全文检索索引 |
@@ -54,6 +54,14 @@ App 是本地 BYOK 客户端，但“本地”不表示所有内容只留在设�
 - note 的 `sourceMessageId` 不是外键；删除会话不会删除已创建的笔记。
 - knowledge document 的 `sourceNoteId` 是可空唯一索引，不是外键。笔记导入知识库后是独立快照，编辑或删除笔记不影响副本；删除副本后可从原笔记重新导入。
 - 删除 cloud server 会删除其 MCP 定义和本地凭据、解绑会话/智能体；任务历史保留服务器名称快照，远端文件和任务目录不会被删除。
+
+### 内置 SYAN 与提示词快照
+
+SYAN（程书妍 · AI 原创角色）的完整提示词作为 `res/raw/syan_system_prompt.md` 随 APK 分发，以固定 ID `builtin:syan` 提供，不写入 `agents` 表；此功能不改变 Room v10，也不新增迁移。原版不能保存修改或删除，仓库与配置导入都会拒绝覆盖此保留 ID。
+
+创建会话时将角色提示词保存到现有会话结构中；更新 App 内置原版只影响以后创建的会话，既有会话和已保存自定义副本保留提示词快照。“复制修改”保存后使用独立 UUID 写入 `agents`，副本之后的修改、删除不会影响内置原版。
+
+内置角色的聊天沿用现有模型和工具数据流，完整系统提示词会随请求发送给用户选择的模型供应商。默认启用搜索和网页读取、关闭本地知识库与 Infinite Cloud；实际工具可用性继续遵循用户已有服务配置及各自的数据外发边界。
 
 ### 消息 metadata
 
@@ -114,6 +122,8 @@ Android Keystore 只保护 App 内凭据，不是 APK 发布签名 keystore。�
 - 最短 10 字符密码
 
 归档包括供应商及其 API Key、模型、默认模型、视觉状态/兜底、Exa/MiMo Key、MiMo 音色、全局助手昵称、全局系统提示词、URL Reader、智能体，以及非敏感的 Infinite Cloud 服务器/MCP 定义和已固定主机指纹。
+
+智能体归档仅包含自定义智能体，内置 SYAN 原版由 App 资源提供，不进入 `.tfcfg`；其已保存副本与其他自定义智能体一样正常导入导出。导入预览和应用阶段均拒绝保留 ID `builtin:syan`，避免归档覆盖内置定义；同名自定义智能体可以存在。
 
 Infinite Cloud SSH 私钥与口令、MCP 环境变量值和 HTTP 请求头值绝不进入 `.tfcfg`。导入后的服务器和 MCP 配置会明确标记为需要重新填写凭据。
 

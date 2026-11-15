@@ -1,0 +1,4 @@
+Add SYAN (Cheng Shuyan, an original AI character) as a fixed built-in agent with the complete character prompt.
+New chats follow the global default model. Web search and URL reading are enabled when configured.
+View the original, start a chat, or make an editable custom copy.
+A model with a context window of 128K or larger is recommended for the full prompt.

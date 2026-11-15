@@ -582,6 +582,7 @@ class ChatRepository(
     private val mimoTtsClient: MimoTtsClient? = null,
     private val infoFlowReader: UrlContentReader? = null,
     private val infiniteCloud: InfiniteCloudManager? = null,
+    private val builtInAgents: List<AgentProfile> = emptyList(),
 ) : ChatDataSource {
     private val conversationOperationLocks = ConcurrentHashMap<String, Mutex>()
     private val conversationUpdateLocks = ConcurrentHashMap<String, Mutex>()
@@ -622,7 +623,7 @@ class ChatRepository(
             globalSettings = globalSettings(),
             bookmarks = dao.bookmarks().mapNotNull { bookmark -> bookmarkedMessage(bookmark) },
             notes = dao.notes().map(NoteEntity::toDomain),
-            agents = dao.agents().map(AgentEntity::toDomain),
+            agents = builtInAgents + dao.agents().filterNot { BuiltInAgents.isBuiltIn(it.id) }.map(AgentEntity::toDomain),
             knowledgeDocuments = dao.knowledgeDocuments().map(KnowledgeDocumentEntity::toDomain),
             cloudServers = infiniteCloud?.servers().orEmpty(),
             cloudMcpServers = dao.cloudMcpServers().map { entity ->
@@ -1501,6 +1502,7 @@ class ChatRepository(
     override suspend fun deleteNotes(ids: Set<String>) = dao.deleteNotes(ids)
 
     override suspend fun saveAgent(agent: AgentProfile): AgentProfile {
+        require(!BuiltInAgents.isBuiltIn(agent.id)) { "Built-in agents cannot be edited; create a copy instead" }
         agent.modelId?.let { requireNotNull(dao.model(it)) { "Model not found" } }
         require(agent.name.isNotBlank()) { "Agent name is required" }
         if (agent.enableInfiniteCloud) requireReadyCloudServer(agent.cloudServerId)
@@ -1515,15 +1517,19 @@ class ChatRepository(
         return stored
     }
 
-    override suspend fun deleteAgent(id: String) = dao.deleteAgent(id)
+    override suspend fun deleteAgent(id: String) {
+        require(!BuiltInAgents.isBuiltIn(id)) { "Built-in agents cannot be deleted" }
+        dao.deleteAgent(id)
+    }
 
     override suspend fun createConversationFromAgent(id: String): Conversation {
-        val agent = requireNotNull(dao.agent(id)) { "Agent not found" }.toDomain()
+        val agent = builtInAgents.firstOrNull { it.id == id }
+            ?: requireNotNull(dao.agent(id)) { "Agent not found" }.toDomain()
         return createConversation(
             ConversationWriteRequest(
                 title = agent.name,
                 model = agent.modelId,
-                modelMode = SettingMode.OVERRIDE,
+                modelMode = if (agent.modelId == null) SettingMode.INHERIT else SettingMode.OVERRIDE,
                 thinkingEffort = agent.thinkingEffort,
                 systemPrompt = agent.systemPrompt,
                 systemPromptMode = SettingMode.OVERRIDE,
@@ -2051,7 +2057,7 @@ class ChatRepository(
                 globalSystemPrompt = settings.systemPrompt,
                 globalUrlReaderBackend = settings.urlReaderBackend,
                 globalAssistantNickname = settings.assistantNickname,
-                agents = dao.agents().map(AgentEntity::toDomain),
+                agents = dao.agents().filterNot { BuiltInAgents.isBuiltIn(it.id) }.map(AgentEntity::toDomain),
                 cloudServers = infiniteCloud?.servers().orEmpty().map { it.copy(keyConfigured = false) },
                 cloudMcpServers = dao.cloudMcpServers().map { it.toDomain(false).copy(secretsConfigured = false) },
             ),
@@ -2066,6 +2072,7 @@ class ChatRepository(
         require(payload.providers.map { it.provider.id }.distinct().size == payload.providers.size) { "Duplicate provider IDs" }
         require(payload.models.map(ModelProfile::id).distinct().size == payload.models.size) { "Duplicate model IDs" }
         require(payload.agents.map(AgentProfile::id).distinct().size == payload.agents.size) { "Duplicate agent IDs" }
+        require(payload.agents.none { BuiltInAgents.isBuiltIn(it.id) }) { "Cannot import a reserved built-in agent ID" }
         require(payload.cloudServers.map(CloudServerProfile::id).distinct().size == payload.cloudServers.size) { "Duplicate cloud server IDs" }
         require(payload.cloudMcpServers.map(CloudMcpServer::id).distinct().size == payload.cloudMcpServers.size) { "Duplicate MCP server IDs" }
         require(
@@ -2176,6 +2183,7 @@ class ChatRepository(
 
     override suspend fun applyImport(preview: ImportPreview) = cloudConfigurationMutationLock.withLock {
         val payload = preview.payload
+        require(payload.agents.none { BuiltInAgents.isBuiltIn(it.id) }) { "Cannot import a reserved built-in agent ID" }
         val normalizedCloudServers = payload.cloudServers.map(CloudServerProfile::normalizedForArchiveImport)
         val normalizedCloudMcpServers = payload.cloudMcpServers.map(CloudMcpServer::normalizedForArchiveImport)
         val defaultModelId = resolveImportedDefaultModelId(

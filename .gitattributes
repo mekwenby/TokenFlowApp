@@ -4,6 +4,8 @@
 *.kt text eol=lf
 *.kts text eol=lf
 *.md text eol=lf
+# Preserve the bundled source prompt byte for byte, including its original line endings.
+app/src/main/res/raw/syan_system_prompt.md -text whitespace=cr-at-eol
 *.properties text eol=lf
 *.pro text eol=lf
 *.sh text eol=lf

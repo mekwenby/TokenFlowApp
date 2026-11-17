@@ -2156,6 +2156,8 @@ private fun MessageItem(
         ?.trim()
         ?.takeIf(String::isNotEmpty)
     val events = generation?.events?.takeIf { it.isNotEmpty() } ?: metadata.events
+    val sourceEvents = events.filter { it.type == "tool_completed" && it.name in setOf("web_search", "read_url") }
+    val webLinkTitles = remember(sourceEvents) { sourceLinkTitles(sourceEvents) }
     val knowledgeCitations = allowedAssistantKnowledgeCitations(
         persisted = metadata.knowledgeCitations,
         liveEvents = generation?.events.orEmpty(),
@@ -2291,6 +2293,7 @@ private fun MessageItem(
                             markdown = message.content,
                             knowledgeCitations = knowledgeCitations,
                             onKnowledgeCitationClick = onKnowledgeCitation,
+                            webLinkTitles = webLinkTitles,
                         )
                         if (generationActive && generationActivity != GenerationActivity.CALLING_MODEL) {
                             GenerationStatus(

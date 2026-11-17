@@ -82,7 +82,7 @@ class MarkdownCompatibilityTest {
     @Test fun actualSourceLinksRemainClickableBesideUnavailableProviderCitations() {
         val rendered = inlineAnnotatedString(parseMarkdown("\uE200cite\uE202turn0search0\uE201 https://example.com/source"))
 
-        assertEquals("[source link unavailable] https://example.com/source", rendered.text)
+        assertEquals("[source link unavailable] example.com", rendered.text)
         assertEquals(listOf("https://example.com/source"), rendered.getStringAnnotations("URL", 0, rendered.length).map { it.item })
     }
 

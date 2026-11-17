@@ -41,6 +41,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
@@ -123,6 +124,7 @@ private val knowledgeCitationPattern = Regex("\\[\\[KB:[0-9]+]]")
 internal val LocalChatLetterSpacing = compositionLocalOf { TextUnit.Unspecified }
 internal val LocalChatLineSpacing = compositionLocalOf { ChatDisplayPreferences.DEFAULT_LINE_SPACING }
 internal val LocalNotificationDispatcher = compositionLocalOf<(String) -> Unit> { {} }
+private val LocalWebLinkTitles = compositionLocalOf<Map<String, String>> { emptyMap() }
 
 internal fun scaledChatLineHeightSp(
     fontSizeSp: Float,
@@ -166,6 +168,7 @@ fun MarkdownContent(
     modifier: Modifier = Modifier,
     knowledgeCitations: List<KnowledgeCitation> = emptyList(),
     onKnowledgeCitationClick: (Long) -> Unit = {},
+    webLinkTitles: Map<String, String> = emptyMap(),
 ) {
     val document = remember(markdown) { parseMarkdown(markdown) }
     val resources = LocalResources.current
@@ -176,17 +179,19 @@ fun MarkdownContent(
             append(resources.getString(R.string.knowledge_source_chunk, citation.position + 1))
         }
     }
-    SelectionContainer {
-        Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            var child = document.firstChild
-            while (child != null) {
-                RenderBlock(
-                    node = child,
-                    knowledgeCitations = knowledgeCitations,
-                    knowledgeCitationLabels = knowledgeCitationLabels,
-                    onKnowledgeCitationClick = onKnowledgeCitationClick,
-                )
-                child = child.next
+    CompositionLocalProvider(LocalWebLinkTitles provides webLinkTitles) {
+        SelectionContainer {
+            Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                var child = document.firstChild
+                while (child != null) {
+                    RenderBlock(
+                        node = child,
+                        knowledgeCitations = knowledgeCitations,
+                        knowledgeCitationLabels = knowledgeCitationLabels,
+                        onKnowledgeCitationClick = onKnowledgeCitationClick,
+                    )
+                    child = child.next
+                }
             }
         }
     }
@@ -316,8 +321,9 @@ private fun InlineNodeText(
 ) {
     val darkTheme = LocalTokenFlowDarkTheme.current
     val unsupportedCitationLabel = stringResource(R.string.markdown_source_link_unavailable)
-    val annotated = remember(node, darkTheme, knowledgeCitations, knowledgeCitationLabels, unsupportedCitationLabel) {
-        inlineAnnotatedString(node, darkTheme, knowledgeCitations, knowledgeCitationLabels, unsupportedCitationLabel)
+    val webLinkTitles = LocalWebLinkTitles.current
+    val annotated = remember(node, darkTheme, knowledgeCitations, knowledgeCitationLabels, unsupportedCitationLabel, webLinkTitles) {
+        inlineAnnotatedString(node, darkTheme, knowledgeCitations, knowledgeCitationLabels, unsupportedCitationLabel, webLinkTitles)
     }
     val uriHandler = LocalUriHandler.current
     @Suppress("DEPRECATION")
@@ -354,11 +360,29 @@ internal fun inlineAnnotatedString(
     knowledgeCitations: List<KnowledgeCitation> = emptyList(),
     knowledgeCitationLabels: Map<Long, String> = emptyMap(),
     unsupportedCitationLabel: String = "[source link unavailable]",
+    webLinkTitles: Map<String, String> = emptyMap(),
 ): AnnotatedString = buildAnnotatedString {
     val citationsByMarker = knowledgeCitations.associateBy(KnowledgeCitation::marker)
-    data class HtmlFrame(val tag: String, val popCount: Int, val suppresses: Boolean = false)
+    data class HtmlFrame(val tag: String, val popCount: Int, val suppresses: Boolean = false, val href: String? = null)
     val htmlFrames = mutableListOf<HtmlFrame>()
     var suppressed = 0
+
+    fun rawWebLink(node: Node?): Boolean {
+        val link = node as? Link ?: return false
+        val text = link.firstChild as? MarkdownText ?: return false
+        return text.next == null && isSafeHttpUrl(link.destination) && isSafeHttpUrl(text.literal.trim())
+    }
+
+    fun citationText(node: MarkdownText): String {
+        var text = node.literal
+        val opens = text.endsWith("[[") && rawWebLink(node.next) &&
+            (node.next?.next as? MarkdownText)?.literal?.startsWith("]]") == true
+        val closes = text.startsWith("]]") && rawWebLink(node.previous) &&
+            (node.previous?.previous as? MarkdownText)?.literal?.endsWith("[[") == true
+        if (opens) text = text.dropLast(2)
+        if (closes) text = text.drop(2)
+        return if (opens && closes && text.isEmpty()) " " else text
+    }
 
     fun appendMarkdownText(raw: String) {
         val literal = readableProviderCitations(raw, unsupportedCitationLabel)
@@ -419,21 +443,28 @@ internal fun inlineAnnotatedString(
             return
         }
         var pops = 0
+        val href = token.attributes["href"].orEmpty().takeIf { token.tag == "a" }
         if (token.tag == "a") {
-            val href = token.attributes["href"].orEmpty()
-            if (isSafeHttpUrl(href)) {
-                pushStringAnnotation("URL", href); pops++
+            if (isSafeHttpUrl(href.orEmpty())) {
+                pushStringAnnotation("URL", href.orEmpty()); pops++
                 pushStyle(SpanStyle(color = if (darkTheme) linkBlueDark else linkBlueLight, textDecoration = TextDecoration.Underline)); pops++
             }
         } else {
             htmlSpanStyle(token, darkTheme)?.let { pushStyle(it); pops++ }
         }
-        if (token.selfClosing) repeat(pops) { pop() } else htmlFrames += HtmlFrame(token.tag, pops)
+        if (token.selfClosing) repeat(pops) { pop() } else htmlFrames += HtmlFrame(token.tag, pops, href = href)
     }
 
     fun appendNode(node: Node) {
         when (node) {
-            is MarkdownText -> if (suppressed == 0) appendMarkdownText(node.literal)
+            is MarkdownText -> if (suppressed == 0) {
+                val code = htmlFrames.any { it.tag == "code" }
+                val literal = if (code) node.literal else citationText(node)
+                val href = htmlFrames.lastOrNull { it.tag == "a" }?.href
+                if (!code && href != null && isSafeHttpUrl(href) && isSafeHttpUrl(literal.trim())) {
+                    append(compactWebLinkLabel(href, webLinkTitles = webLinkTitles))
+                } else appendMarkdownText(literal)
+            }
             is Code -> {
                 pushStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = Color(0x1A607D78)))
                 append(node.literal)
@@ -450,12 +481,26 @@ internal fun inlineAnnotatedString(
                 pop()
             }
             is Link -> {
+                if (suppressed > 0) return
+                val outerAnchor = htmlFrames.lastOrNull { it.tag == "a" }
+                if (htmlFrames.any { it.tag == "code" }) {
+                    appendChildren(node, ::appendNode)
+                    return
+                }
+                if (outerAnchor != null) {
+                    val href = outerAnchor.href.orEmpty()
+                    if (rawWebLink(node) && isSafeHttpUrl(href)) {
+                        append(compactWebLinkLabel(href, webLinkTitles = webLinkTitles))
+                    } else appendChildren(node, ::appendNode)
+                    return
+                }
                 val safe = isSafeHttpUrl(node.destination)
                 if (safe) {
                     pushStringAnnotation("URL", node.destination)
                     pushStyle(SpanStyle(color = if (darkTheme) linkBlueDark else linkBlueLight, textDecoration = TextDecoration.Underline))
                 }
-                appendChildren(node, ::appendNode)
+                if (safe && rawWebLink(node)) append(compactWebLinkLabel(node.destination, node.title, webLinkTitles))
+                else appendChildren(node, ::appendNode)
                 if (safe) {
                     pop()
                     pop()

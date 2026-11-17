@@ -15,7 +15,7 @@ class ShareDraftStoreAndroidTest {
 
     @Test fun delayedUiSaveCannotRestoreASettledSubmissionMarker() = runBlocking {
         val store = ShareDraftStore(context)
-        val draft = ComposerDraft("retry this question", submittedRequestId = "failed-request")
+        val draft = ComposerDraft("retry this question", submittedRequestId = "failed-request", cloudExecutionMode = CloudExecutionMode.REQUIRED)
         val captured = SavedShareState(mapOf("chat" to draft))
         try {
             store.save(captured)
@@ -28,7 +28,8 @@ class ShareDraftStoreAndroidTest {
 
     @Test fun delayedSaveAndUpdateCannotRestoreAnAcceptedQuestion() = runBlocking {
         val store = ShareDraftStore(context)
-        val captured = SavedShareState(mapOf("chat" to ComposerDraft("already sent", submittedRequestId = "accepted-request")))
+        val captured = SavedShareState(mapOf("chat" to ComposerDraft("already sent", submittedRequestId = "accepted-request",
+            cloudExecutionMode = CloudExecutionMode.REQUIRED)))
         try {
             store.save(captured)
             store.settleSubmission("accepted-request", "chat", true) { SavedShareState(mapOf("chat" to ComposerDraft())) }

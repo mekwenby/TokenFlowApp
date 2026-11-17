@@ -32,6 +32,7 @@ class AppContainer(context: Context) {
         knowledgeStore = knowledgeStore,
         infiniteCloudTools = InfiniteCloudToolExecutor(infiniteCloud, json),
         infiniteCloudMcp = InfiniteCloudMcpExecutor(infiniteCloud, json),
+        deviceInfoTools = DeviceInfoTools.forAndroid(context, json),
     )
     private val engine = DirectChatEngine(gateway, webTools)
     val repository: ChatDataSource = ChatRepository(

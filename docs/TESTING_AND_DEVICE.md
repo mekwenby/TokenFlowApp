@@ -2,6 +2,8 @@
 
 本文把“验证代码”和“向保留用户数据的设备部署”严格分开。`127.0.0.1:5557` 只用于覆盖安装和人工冒烟，不是 instrumentation 测试目标。
 
+日常调试默认使用 `127.0.0.1:5555`（已写入根目录 `AGENTS.md`）。调试命令须显式指定 `adb -s 127.0.0.1:5555`；允许查看日志、设备状态、覆盖安装 App 和人工冒烟，保留现有数据，不安装 AndroidTest APK，不运行 instrumentation。设备自动化仍使用独立 boot ID 的 disposable AVD。
+
 ## 自动化测试概况
 
 测试数量会随代码演进变化；是否通过以 Gradle 实际结果为准。
@@ -18,10 +20,12 @@
 - Token/排版、主题、笔记重写校验和工作区状态
 - Infinite Cloud 私钥拒绝规则、工具启用边界、MCP 名称规范化和云配置归档泄密边界
 - `BuiltInAgentsTest`：内置 SYAN 的固定身份、完整提示词和默认工具配置、会话模型继承及自定义副本行为
+- `MarkdownAgentImportTest` 和 ViewModel 导入回归：标题/文件名、代码围栏、完整提示词、独立 UUID、UTF-8 正文字节上限、重复导入、错误及取消时的状态恢复
+- `DeviceInfoToolsTest`：当前时间与偏移、时区变更和夏令时、电池比例及未知读数、参数拒绝、平台错误及取消传播
 
 ### Instrumentation 主要覆盖
 
-- Room 外键、级联删除和完整 `1 -> ... -> 7 -> 9 -> 10` migration 和预发布 `8 -> 9` 兼容路径
+- Room 外键、级联删除和完整 `1 -> ... -> 7 -> 9 -> 10 -> 12` migration、预发布 `8 -> 9` 及已有设备 `11 -> 12` 兼容路径
 - 配置原子合并、SecretStore 和回滚
 - 附件、相机 EXIF、头像和显示偏好
 - 知识预取、引用、笔记快照与并发幂等
@@ -29,6 +33,7 @@
 - Compose 主要工作流和 Media3 播放状态
 - Markdown 变长单元格的同行等高、手机两列宽度、大字体重排及宽表横向滚动
 - `BuiltInAgentRepositoryTest`：打包提示词完整性、内置原版写入/删除保护、会话提示词快照，以及归档导入导出的保留 ID 边界
+- `TokenFlowAppTest.agentChatSettingsCanEditAndSaveTheCompleteLongPrompt`：完整 SYAN 提示词在大字体手机布局中打开、编辑、保存并重新打开设置，验证长正文保留和后续控件可达
 
 ## 本地门禁
 
@@ -51,6 +56,13 @@ python -m unittest discover -s app/src/test/python -p 'test_*.py'
 Linux/macOS 可使用 `python3`。测试只在临时目录内操作普通文件、目录和符号链接，验证删除链接不会删除目标、移动保留链接身份；不会连接 SSH 服务器。Windows 对不支持的符号链接场景显式跳过，Ubuntu CI 和正式发布工作流运行同一套测试。
 
 本仓库只有 Android App 与随包分发的 Python helper，不包含 Go 或网页测试。JVM/Python 测试、测试 APK 构建和现有设备覆盖安装后的冒烟均不能替代隔离 AVD 的 instrumentation；未运行设备自动化时必须在验证结果中注明。
+
+## 数据库 v12 兼容验收
+
+- 从 v10 升级时，验证 `kind` 默认 `CHAT`、companion 表/唯一索引/级联外键存在，原会话、消息、模型及配置仍可读取。
+- 从已知兼容 v11 升级时，预先写入非默认 kind 和完整 companion 资料，验证 `11 -> 12` 保留全部值；保存会话设置后仍保留 kind，删除会话时仅按原外键规则级联删除其 companion 资料。
+- 对缺列、错误默认值或缺失唯一索引等不匹配的 v11，验证 Room 拒绝打开，原数据没有被清空或重建。不要把额外未映射表的存在视为 Room 必然拒绝的条件。
+- 保留历史 `7/8 -> 9 -> 10 -> 12` 路径的原文、摘要、知识范围及外键回归。迁移与数据写入自动化只运行在隔离 AVD；日常设备仅做保留数据的覆盖安装和配置导入人工验收。
 
 ## Instrumentation 只能使用隔离设备
 
@@ -149,17 +161,24 @@ $TokenFlowDebugApk = '.\app\build\outputs\apk\debug\app-debug.apk'
 | Markdown | 长文、表格、代码、外部 URL、本地 citation、伪造 citation |
 | 工作区 | 收藏级联、笔记重写、快照去重、知识检索过程和来源预览 |
 | 内置 SYAN | 工作区与分享入口仅一个内置项、只读详情、开始聊天与模型继承、复制保存/取消、原版保护、128K 模型的完整请求及容量不足提示 |
+| 智能体聊天设置 | 使用完整 SYAN 长提示词打开聊天设置、滚动输入框、保存并重新打开；确认没有闪退且提示词全文保留 |
+| 智能体 Markdown 导入 | UTF-8/BOM、`.md` 大小写、512 KiB 边界、非法编码/超限/空正文、取消选择、标题与文件名回退、重复导入生成独立智能体 |
+| 设备信息工具 | 普通聊天和智能体分别读取时间、系统时区、电量及充电状态；更改时区后再次读取、无读数情况、关闭联网工具仍可用、最大工具调用数为 0 时禁用 |
 | 附件 | 图片、相机 EXIF、PDF、Word、Excel、视觉兜底 |
 | 生命周期 | 进程中断恢复、旋转、软键盘、切换会话继续生成 |
 | 外观 | 中英文、六主题、字体/字间距/行间距、头像裁剪 |
 | 语音 | 生成 -> 播放 -> 打开笔记/收藏 -> 返回 Chat，不自动重放 |
-| Infinite Cloud | 指纹首次确认/变化阻断、Python/Node/Shell、附件上传、Assistant 产物、后台恢复、文件 SAF、stdio/HTTP MCP |
+| Infinite Cloud | 指纹首次确认/变化阻断、Python/Node/Shell、附件上传、Assistant 产物、后台恢复、文件 SAF、stdio/HTTP MCP、自动执行指引、单条消息必用、预算和保存状态、真实调用状态 |
 
 ### Infinite Cloud 专用测试环境
 
 端到端验收必须使用专用低权限 Linux 测试账号，不得使用生产服务器或保存真实资料的账号。测试主机需要 POSIX shell、Python 3，并为 JavaScript 场景安装 Node.js；准备 Ed25519、ECDSA 和 RSA-SHA2 测试私钥，以及一个可替换主机密钥的隔离 SSH/SFTP 服务。
 
 stdio MCP fixture 应通过 SSH exec 启动并覆盖初始化、工具发现、调用和断线清理。Streamable HTTP fixture 应只从已验证 SSH 隧道访问，并同时覆盖 loopback HTTP 与保留原主机名校验的 HTTPS。验收结束后清理测试账号的 `~/.tokenflow/infinite-cloud/`；不要把测试凭据、远端日志或产物提交仓库。
+
+调用策略验收应分别覆盖普通聊天和智能体：要求运行 Python 并返回实际输出、处理附件并交付可下载文件、查询远程目录，以及只解释代码或明确要求不执行。自动模式检查提示词与实际 schemas 一致；必用模式检查三协议的强制选择字段、首个有效调用前仅暴露 Cloud/已绑定 MCP、之后恢复自动、Anthropic 整轮必用关闭扩展思考及后续普通消息恢复原设置。
+
+失败场景至少包括模型只输出文字、未暴露工具、混合合法/非法调用、无效参数、供应商拒绝强制选择、远端报错、预算为 0、取消和不可用 MCP。未实际发起调用不能标为已调用，远端失败不能标为任务成功；不得因这些失败隐式重放远端操作。界面回归覆盖开启后立即发送、设置保存失败、草稿与必用选择恢复、切换会话隔离、重新生成继承模式及旧 metadata 默认自动。必用选项不应扩大后台任务权限。
 
 App 侧 instrumentation 仍只能在具有独立 boot ID 的 disposable AVD 执行。Linux fixture 与 AVD 缺少任一项时，构建通过不能替代真实 SSH/MCP E2E，发布记录必须明确标记未运行的场景。
 

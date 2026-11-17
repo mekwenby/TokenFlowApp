@@ -141,6 +141,7 @@ data class Conversation(
     @SerialName("last_message_at") val lastMessageAt: Long? = null,
     @SerialName("context_policy") val contextPolicy: ContextPolicy = ContextPolicy(),
     @SerialName("knowledge_scope") val knowledgeScope: KnowledgeScope = KnowledgeScope(),
+    val kind: String = "CHAT",
 )
 
 @Serializable
@@ -239,7 +240,13 @@ data class SendMessageRequest(
     val requestId: String,
     val attachments: List<PendingAttachment> = emptyList(),
     val knowledgeScope: KnowledgeScope = KnowledgeScope(),
+    val cloudExecutionMode: CloudExecutionMode = CloudExecutionMode.AUTO,
 )
+
+@Serializable
+enum class CloudExecutionMode { AUTO, REQUIRED }
+
+enum class ToolChoice { AUTO, REQUIRED }
 
 @Serializable
 data class PendingAttachment(
@@ -467,6 +474,7 @@ data class KnowledgeImportSource(
 data class UserMessageMetadata(
     @SerialName("knowledge_chunk_ids") val knowledgeChunkIds: List<Long> = emptyList(),
     @SerialName("vision_descriptions") val visionDescriptions: List<String> = emptyList(),
+    @SerialName("cloud_execution_mode") val cloudExecutionMode: CloudExecutionMode = CloudExecutionMode.AUTO,
 )
 
 @Serializable
@@ -489,6 +497,7 @@ data class ToolOptions(
     val allowCloudTaskCreation: Boolean = false,
     val remoteAttachments: List<RemoteAttachmentMapping> = emptyList(),
     val knowledgeScope: KnowledgeScope = KnowledgeScope(),
+    val cloudExecutionMode: CloudExecutionMode = CloudExecutionMode.AUTO,
 )
 
 data class UrlReadDiagnostic(
@@ -537,6 +546,8 @@ data class ProcessEvent(
     val ok: Boolean = true,
     @SerialName("knowledge_citations") val knowledgeCitations: List<KnowledgeCitation> = emptyList(),
     val usage: SerializableUsage? = null,
+    @SerialName("cloud_dispatched") val cloudDispatched: Boolean = false,
+    @SerialName("cloud_tool") val cloudTool: Boolean = false,
 )
 
 @Serializable
@@ -556,6 +567,8 @@ data class AssistantMetadata(
     @SerialName("error_code") val errorCode: String = "",
     @SerialName("knowledge_citations") val knowledgeCitations: List<KnowledgeCitation> = emptyList(),
     @SerialName("assistant_identity") val assistantIdentity: AssistantIdentitySnapshot? = null,
+    @SerialName("cloud_enabled") val cloudEnabled: Boolean = false,
+    @SerialName("cloud_execution_mode") val cloudExecutionMode: CloudExecutionMode = CloudExecutionMode.AUTO,
 )
 
 @Serializable
@@ -626,6 +639,7 @@ data class ModelCallRequest(
     val tools: List<ToolDefinition>,
     val requestId: String,
     val maxOutputTokens: Int = model.maxOutputTokens,
+    val toolChoice: ToolChoice = ToolChoice.AUTO,
 )
 
 data class ToolDefinition(

@@ -34,7 +34,7 @@ class NoteKnowledgeRepositoryTest {
             database = Room.databaseBuilder(context, TokenFlowDatabase::class.java, databaseName).build()
             val reopened = noteRepository(context, database.localDao(), secrets, ModelGateway())
 
-            assertEquals(10, database.openHelper.readableDatabase.version)
+            assertEquals(12, database.openHelper.readableDatabase.version)
             assertEquals(saved, reopened.workspace().notes.single())
             assertEquals(saved, database.localDao().note(saved.id)?.toDomain())
             reopened.deleteNote(saved.id)

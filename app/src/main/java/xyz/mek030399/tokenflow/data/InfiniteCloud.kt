@@ -1558,9 +1558,15 @@ class InfiniteCloudToolExecutor(
         val serverId = options.cloudServerId
             ?: return ToolExecutionResult(error("Infinite Cloud server is not selected"), false)
         if (!options.enableInfiniteCloud) return ToolExecutionResult(error("Infinite Cloud is disabled"), false)
+        val definition = definitions(options).firstOrNull { it.name == call.name }
+            ?: return ToolExecutionResult(error("Infinite Cloud tool is unavailable: ${call.name}"), false)
+        var dispatched = false
         return try {
             val arguments = json.parseToJsonElement(call.arguments).jsonObject
-            when (call.name) {
+            validateCloudToolArguments(definition, arguments)
+            // All schema and local payload checks precede entry into a Cloud operation.
+            dispatched = true
+            val result = when (call.name) {
                 "cloud_run_shell", "cloud_run_python", "cloud_run_javascript" -> {
                     val kind = when (call.name) {
                         "cloud_run_python" -> "python"
@@ -1670,10 +1676,11 @@ class InfiniteCloudToolExecutor(
                 }
                 else -> ToolExecutionResult(error("Unknown Infinite Cloud tool: ${call.name}"), false)
             }
+            result.copy(cloudDispatched = dispatched)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Throwable) {
-            ToolExecutionResult(error(failure.message ?: "Infinite Cloud operation failed"), false)
+            ToolExecutionResult(error(failure.message ?: "Infinite Cloud operation failed"), false, cloudDispatched = dispatched)
         }
     }
 
@@ -1684,19 +1691,19 @@ class InfiniteCloudToolExecutor(
 internal fun infiniteCloudToolDefinitions(options: ToolOptions): List<ToolDefinition> {
     if (!options.enableInfiniteCloud || options.cloudServerId == null) return emptyList()
     return listOf(
-        cloudTool("cloud_run_shell", "Run a shell command on the selected Infinite Cloud Linux server.", "command"),
-        cloudTool("cloud_run_python", "Run Python 3 code on the selected Infinite Cloud Linux server.", "code"),
-        cloudTool("cloud_run_javascript", "Run JavaScript with Node.js on the selected Infinite Cloud Linux server.", "code"),
-        pathTool("cloud_list_files", "List files in a remote directory."),
-        pathTool("cloud_read_file", "Read a UTF-8 remote text file up to 1 MiB."),
-        ToolDefinition("cloud_write_file", "Write a UTF-8 remote text file.", cloudObjectSchema("path" to "string", "content" to "string", required = listOf("path", "content"))),
+        cloudTool("cloud_run_shell", "Execute the user's requested shell command on the selected Linux server and return actual output, rather than only suggesting commands.", "command"),
+        cloudTool("cloud_run_python", "Execute Python 3 to complete the user's requested computation, attachment processing, or file generation on the selected Linux server and return actual results.", "code"),
+        cloudTool("cloud_run_javascript", "Execute JavaScript with Node.js to complete the user's requested processing or file generation on the selected Linux server and return actual results.", "code"),
+        pathTool("cloud_list_files", "Inspect the actual contents of a remote directory when the user's task requires server files."),
+        pathTool("cloud_read_file", "Read an actual UTF-8 remote text file up to 1 MiB, including a staged attachment's mapped remote path."),
+        ToolDefinition("cloud_write_file", "Write the requested UTF-8 remote text file, up to 1 MiB. Register the file as an Assistant attachment when the user needs to download it.", cloudObjectSchema("path" to "string", "content" to "string", required = listOf("path", "content"))),
         ToolDefinition("cloud_create_directory", "Create a remote directory.", cloudObjectSchema("path" to "string", required = listOf("path"))),
         ToolDefinition("cloud_move_file", "Move or rename a remote file or directory.", cloudObjectSchema("source" to "string", "target" to "string", required = listOf("source", "target"))),
         pathTool("cloud_delete_path", "Permanently delete a remote file or directory recursively."),
         ToolDefinition("cloud_task_status", "Get the current state of a background Infinite Cloud task.", cloudObjectSchema("task_id" to "string", required = listOf("task_id"))),
         ToolDefinition("cloud_task_log", "Read the latest output from a background Infinite Cloud task.", cloudObjectSchema("task_id" to "string", required = listOf("task_id"))),
         ToolDefinition("cloud_cancel_task", "Cancel a background Infinite Cloud task.", cloudObjectSchema("task_id" to "string", required = listOf("task_id"))),
-        ToolDefinition("cloud_register_artifact", "Register a remote file as an Assistant attachment. Include task_id only for an existing background task.", cloudObjectSchema("task_id" to "string", "path" to "string", required = listOf("path"))),
+        ToolDefinition("cloud_register_artifact", "Deliver an existing remote file as a downloadable Assistant attachment. Include task_id only for an existing background task; never invent a download link.", cloudObjectSchema("task_id" to "string", "path" to "string", required = listOf("path"))),
     ) + if (options.allowCloudTaskCreation) listOf(cloudCreateTaskDefinition()) else emptyList()
 }
 
@@ -1712,28 +1719,21 @@ private fun cloudTool(name: String, description: String, sourceName: String): To
         "arguments" to "array",
         "artifact_paths" to "array",
     )
-    return ToolDefinition(name, description, cloudObjectSchema(*properties.toList().toTypedArray(), required = listOf(sourceName)))
+    return ToolDefinition(
+        name,
+        "$description Immediate execution is limited to 120 seconds and separate calls do not retain shell cd or environment changes. Include artifact_paths for generated downloadable files.",
+        cloudObjectSchema(*properties.toList().toTypedArray(), required = listOf(sourceName)),
+    )
 }
 
 private fun cloudCreateTaskDefinition() = ToolDefinition(
     "cloud_create_task",
     "Create a durable background task. Use only because the current user explicitly requested a task, background run, or asynchronous execution.",
-    buildJsonObject {
-        put("type", "object")
-        put("additionalProperties", false)
-        put("properties", buildJsonObject {
-            put("kind", buildJsonObject {
-                put("type", "string")
-                put("enum", buildJsonArray { listOf("shell", "python", "javascript").forEach { add(JsonPrimitive(it)) } })
-            })
-            put("source", buildJsonObject { put("type", "string") })
-            put("working_directory", buildJsonObject { put("type", "string") })
-            put("timeout_seconds", buildJsonObject { put("type", "integer") })
-            put("arguments", buildJsonObject { put("type", "array"); put("items", buildJsonObject { put("type", "string") }) })
-            put("artifact_paths", buildJsonObject { put("type", "array"); put("items", buildJsonObject { put("type", "string") }) })
-        })
-        put("required", buildJsonArray { add(JsonPrimitive("kind")); add(JsonPrimitive("source")) })
-    },
+    cloudObjectSchema(
+        "kind" to "string", "source" to "string", "working_directory" to "string",
+        "timeout_seconds" to "integer", "arguments" to "array", "artifact_paths" to "array",
+        required = listOf("kind", "source"), timeoutRange = 60..86_400,
+    ),
 )
 
 internal fun explicitlyRequestsCloudTask(message: String): Boolean {
@@ -1768,18 +1768,78 @@ private fun taskIntentIsNegated(prefix: String, matchedIntent: String): Boolean 
             .containsMatchIn(context)
 }
 
-private fun cloudObjectSchema(vararg properties: Pair<String, String>, required: List<String>): JsonObject = buildJsonObject {
+private fun cloudObjectSchema(
+    vararg properties: Pair<String, String>,
+    required: List<String>,
+    timeoutRange: IntRange = 1..120,
+): JsonObject = buildJsonObject {
     put("type", "object")
     put("additionalProperties", false)
     put("properties", buildJsonObject {
         properties.forEach { (name, type) ->
             put(name, buildJsonObject {
                 put("type", type)
+                put("description", when (name) {
+                    "command" -> "The complete shell command to execute for the user's current task."
+                    "code" -> "The complete program to execute. Print useful results and save requested deliverables as files."
+                    "source" -> if (properties.any { it.first == "kind" }) "The complete command or program for the explicitly requested background task."
+                        else "Remote source path."
+                    "kind" -> "Runtime for the background task: shell, python, or javascript."
+                    "working_directory" -> "Remote working directory; when omitted or empty, use the selected server's configured start directory. Separate calls do not preserve cd changes."
+                    "timeout_seconds" -> if (timeoutRange.first == 1) "Maximum immediate runtime in seconds, 1 through 120; default 120. Timeout does not create a background task."
+                        else "Maximum background runtime in seconds, 60 through 86400; when omitted, use the server's configured task timeout."
+                    "arguments" -> "String arguments passed to the executed program; defaults to an empty array."
+                    "artifact_paths" -> "Paths of generated files to register as downloadable Assistant attachments; defaults to an empty array."
+                    "path" -> "Remote file or directory path. Use the supplied remote mapping for uploaded attachments."
+                    "content" -> "Exact UTF-8 text to write, up to 1 MiB."
+                    "target" -> "Remote destination path."
+                    "task_id" -> "The actual ID returned by an existing background task."
+                    else -> name
+                })
+                if (name in required && type == "string") put("minLength", 1)
+                if (name == "kind") put("enum", buildJsonArray {
+                    listOf("shell", "python", "javascript").forEach { add(JsonPrimitive(it)) }
+                })
+                if (name == "timeout_seconds") {
+                    put("minimum", timeoutRange.first)
+                    put("maximum", timeoutRange.last)
+                    if (timeoutRange.first == 1) put("default", 120)
+                }
                 if (type == "array") put("items", buildJsonObject { put("type", "string") })
             })
         }
     })
     put("required", buildJsonArray { required.forEach { add(JsonPrimitive(it)) } })
+}
+
+/** Checks the deliberately small schema vocabulary used by the built-in Cloud tools. */
+internal fun validateCloudToolArguments(definition: ToolDefinition, arguments: JsonObject) {
+    val properties = definition.parameters.getValue("properties").jsonObject
+    val required = definition.parameters.getValue("required").jsonArray.map { it.jsonPrimitive.content }.toSet()
+    require(arguments.keys.all { it in properties }) { "Unknown Cloud tool argument" }
+    required.forEach { name -> require(name in arguments) { "$name is required" } }
+    arguments.forEach { (name, value) ->
+        val schema = properties.getValue(name).jsonObject
+        when (schema.getValue("type").jsonPrimitive.content) {
+            "string" -> {
+                require(value is JsonPrimitive && value.isString) { "$name must be a string" }
+                if (name in required) require(value.content.isNotBlank()) { "$name must not be blank" }
+                schema["enum"]?.jsonArray?.let { choices -> require(value in choices) { "$name has an unsupported value" } }
+            }
+            "integer" -> {
+                require(value is JsonPrimitive && !value.isString && value.intOrNull != null) { "$name must be an integer" }
+                val number = value.intOrNull!!
+                schema["minimum"]?.jsonPrimitive?.intOrNull?.let { require(number >= it) { "$name is below the minimum" } }
+                schema["maximum"]?.jsonPrimitive?.intOrNull?.let { require(number <= it) { "$name exceeds the maximum" } }
+            }
+            "array" -> require(value is JsonArray && value.all { it is JsonPrimitive && it.isString }) { "$name must be an array of strings" }
+        }
+    }
+    if (definition.name == "cloud_write_file") {
+        require(arguments.getValue("content").jsonPrimitive.content.encodeToByteArray().size <= 1_048_576) {
+            "Text file exceeds 1 MiB"
+        }
+    }
 }
 
 class InfiniteCloudMcpExecutor(
@@ -1910,8 +1970,10 @@ class InfiniteCloudMcpExecutor(
         if (!options.enableInfiniteCloud || options.cloudServerId != binding.serverId) {
             return ToolExecutionResult(json.encodeToString(buildJsonObject { put("error", "Infinite Cloud is disabled") }), false)
         }
+        var dispatched = false
         return try {
             val arguments = json.parseToJsonElement(call.arguments).jsonObject
+            dispatched = true
             val result = binding.connection?.let { connection ->
                 cloud.callMcpTool(connection, binding.originalName, arguments, options.requestId, options.messageId)
             } ?: cloud.callMcpTool(
@@ -1922,17 +1984,21 @@ class InfiniteCloudMcpExecutor(
                 options.requestId,
                 options.messageId,
             )
-            ToolExecutionResult(result.content, result.ok)
+            ToolExecutionResult(result.content, result.ok, cloudDispatched = dispatched)
         } catch (timeout: TimeoutCancellationException) {
             runCatching { binding.connection?.close() }
             ToolExecutionResult(
                 json.encodeToString(buildJsonObject { put("error", "MCP tool call timed out") }), false,
+                cloudDispatched = dispatched,
             )
         } catch (cancelled: CancellationException) {
             runCatching { binding.connection?.close() }
             throw cancelled
         } catch (failure: Throwable) {
-            ToolExecutionResult(json.encodeToString(buildJsonObject { put("error", failure.message ?: "MCP tool failed") }), false)
+            ToolExecutionResult(
+                json.encodeToString(buildJsonObject { put("error", failure.message ?: "MCP tool failed") }), false,
+                cloudDispatched = dispatched,
+            )
         }
     }
 

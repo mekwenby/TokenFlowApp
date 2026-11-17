@@ -1,0 +1,8 @@
+<resources>
+    <string name="about_model_tool_device_time_title">读取手机时间</string>
+    <string name="about_model_tool_device_time_body">模型需要时读取手机当前日期、时间与 UTC 偏移。在本机执行，结果会提供给当前对话的模型。</string>
+    <string name="about_model_tool_device_timezone_title">读取系统时区</string>
+    <string name="about_model_tool_device_timezone_body">读取手机设置的时区及夏令时状态，每次调用使用最新系统设置。</string>
+    <string name="about_model_tool_device_battery_title">读取电量与充电状态</string>
+    <string name="about_model_tool_device_battery_body">无需额外权限即可读取当前电量百分比、充电状态和供电方式。智能体和普通聊天都可在工具调用额度内使用。</string>
+</resources>

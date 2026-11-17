@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="cloud_execution_require">本条使用云端执行</string>
+    <string name="cloud_execution_required_server">本条必须云端执行 · %1$s</string>
+    <string name="cloud_execution_cancel">取消本条云端执行要求</string>
+    <string name="cloud_execution_settings_saving">正在保存工具设置…</string>
+    <string name="cloud_execution_budget_zero">请提高工具调用次数</string>
+    <string name="cloud_execution_enable_first">请在工具中启用 Cloud</string>
+    <string name="cloud_execution_server_unavailable">请配置 Cloud 服务器</string>
+    <string name="cloud_execution_not_called">Cloud · 未调用</string>
+    <string name="cloud_execution_running">Cloud · 执行中</string>
+    <string name="cloud_execution_called">Cloud · 已调用</string>
+    <string name="cloud_execution_failed">Cloud · 调用失败</string>
+    <string name="cloud_execution_unavailable">Cloud · 不可用</string>
+    <string name="cloud_execution_interrupted">Cloud · 调用已中断，结果未确认</string>
+    <string name="cloud_execution_required_no_call">本条要求云端执行，但模型没有调用 Cloud，请重试。</string>
+    <string name="cloud_execution_required_unavailable">请启用 Cloud、选择已配置的服务器，并提高工具调用次数后再要求云端执行。</string>
+    <string name="cloud_execution_unadvertised_tool">模型返回了本轮未开放的工具，该调用未执行。</string>
+    <string name="cloud_execution_invalid_arguments">Cloud 工具参数无效，尚未开始云端执行。</string>
+    <string name="cloud_execution_provider_unsupported">此模型服务不支持强制 Cloud 工具调用，请更换模型或取消本条云端执行要求。</string>
+</resources>

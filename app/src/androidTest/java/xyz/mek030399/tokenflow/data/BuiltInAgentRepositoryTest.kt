@@ -149,6 +149,21 @@ class BuiltInAgentRepositoryTest {
     }
 
     @Test
+    fun markdownAgentAtImportLimitRemainsReadableAndStartsWithTheFullPrompt() = runBlocking {
+        val body = "x".repeat(MAX_MARKDOWN_AGENT_BYTES)
+        val imported = ImportedMarkdownNote("Imported Markdown", body).toImportedAgent(largeModel.id)
+
+        val saved = repository.saveAgent(imported)
+        val loaded = repository.workspace().agents.single { it.id == saved.id }
+        val conversation = repository.createConversationFromAgent(saved.id)
+
+        assertEquals(body, loaded.systemPrompt)
+        assertEquals(largeModel.id, loaded.modelId)
+        assertEquals("Imported Markdown", conversation.title)
+        assertEquals(body, repository.conversation(conversation.id).conversation.systemPrompt)
+    }
+
+    @Test
     fun fullPromptAndEnabledToolsSendAt128kAnd64kStopsBeforeTheModelCall() = runBlocking {
         val chat = repository.createConversationFromAgent(syan.id)
         assertEquals(syan.maxToolCalls, chat.maxToolCalls)
@@ -165,7 +180,7 @@ class BuiltInAgentRepositoryTest {
         assertEquals(largeModel.id, call.model.id)
         assertEquals("medium", call.thinkingEffort)
         assertTrue(call.systemPrompt.contains(syan.systemPrompt.trim()))
-        assertEquals(setOf("calculate", "convert_units", "web_search", "read_url"), call.tools.map(ToolDefinition::name).toSet())
+        assertEquals(setOf("calculate", "convert_units", "web_search", "read_url") + DEVICE_INFO_TOOL_NAMES, call.tools.map(ToolDefinition::name).toSet())
         assertTrue(tools.options.all { it.enableSearch && it.enableRead && !it.enableKnowledge && !it.enableInfiniteCloud && it.cloudServerId == null })
 
         dao.setDefaultModel(smallModel.id)

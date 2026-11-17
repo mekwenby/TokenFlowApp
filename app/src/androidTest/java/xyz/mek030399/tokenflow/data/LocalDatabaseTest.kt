@@ -440,7 +440,7 @@ class LocalDatabaseTest {
     }
 
     @Test
-    fun migrationOneToTenPreservesMessagesAndAddsCloudContextAndKnowledgeScope() = runBlocking {
+    fun migrationOneToTwelvePreservesMessagesAndAddsCloudContextKnowledgeScopeAndCompanionStorage() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val name = "migration-${System.nanoTime()}.db"
         context.deleteDatabase(name)
@@ -485,6 +485,7 @@ class LocalDatabaseTest {
                 TokenFlowDatabase.MIGRATION_6_7,
                 TokenFlowDatabase.MIGRATION_7_9,
                 TokenFlowDatabase.MIGRATION_9_10,
+                TokenFlowDatabase.MIGRATION_10_12,
             )
             .build()
         try {
@@ -510,6 +511,12 @@ class LocalDatabaseTest {
             assertTrue(migratedDao.cloudMcpServers().isEmpty())
             assertTrue(migratedDao.cloudTasks().isEmpty())
             assertTrue(migratedDao.cloudArtifactDeliveries().isEmpty())
+            assertEquals("CHAT", migratedDao.conversation("override")?.toDomain()?.kind)
+            assertEquals(12, migrated.openHelper.readableDatabase.version)
+            migrated.openHelper.readableDatabase.query("SELECT COUNT(*) FROM companion_profiles").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(0, cursor.getInt(0))
+            }
         } finally {
             migrated.close()
             context.deleteDatabase(name)

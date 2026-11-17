@@ -12,13 +12,14 @@ flowchart LR
     Coordinator --> DS
     Coordinator --> FGS["dataSync foreground service\nnotifications and stop actions"]
     DS --> Repo["ChatRepository"]
-    Repo --> DB["Room v10"]
+    Repo --> DB["Room v12"]
     Repo --> Files["App private files"]
     Repo --> Engine["DirectChatEngine"]
     Engine --> Gateway["ModelGateway adapters"]
     Gateway --> Provider["User-configured model API"]
     Engine --> Tools["WebToolExecutor"]
     Tools --> Offline["Offline calculator / unit converter"]
+    Tools --> Device["Device time / timezone / battery"]
     Tools --> KB["Local knowledge FTS"]
     Tools --> Exa["Exa search"]
     Tools --> Reader["URL reader / InfoFlow"]
@@ -47,7 +48,7 @@ flowchart LR
 | 本地数据 | `LocalDatabase.kt` | Room 实体、DAO、事务、外键和显式迁移 |
 | 文件与知识 | `AttachmentStore.kt`、`KnowledgeStore.kt`、`LocalAvatarStore.kt` | 私有文件生命周期、文档提取、分块、FTS、图片处理和头像 |
 | 安全与归档 | `SecretStore.kt`、`ConfigArchive.kt` | 凭据加密、加密配置导入导出 |
-| 模型与可选工具 | `OfflineCalculationTools.kt`、`WebTools.kt`、`InfiniteCloud.kt`、`MimoTtsClient.kt` | 本地计算、联网工具、SSH/SFTP、远端任务、MCP 和语音生成 |
+| 模型与可选工具 | `OfflineCalculationTools.kt`、`DeviceInfoTools.kt`、`WebTools.kt`、`InfiniteCloud.kt`、`MimoTtsClient.kt` | 本地计算、设备信息、联网工具、SSH/SFTP、远端任务、MCP 和语音生成 |
 
 ## 消息生成数据流
 
@@ -87,7 +88,7 @@ flowchart LR
 
 ## 持久化边界
 
-- 结构化数据存放于 Room v10。
+- 结构化数据存放于 Room v12；保留已有 v11 的会话 kind 与 companion 资料结构，兼容写入时保留原 kind。
 - Infinite Cloud 私钥、口令、MCP 环境值和 HTTP 请求头值只进入 `SecretStore`；Room 保存服务器、固定指纹、非敏感 MCP 定义和任务索引。
 - Assistant/User 扩展信息存放在消息行内 JSON metadata；可选字段使用默认值兼容旧记录，通常不需要修改 Room 表。
 - 附件、知识原文件和头像放在 App 私有文件目录；Room 只保存索引和路径。
@@ -131,4 +132,4 @@ Chat 的会话列表与“功能与设置”入口互斥占用侧栏剩余高度
 
 GenerationCoordinator 使用 Application 生命周期的 CoroutineScope 持有请求与准备阶段，GenerationService 只负责前台提升、状态通知和停止命令；ViewModel 观察完整快照，重建后不重新发请求。启动前等待前台服务成功提升；未能提升时恢复提交草稿。收尾先检查数据库中的 requestId 接受状态并原子恢复/清理草稿，再发布非运行状态。进程恢复仅标记中断，不恢复网络调用。
 
-Room v10 只新增会话 knowledgeScopeJson 列，以兼容默认值表示全部知识文档；9 → 10 为显式附加迁移。
+历史 `9 -> 10` 显式新增会话 `knowledgeScopeJson` 列，以兼容默认值表示全部知识文档。当前 v12 通过 `10 -> 12` 添加已有 v11 的 `conversations.kind` 和 `companion_profiles` 兼容结构，通过 `11 -> 12` 保留现有结构后交给 Room 校验；不做数据库降级或破坏性重建，兼容结构不新增功能 UI。

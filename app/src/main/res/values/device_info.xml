@@ -1,0 +1,8 @@
+<resources>
+    <string name="about_model_tool_device_time_title">Current device time</string>
+    <string name="about_model_tool_device_time_body">Reads the phone’s current date, time and UTC offset when the model needs them. Runs locally and shares the result with the current model.</string>
+    <string name="about_model_tool_device_timezone_title">Device timezone</string>
+    <string name="about_model_tool_device_timezone_body">Reads the phone’s configured timezone and daylight saving status. Uses the latest system setting on each call.</string>
+    <string name="about_model_tool_device_battery_title">Battery and charging</string>
+    <string name="about_model_tool_device_battery_body">Reads the current battery percentage, charging status and power source without extra permissions. Available in chats and agents within the tool call limit.</string>
+</resources>

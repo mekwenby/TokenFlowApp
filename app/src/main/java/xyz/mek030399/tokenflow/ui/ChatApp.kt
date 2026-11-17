@@ -234,6 +234,7 @@ import xyz.mek030399.tokenflow.data.PendingAttachment
 import xyz.mek030399.tokenflow.data.PendingAttachmentOrigin
 import xyz.mek030399.tokenflow.data.MimoTtsClient
 import xyz.mek030399.tokenflow.data.ProcessEvent
+import xyz.mek030399.tokenflow.data.CloudExecutionMode
 import xyz.mek030399.tokenflow.data.PromptTemplate
 import xyz.mek030399.tokenflow.data.ProviderDraft
 import xyz.mek030399.tokenflow.data.ProviderProtocol
@@ -269,6 +270,7 @@ object UiTestTags {
     const val TAKE_PHOTO = "take_photo"
     const val PROCESS_DETAILS = "process_details"
     const val SETTINGS = "settings"
+    const val CHAT_SYSTEM_PROMPT = "chat_system_prompt"
     const val OPEN_CONVERSATIONS = "open_conversations"
     const val DELETE_SELECTED = "delete_selected"
     const val RENAME_SELECTED = "rename_selected"
@@ -1909,6 +1911,15 @@ private fun ChatPane(
             onRemoveAttachment = viewModel::removeAttachment,
             onCameraFailure = viewModel::reportCameraCaptureFailure,
             onDraftRecoveryConsumed = viewModel::consumeComposerDraftRecovery,
+            onCloudExecutionMode = viewModel::setComposerCloudExecutionMode,
+            onCloudConfiguration = {
+                when {
+                    state.toolSettingsPending -> Unit
+                    state.config.maxToolCalls <= 0 -> settings = true
+                    state.cloudServers.none { it.keyConfigured && it.hostKeyFingerprint != null } -> viewModel.openScreen(AppScreen.INFINITE_CLOUD)
+                    else -> tools = true
+                }
+            },
             onSend = viewModel::send,
             onStop = viewModel::stopGeneration,
         )
@@ -2291,6 +2302,17 @@ private fun MessageItem(
                     }
                 }
                 if (attachments.isNotEmpty()) AttachmentPreview(attachments)
+                if (!isUser) {
+                    cloudMessageStatus(metadata.cloudEnabled, events, generationActive)?.let { status ->
+                        Text(
+                            stringResource(status.label),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (status == CloudMessageStatus.FAILED || status == CloudMessageStatus.UNAVAILABLE)
+                                MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("cloud_message_status_${message.id}"),
+                        )
+                    }
+                }
                 val speechReady = tts?.filePath != null
                 if (!isUser && !streaming) {
                     Row(
@@ -2384,6 +2406,10 @@ private fun MessageItem(
                 }
                 if (message.status == "failed" || message.status == "interrupted") {
                     Text(stringResource(if (message.status == "interrupted") R.string.response_interrupted else R.string.assistant_failed), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
+                    if (metadata.cloudEnabled && metadata.error.isNotBlank()) {
+                        Text(cloudExecutionFailureText(metadata.error)?.resolve() ?: metadata.error.take(2_000),
+                            color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
                 }
             }
         }
@@ -2775,14 +2801,43 @@ private fun LinkedPlainText(value: String) {
     )
 }
 
+internal enum class CloudMessageStatus(val label: Int) {
+    NOT_CALLED(R.string.cloud_execution_not_called),
+    RUNNING(R.string.cloud_execution_running),
+    CALLED(R.string.cloud_execution_called),
+    FAILED(R.string.cloud_execution_failed),
+    UNAVAILABLE(R.string.cloud_execution_unavailable),
+    INTERRUPTED(R.string.cloud_execution_interrupted),
+}
+
+internal fun cloudMessageStatus(cloudEnabled: Boolean, events: List<ProcessEvent>, generating: Boolean): CloudMessageStatus? {
+    val dispatched = events.filter { it.cloudDispatched && it.type in setOf("tool_completed", "tool_failed") }
+    val startedCalls = events.filter { it.cloudTool && it.type == "tool_started" }
+    val availability = events.lastOrNull { it.type == "cloud_availability" }
+    if (!cloudEnabled && availability == null && dispatched.isEmpty() && startedCalls.isEmpty()) return null
+    val pending = startedCalls.any { started ->
+        events.none { it.id == started.id && it.type in setOf("tool_completed", "tool_failed") }
+    }
+    return when {
+        generating && pending -> CloudMessageStatus.RUNNING
+        pending -> CloudMessageStatus.INTERRUPTED
+        dispatched.any { it.type == "tool_failed" || (it.type == "tool_completed" && it.ok == false) } -> CloudMessageStatus.FAILED
+        dispatched.any { it.type == "tool_completed" && it.ok != false } -> CloudMessageStatus.CALLED
+        availability?.ok == false -> CloudMessageStatus.UNAVAILABLE
+        else -> CloudMessageStatus.NOT_CALLED
+    }
+}
+
 @Composable
-private fun Composer(
+internal fun Composer(
     state: AppUiState,
     onTextChanged: (String) -> Unit,
     onAttachments: (List<PendingAttachment>) -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onCameraFailure: () -> Unit,
     onDraftRecoveryConsumed: (String) -> Unit,
+    onCloudExecutionMode: (CloudExecutionMode) -> Unit,
+    onCloudConfiguration: () -> Unit,
     onSend: (String) -> Boolean,
     onStop: () -> Unit,
 ) {
@@ -2844,6 +2899,40 @@ private fun Composer(
             shadowElevation = 1.dp,
         ) {
             Column(Modifier.fillMaxWidth().padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val requiredCloud = state.composerCloudExecutionMode == CloudExecutionMode.REQUIRED
+                val server = state.cloudServers.firstOrNull { it.id == state.config.cloudServerId }
+                val cloudProblem = when {
+                    state.toolSettingsPending -> R.string.cloud_execution_settings_saving
+                    state.config.maxToolCalls <= 0 -> R.string.cloud_execution_budget_zero
+                    !state.config.enableInfiniteCloud -> R.string.cloud_execution_enable_first
+                    server == null || !server.keyConfigured || server.hostKeyFingerprint == null -> R.string.cloud_execution_server_unavailable
+                    else -> null
+                }
+                if (state.config.enableInfiniteCloud) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(
+                        selected = requiredCloud,
+                        onClick = { onCloudExecutionMode(if (requiredCloud) CloudExecutionMode.AUTO else CloudExecutionMode.REQUIRED) },
+                        enabled = !generating && (requiredCloud || cloudProblem == null),
+                        leadingIcon = { Icon(Icons.Outlined.Cloud, null, Modifier.size(16.dp)) },
+                        trailingIcon = if (requiredCloud) ({ Icon(Icons.Outlined.Close, stringResource(R.string.cloud_execution_cancel), Modifier.size(16.dp)) }) else null,
+                        label = {
+                            Text(
+                                if (requiredCloud && server != null) stringResource(R.string.cloud_execution_required_server, server.name)
+                                else stringResource(R.string.cloud_execution_require),
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                        modifier = Modifier.weight(1f, fill = false).testTag("cloud_execution_mode"),
+                    )
+                    if (cloudProblem != null) TextButton(
+                        onClick = onCloudConfiguration,
+                        enabled = !generating && !state.toolSettingsPending,
+                        modifier = Modifier.weight(1f).testTag("cloud_execution_configure"),
+                        contentPadding = PaddingValues(horizontal = 4.dp),
+                    ) {
+                        Text(stringResource(cloudProblem), style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                }
                 if (state.pendingAttachments.isNotEmpty()) Row(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -2898,7 +2987,8 @@ private fun Composer(
                                 }
                             }
                         },
-                        enabled = generating || (!cameraProcessing && (value.isNotBlank() || state.pendingAttachments.isNotEmpty())),
+                        enabled = generating || (!cameraProcessing && !state.toolSettingsPending &&
+                            (!requiredCloud || cloudProblem == null) && (value.isNotBlank() || state.pendingAttachments.isNotEmpty())),
                         modifier = Modifier.size(44.dp).testTag(UiTestTags.MESSAGE_ACTION),
                     ) {
                         Icon(
@@ -3188,7 +3278,11 @@ private fun SettingsDialog(
                         enabled = draft.systemPromptMode == SettingMode.OVERRIDE,
                         label = { Text(stringResource(R.string.system_prompt)) },
                         minLines = 4,
-                        modifier = Modifier.fillMaxWidth(),
+                        // Agent prompts can span thousands of lines. Bound the editor's
+                        // viewport so the surrounding scroll layout never measures the
+                        // entire prompt as one exceptionally tall Compose child.
+                        maxLines = 12,
+                        modifier = Modifier.fillMaxWidth().testTag(UiTestTags.CHAT_SYSTEM_PROMPT),
                     )
                     OutlinedTextField(value = draft.nickname, onValueChange = { draft = draft.copy(nickname = it) }, label = { Text(stringResource(R.string.nickname)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     Text(stringResource(R.string.user_avatar), style = MaterialTheme.typography.labelLarge)

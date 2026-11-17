@@ -114,6 +114,8 @@ class SecurityRulesTest {
         val prompt = SystemPrompts.compose("", "", "UTC")
 
         assertTrue(prompt.contains("calculate, convert_units, and search_knowledge execute on the device"))
+        assertTrue(prompt.contains("get_device_time, get_device_timezone, and get_device_battery also read locally, on demand"))
+        assertTrue(prompt.contains("Unknown or unavailable readings must stay unknown"))
         assertTrue(prompt.contains("arguments and results still remain in the conversation sent to the configured model service"))
         assertTrue(prompt.contains("web_search sends its query to Exa"))
         assertTrue(prompt.contains("read_url fetches the target URL directly or sends the URL to InfoFlow"))

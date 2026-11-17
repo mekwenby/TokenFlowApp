@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="agent_import_markdown">Import agent from Markdown</string>
+    <string name="agent_import_busy">Importing Markdown agent</string>
+    <string name="agent_import_success">Agent imported. Open it to edit its model and settings.</string>
+    <string name="agent_import_invalid_extension">Choose a .md Markdown file.</string>
+    <string name="agent_import_too_large">The Markdown agent must be no larger than 512 KiB in UTF-8.</string>
+    <string name="agent_import_empty">The Markdown agent file is empty.</string>
+    <string name="agent_import_invalid_utf8">Save the Markdown agent file as UTF-8 and try again.</string>
+    <string name="agent_import_read_failed">Could not read the Markdown agent file. Please choose it again.</string>
+    <string name="agent_import_failed">Could not import the Markdown agent. Please try again.</string>
+</resources>

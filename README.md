@@ -17,12 +17,12 @@
 - 支持 Android 文字、网址、图片和文档分享，选择会话或智能体后追加到可编辑草稿，不自动发送。
 - 助手消息显示可在全局设置中修改的昵称，并保留生成回复时实际使用的模型 ID。
 - 支持图片、相机、PDF、Word、Excel、纯文本和源码附件，以及视觉模型兜底。
-- 内置收藏、Markdown 笔记、智能体和本地 FTS 知识库；知识检索可按会话选择全部或指定文档范围，引用可在 App 内定位并预览原文。笔记支持逐篇导入和导出 `.md`。
+- 内置收藏、Markdown 笔记、智能体和本地 FTS 知识库；知识检索可按会话选择全部或指定文档范围，引用可在 App 内定位并预览原文。笔记支持逐篇导入和导出 `.md`，智能体支持从 `.md` 提示词文件导入。
 - 固定内置智能体 **SYAN**（程书妍 · AI 原创角色）可直接开始聊天或复制修改，使用随 App 完整打包的角色提示词，并跟随全局默认模型；建议配置 128K 或更大上下文的模型。
 - Markdown 表格支持同行等高和按手机宽度分配列宽，兼容中文标点旁的加粗；服务内部引用缺少公开链接时显示明确提示。
-- 模型可调用完全在设备内执行的科学计算器和单位换算工具，无需联网工具服务。
+- 普通聊天和智能体均可调用设备内的科学计算器、单位换算，以及当前时间、系统时区和电量/充电状态读取工具；这些工具无需联网工具服务，遵循现有最大工具调用次数设置。
 - 可选 Exa 联网搜索、内置或 InfoFlow URL 读取，以及 Xiaomi MiMo 语音生成。
-- Infinite Cloud 可通过固定主机指纹的 SSH 连接 Linux，即时运行 Shell/Python/JavaScript、按用户明确要求创建后台任务、管理远程文件，并调用远端 stdio 或 Streamable HTTP MCP 工具。
+- Infinite Cloud 可通过固定主机指纹的 SSH 连接 Linux，即时运行 Shell/Python/JavaScript、按用户明确要求创建后台任务、管理远程文件，并调用远端 stdio 或 Streamable HTTP MCP 工具；支持面向执行任务的自动调用和单条消息“本次必须使用云端”。
 - 支持中英文、深浅色与多套主题、字体排版设置，以及手机、平板和超宽屏布局。
 - 会话和工作区数据保存在本地；API Key 通过 Android Keystore 支持的加密存储保护。
 
@@ -32,14 +32,14 @@
 
 | 项目 | 当前值 |
 | --- | --- |
-| 版本 | `2.6.4`（`versionCode 26`） |
+| 版本 | `2.6.5`（`versionCode 27`） |
 | 正式包名 | `xyz.mek030399.tokenflow` |
 | Debug 包名 | `xyz.mek030399.tokenflow.debug` |
 | 正式证书 SHA-256 | `FEC865BEDC77C742B0E1B3D93A05FCEEBFA6075F46E1C8242B8F2261F0767AFE` |
 | Android | `minSdk 26`，`targetSdk 36`，`compileSdk 36` |
 | 构建工具 | Gradle `9.4.1`，AGP `9.2.1`，Build Tools `36.0.0` |
 | 语言与 UI | Kotlin `2.3.10`，Java 目标 `17`，Compose BOM `2026.06.01` |
-| 本地数据库 | Schema v10（AndroidX Room `2.8.4`），显式迁移 `1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 9 -> 10`，兼容旧结构预发布 `8 -> 9` |
+| 本地数据库 | Schema v12（AndroidX Room `2.8.4`），显式迁移 `1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 9 -> 10 -> 12`，兼容旧结构预发布 `8 -> 9` 及已有设备 `11 -> 12` |
 | 模型协议 | OpenAI Chat Completions、OpenAI Responses、Anthropic Messages |
 
 版本和 SDK 值以 [`app/build.gradle.kts`](app/build.gradle.kts) 为准；数据库版本以 [`LocalDatabase.kt`](app/src/main/java/xyz/mek030399/tokenflow/data/LocalDatabase.kt) 为准。
@@ -108,6 +108,8 @@ app/build/outputs/apk/debug/app-debug.apk
 
 工作区“智能体”中的 SYAN 原版可只读查看、开始聊天或复制为“SYAN 副本”。复制时预选当前默认模型，保存后才创建可编辑、可删除的自定义副本。原版默认开启联网搜索和网页读取，实际可用性取决于已有服务配置；知识库和 Infinite Cloud 默认关闭。完整系统提示词按当前保守规则估算约占 5.9 万 Token，超出已配置的模型容量时沿用发送前容量检查，不截断提示词。原版不进入 `.tfcfg`，副本可正常导入导出。
 
+使用 Infinite Cloud 时，先配置服务器并确认主机指纹，再在当前聊天的工具设置中开启并选择服务器。运行代码、处理附件或生成文件等任务会获得明确的云端执行指引；只要求解释或提供代码时仍可直接回答。需要确保本条消息实际发起调用时，可在输入框上方选择“本次必须使用云端”。该选项随当前草稿保留，消息被接受后恢复自动模式；重新生成继承原消息的模式。“已调用”依据实际工具事件显示，不代表任务或文件交付一定成功。工具调用次数为 0 时不能使用云端，工具设置保存完成后才可发送。
+
 ## 数据与安全
 
 - 聊天、收藏、笔记、智能体、知识文件和相关配置主要保存在应用私有存储中。
@@ -116,6 +118,7 @@ app/build/outputs/apk/debug/app-debug.apk
 - Infinite Cloud 开启后，本条消息的全部附件会上传到所选 Linux 账号；模型无需逐次确认即可执行该账号允许的命令、文件操作和 MCP 工具。应只使用专用低权限账号。
 - `.tfcfg` 导出配置使用用户设置的密码加密，但不包含完整聊天与工作区数据；逐篇导出的笔记 `.md` 也不是完整备份。
 - 笔记保留 2 MiB Markdown 导入上限；标题与正文按字节分块读取，已有大笔记无需迁移或截断。自动标题和会话生成状态更新会保留期间的用户编辑。
+- 数据库前向升级至 v12，兼容已使用 v11 的设备，避免较低数据库版本引起的启动或配置导入失败；保留原会话 kind 和 companion 资料，结构不匹配时拒绝打开，不清空数据。
 - 不要在 Issue、日志或提交中包含 API Key、keystore、密码、`.tfcfg`、`local.properties` 或私人对话内容。
 
 完整的数据流、存储边界和安全限制见 [数据与安全](docs/DATA_AND_SECURITY.md)。运行时用户协议的唯一源码是 [`app/src/main/res/raw/user_agreement.md`](app/src/main/res/raw/user_agreement.md)。
@@ -142,7 +145,7 @@ TokenFlowApp/
 ├── .github/workflows/               # GitHub CI 和正式 APK 自动发布
 ├── app/
 │   ├── build.gradle.kts             # App 版本、SDK、依赖、签名和构建变体
-│   ├── schemas/                     # Room schema 3/4/5/6/7/9/10 快照
+│   ├── schemas/                     # Room schema 3/4/5/6/7/9/10/12 快照
 │   └── src/
 │       ├── main/                    # App 源码和资源
 │       ├── test/                    # JVM 单元测试与 Python helper 回归

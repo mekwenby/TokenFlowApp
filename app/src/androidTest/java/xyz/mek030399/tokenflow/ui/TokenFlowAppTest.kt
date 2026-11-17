@@ -69,6 +69,7 @@ import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.unit.Dp
@@ -102,6 +103,7 @@ import xyz.mek030399.tokenflow.data.AssistantIdentitySnapshot
 import xyz.mek030399.tokenflow.data.AssistantMetadata
 import xyz.mek030399.tokenflow.data.CONTEXT_BOUNDARY_ROLE
 import xyz.mek030399.tokenflow.data.BookmarkedMessage
+import xyz.mek030399.tokenflow.data.BuiltInAgents
 import xyz.mek030399.tokenflow.data.ConfigArchivePayload
 import xyz.mek030399.tokenflow.data.Conversation
 import xyz.mek030399.tokenflow.data.ConversationDetail
@@ -154,6 +156,52 @@ import kotlin.math.roundToInt
 class TokenFlowAppTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun agentChatSettingsCanEditAndSaveTheCompleteLongPrompt() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val prompt = BuiltInAgents.load(context).single { it.id == BuiltInAgents.SYAN_ID }.systemPrompt
+        val conversation = Conversation(
+            id = "long-agent-settings",
+            title = "SYAN",
+            model = "model-1",
+            systemPrompt = prompt,
+            systemPromptMode = SettingMode.OVERRIDE,
+        )
+        val fake = UiFakeDataSource(withModel = true).apply { conversations += conversation }
+        val viewModel = AppViewModel(fake)
+        val owner = ViewModelStore().apply { put("long-agent-settings", viewModel) }
+        try {
+            setAppAt(viewModel, PHONE_SIZE, fontScale = 1.5f)
+            composeRule.waitUntil(5_000) { viewModel.state.value.phase == AppPhase.READY }
+            composeRule.runOnIdle { viewModel.openConversation(conversation.id) }
+            composeRule.waitUntil(5_000) { viewModel.state.value.config.systemPrompt == prompt }
+
+            composeRule.onNodeWithTag(UiTestTags.SETTINGS).performClick()
+            val editor = composeRule.onNodeWithTag(UiTestTags.CHAT_SYSTEM_PROMPT)
+            editor.performScrollTo().assertIsDisplayed().assert(
+                SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString(prompt)),
+            )
+            val editedPrompt = "$prompt\n\n补充：保持完整角色设定。"
+            editor.performTextReplacement(editedPrompt)
+            editor.assert(SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString(editedPrompt)))
+            // Controls after the prompt must remain reachable without scrolling
+            // through the full character biography in the outer settings form.
+            composeRule.onNodeWithTag(UiTestTags.CHAT_LINE_SPACING).performScrollTo().assertIsDisplayed()
+            composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.save)).performClick()
+            composeRule.waitUntil(5_000) {
+                fake.conversations.single().systemPrompt == editedPrompt &&
+                    viewModel.state.value.config.systemPrompt == editedPrompt
+            }
+            assertEquals(SettingMode.OVERRIDE, fake.conversations.single().systemPromptMode)
+
+            composeRule.onNodeWithTag(UiTestTags.SETTINGS).performClick()
+            composeRule.onNodeWithTag(UiTestTags.CHAT_SYSTEM_PROMPT)
+                .performScrollTo().assertIsDisplayed().assert(
+                    SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString(editedPrompt)),
+                )
+        } finally { owner.clear() }
+    }
 
     @Test
     fun userMessagesDoNotExposeQuestionEditingAction() {
@@ -3594,6 +3642,8 @@ private class UiFakeDataSource(
     override suspend fun updateConversation(id: String, request: ConversationWriteRequest): Conversation {
         val index = conversations.indexOfFirst { it.id == id }
         val updated = conversations[index].copy(title = request.title ?: conversations[index].title,
+            systemPrompt = request.systemPrompt ?: conversations[index].systemPrompt,
+            systemPromptMode = request.systemPromptMode ?: conversations[index].systemPromptMode,
             knowledgeScope = request.knowledgeScope ?: conversations[index].knowledgeScope)
         conversations[index] = updated
         return updated

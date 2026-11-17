@@ -713,6 +713,9 @@ private fun NoteEditor(note: Note, onSave: (Note) -> Unit, modifier: Modifier = 
 private fun AgentsScreen(state: AppUiState, viewModel: AppViewModel, showBack: Boolean) {
     var editing by remember { mutableStateOf<AgentProfile?>(null) }
     var reading by remember { mutableStateOf<AgentProfile?>(null) }
+    val importMarkdownLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { viewModel.importMarkdownAgent(it.toString()) }
+    }
     val currentReading = reading?.let { selected -> state.agents.firstOrNull { it.id == selected.id } ?: selected }
     val navigateBack = {
         when {
@@ -728,7 +731,26 @@ private fun AgentsScreen(state: AppUiState, viewModel: AppViewModel, showBack: B
         showBack || editing != null || currentReading != null,
         navigateBack,
         action = if (editing == null && currentReading == null) {{
-            IconButton(onClick = { editing = AgentProfile() }) { Icon(Icons.Outlined.Add, stringResource(R.string.new_agent)) }
+            val importDescription = stringResource(
+                if (state.agentFileImporting) R.string.agent_import_busy else R.string.agent_import_markdown,
+            )
+            Row {
+                IconButton(
+                    onClick = {
+                        importMarkdownLauncher.launch(arrayOf(
+                            "text/markdown", "text/x-markdown", "application/x-markdown",
+                            "text/plain", "application/octet-stream",
+                        ))
+                    },
+                    enabled = !state.agentFileImporting,
+                    modifier = Modifier.testTag("agent_import_markdown")
+                        .semantics { contentDescription = importDescription },
+                ) {
+                    if (state.agentFileImporting) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Outlined.UploadFile, null)
+                }
+                IconButton(onClick = { editing = AgentProfile() }) { Icon(Icons.Outlined.Add, stringResource(R.string.new_agent)) }
+            }
         }} else null,
     ) { padding ->
         if (editing != null) AgentEditor(editing!!, state, { editing = null }, Modifier.padding(padding)) {
@@ -1492,6 +1514,27 @@ private val ABOUT_MODEL_TOOLS = listOf(
         title = R.string.about_model_tool_convert_units_title,
         description = R.string.about_model_tool_convert_units_body,
         testTag = UiTestTags.ABOUT_MODEL_TOOL_CONVERT_UNITS,
+    ),
+    AboutModelTool(
+        id = "get_device_time",
+        icon = Icons.Outlined.Info,
+        title = R.string.about_model_tool_device_time_title,
+        description = R.string.about_model_tool_device_time_body,
+        testTag = "about_model_tool_device_time",
+    ),
+    AboutModelTool(
+        id = "get_device_timezone",
+        icon = Icons.Outlined.Settings,
+        title = R.string.about_model_tool_device_timezone_title,
+        description = R.string.about_model_tool_device_timezone_body,
+        testTag = "about_model_tool_device_timezone",
+    ),
+    AboutModelTool(
+        id = "get_device_battery",
+        icon = Icons.Outlined.SmartToy,
+        title = R.string.about_model_tool_device_battery_title,
+        description = R.string.about_model_tool_device_battery_body,
+        testTag = "about_model_tool_device_battery",
     ),
 )
 

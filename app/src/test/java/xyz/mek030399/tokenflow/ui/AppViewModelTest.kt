@@ -22,7 +22,10 @@ import xyz.mek030399.tokenflow.data.CloudMcpServer
 import xyz.mek030399.tokenflow.data.CloudServerDraft
 import xyz.mek030399.tokenflow.data.CloudServerProfile
 import xyz.mek030399.tokenflow.data.CloudTask
+import xyz.mek030399.tokenflow.data.CloudExecutionMode
 import xyz.mek030399.tokenflow.data.ConfigArchivePayload
+import xyz.mek030399.tokenflow.data.ContextPreview
+import xyz.mek030399.tokenflow.data.ContextPolicy
 import xyz.mek030399.tokenflow.data.ConfigProviderRecord
 import xyz.mek030399.tokenflow.data.Conversation
 import xyz.mek030399.tokenflow.data.ConversationDetail
@@ -150,7 +153,9 @@ class AppViewModelTest {
         val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
         val coordinator = GenerationCoordinator(applicationScope)
         val fake = FakeChatDataSource(true).apply {
-            conversations += Conversation(id = "failed-background", model = model.id)
+            val server = cloudServer("managed-required", "/srv")
+            cloudServers += server
+            conversations += Conversation(id = "failed-background", model = model.id, enableInfiniteCloud = true, cloudServerId = server.id)
             sendMessageFailureBeforeUser = IllegalStateException("prepare failed")
         }
         val viewModel = AppViewModel(fake, generationCoordinator = coordinator)
@@ -160,10 +165,13 @@ class AppViewModelTest {
         advanceUntilIdle()
         val attachment = cameraDraft("background-draft")
         viewModel.setComposerText("Original question")
+        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.REQUIRED)
         viewModel.addAttachments(listOf(attachment))
         assertTrue(viewModel.send("Original question"))
         advanceUntilIdle()
         assertEquals("Original question", viewModel.state.value.composerText)
+        assertEquals(CloudExecutionMode.REQUIRED, viewModel.state.value.composerCloudExecutionMode)
+        assertEquals(CloudExecutionMode.REQUIRED, fake.sentRequest?.cloudExecutionMode)
         assertEquals(listOf(attachment), viewModel.state.value.pendingAttachments)
         assertFalse(attachment in fake.discardedAttachments)
         fake.sendMessageFailureBeforeUser = null
@@ -171,6 +179,7 @@ class AppViewModelTest {
         advanceUntilIdle()
         assertEquals(2, fake.sendMessageCalls)
         assertEquals("", viewModel.state.value.composerText)
+        assertEquals(CloudExecutionMode.AUTO, viewModel.state.value.composerCloudExecutionMode)
         assertTrue(attachment in fake.discardedAttachments)
         owner.clear()
         applicationScope.cancel()
@@ -333,13 +342,20 @@ class AppViewModelTest {
     fun managedNewConversationCreationFailureRestoresOriginalDraftWithoutCallingAModel() = runTest(dispatcher) {
         val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
         val coordinator = GenerationCoordinator(applicationScope)
-        val fake = FakeChatDataSource(true).apply { createConversationFailure = IllegalStateException("create failed") }
+        val server = cloudServer("managed-new-required", "/srv")
+        val fake = FakeChatDataSource(true).apply {
+            createConversationFailure = IllegalStateException("create failed")
+            cloudServers += server
+        }
         val viewModel = AppViewModel(fake, generationCoordinator = coordinator)
         val owner = ViewModelStore().apply { put("app", viewModel) }
         advanceUntilIdle()
+        viewModel.saveToolSettings(false, false, false, false, true, server.id)
+        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.REQUIRED)
         viewModel.send("Keep this input")
         advanceUntilIdle()
         assertEquals("Keep this input", viewModel.state.value.composerText)
+        assertEquals(CloudExecutionMode.REQUIRED, viewModel.state.value.composerCloudExecutionMode)
         assertTrue(fake.conversations.isEmpty())
         assertEquals(0, fake.sendMessageCalls)
         assertEquals(UiText.Dynamic("create failed"), viewModel.state.value.notice)
@@ -1625,6 +1641,108 @@ class AppViewModelTest {
     }
 
     @Test
+    fun markdownAgentUriImportSavesIndependentAgentUsingGlobalModel() = runTest(dispatcher) {
+        val files = FakeNoteMarkdownFileAccess().apply {
+            imported = ImportedMarkdownNote("filename", "# Imported agent\r\n\r\nPrompt body\r\n")
+        }
+        val fake = FakeChatDataSource(withModel = true)
+        val viewModel = AppViewModel(fake, files)
+        advanceUntilIdle()
+
+        viewModel.importMarkdownAgent("content://agents/source.md")
+        assertTrue(viewModel.state.value.agentFileImporting)
+        advanceUntilIdle()
+
+        val saved = viewModel.state.value.agents.single()
+        assertEquals("Imported agent", saved.name)
+        assertEquals(files.imported.body, saved.systemPrompt)
+        assertEquals(fake.model.id, saved.modelId)
+        assertEquals("content://agents/source.md", files.readUri)
+        assertFalse(viewModel.state.value.agentFileImporting)
+        assertEquals(R.string.agent_import_success, (viewModel.state.value.notice as UiText.Resource).id)
+
+        viewModel.importMarkdownAgent("content://agents/source.md")
+        advanceUntilIdle()
+
+        assertEquals(2, viewModel.state.value.agents.size)
+        assertEquals(2, viewModel.state.value.agents.map(AgentProfile::id).distinct().size)
+    }
+
+    @Test
+    fun markdownAgentImportPreventsConcurrentImportsAndKeepsPromptAfterWaiting() = runTest(dispatcher) {
+        val gate = CompletableDeferred<Unit>()
+        val files = FakeNoteMarkdownFileAccess().apply { readGate = gate }
+        val fake = FakeChatDataSource(withModel = true)
+        val viewModel = AppViewModel(fake, files)
+        advanceUntilIdle()
+
+        viewModel.importMarkdownAgent("content://agents/first.md")
+        runCurrent()
+        viewModel.importMarkdownAgent("content://agents/ignored.md")
+        runCurrent()
+
+        assertTrue(viewModel.state.value.agentFileImporting)
+        assertEquals("content://agents/first.md", files.readUri)
+        assertTrue(fake.agents.isEmpty())
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(1, viewModel.state.value.agents.size)
+        assertEquals("Body", viewModel.state.value.agents.single().systemPrompt)
+        assertFalse(viewModel.state.value.agentFileImporting)
+    }
+
+    @Test
+    fun markdownAgentReadAndSaveFailuresKeepExistingAgentsAndClearBusyState() = runTest(dispatcher) {
+        val files = FakeNoteMarkdownFileAccess()
+        val existing = AgentProfile(name = "Existing", systemPrompt = "Keep me")
+        val fake = FakeChatDataSource(withModel = true).apply { agents += existing }
+        val viewModel = AppViewModel(fake, files)
+        advanceUntilIdle()
+        val errors = listOf(
+            NoteMarkdownFileError.UNSUPPORTED_EXTENSION to R.string.agent_import_invalid_extension,
+            NoteMarkdownFileError.TOO_LARGE to R.string.agent_import_too_large,
+            NoteMarkdownFileError.EMPTY to R.string.agent_import_empty,
+            NoteMarkdownFileError.INVALID_UTF8 to R.string.agent_import_invalid_utf8,
+            NoteMarkdownFileError.READ_FAILED to R.string.agent_import_read_failed,
+        )
+
+        errors.forEach { (error, message) ->
+            files.readFailure = NoteMarkdownFileException(error)
+            viewModel.importMarkdownAgent("content://agents/source.md")
+            advanceUntilIdle()
+
+            assertEquals(listOf(existing), viewModel.state.value.agents)
+            assertFalse(viewModel.state.value.agentFileImporting)
+            assertEquals(message, (viewModel.state.value.notice as UiText.Resource).id)
+        }
+        files.readFailure = null
+        fake.agentSaveFailure = IllegalStateException("Database unavailable")
+        viewModel.importMarkdownAgent("content://agents/source.md")
+        advanceUntilIdle()
+
+        assertEquals(listOf(existing), viewModel.state.value.agents)
+        assertFalse(viewModel.state.value.agentFileImporting)
+        assertEquals(R.string.agent_import_failed, (viewModel.state.value.notice as UiText.Resource).id)
+    }
+
+    @Test
+    fun cancelledMarkdownAgentImportClearsBusyStateAndLeavesNoNotice() = runTest(dispatcher) {
+        val files = FakeNoteMarkdownFileAccess().apply { readFailure = CancellationException("Cancelled") }
+        val fake = FakeChatDataSource(withModel = true)
+        val viewModel = AppViewModel(fake, files)
+        advanceUntilIdle()
+
+        viewModel.importMarkdownAgent("content://agents/source.md")
+        advanceUntilIdle()
+
+        assertFalse(viewModel.state.value.agentFileImporting)
+        assertTrue(viewModel.state.value.agents.isEmpty())
+        assertEquals(null, viewModel.state.value.notice)
+    }
+
+    @Test
     fun failedMarkdownImportDoesNotInsertNoteAndClearsBusyState() = runTest(dispatcher) {
         val existing = Note(id = "existing-note", title = "Existing", body = "Old")
         val fake = FakeChatDataSource(withModel = true).apply {
@@ -2294,6 +2412,115 @@ class AppViewModelTest {
     }
 
     @Test
+    fun requiredCloudModeBelongsToEachDraftAndResetsOnlyAfterAcceptance() = runTest(dispatcher) {
+        val server = cloudServer("draft-cloud", "/srv")
+        val first = Conversation(id = "cloud-first", model = "model-1", enableInfiniteCloud = true, cloudServerId = server.id)
+        val second = first.copy(id = "cloud-second")
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += server
+            conversations += listOf(first, second)
+            sendMessageFailureBeforeUser = IllegalStateException("prepare failed")
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openConversation(first.id)
+        advanceUntilIdle()
+        viewModel.setComposerText("create the report")
+        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.REQUIRED)
+        viewModel.openConversation(second.id)
+        advanceUntilIdle()
+        assertEquals(CloudExecutionMode.AUTO, viewModel.state.value.composerCloudExecutionMode)
+        viewModel.openConversation(first.id)
+        advanceUntilIdle()
+        assertEquals(CloudExecutionMode.REQUIRED, viewModel.state.value.composerCloudExecutionMode)
+
+        viewModel.openContextManager()
+        advanceUntilIdle()
+        assertEquals(CloudExecutionMode.REQUIRED, fake.contextPreviewRequest?.cloudExecutionMode)
+        assertEquals("create the report", fake.contextPreviewRequest?.content)
+        viewModel.closeContextManager()
+
+        assertTrue(viewModel.send("create the report"))
+        advanceUntilIdle()
+        assertEquals(CloudExecutionMode.REQUIRED, fake.sentRequest?.cloudExecutionMode)
+        assertEquals(CloudExecutionMode.REQUIRED, viewModel.state.value.composerCloudExecutionMode)
+        assertEquals("create the report", viewModel.state.value.composerText)
+
+        fake.sendMessageFailureBeforeUser = null
+        assertTrue(viewModel.send("create the report"))
+        advanceUntilIdle()
+        assertEquals(CloudExecutionMode.AUTO, viewModel.state.value.composerCloudExecutionMode)
+        assertEquals("", viewModel.state.value.composerText)
+    }
+
+    @Test
+    fun requiredCloudModeCannotBeSelectedWithoutAnEnabledServerAndToolBudget() = runTest(dispatcher) {
+        val server = cloudServer("required-budget", "/srv")
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += server
+            conversations += Conversation(id = "budget-zero", model = "model-1", enableInfiniteCloud = true,
+                cloudServerId = server.id, maxToolCalls = 0)
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.REQUIRED)
+        assertEquals(CloudExecutionMode.AUTO, viewModel.state.value.composerCloudExecutionMode)
+        assertEquals(UiText.Resource(R.string.cloud_execution_enable_first), viewModel.state.value.notice)
+        viewModel.openConversation("budget-zero")
+        advanceUntilIdle()
+        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.REQUIRED)
+        assertEquals(CloudExecutionMode.AUTO, viewModel.state.value.composerCloudExecutionMode)
+        assertEquals(UiText.Resource(R.string.cloud_execution_budget_zero), viewModel.state.value.notice)
+    }
+
+    @Test
+    fun pendingCloudSettingsBlockOnlyTheirConversationAndFailurePreservesRequiredDraft() = runTest(dispatcher) {
+        val server = cloudServer("pending-cloud", "/srv")
+        val first = Conversation(id = "settings-first", model = "model-1", enableInfiniteCloud = true, cloudServerId = server.id)
+        val second = first.copy(id = "settings-second")
+        val saveGate = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(withModel = true).apply {
+            cloudServers += server
+            conversations += listOf(first, second)
+            conversationUpdateBeforeWrite = { _, existing ->
+                if (existing.id == first.id) { saveGate.await(); error("save failed") }
+            }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.openConversation(first.id)
+        advanceUntilIdle()
+        viewModel.setComposerText("keep this")
+        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.REQUIRED)
+        viewModel.saveToolSettings(false, true, false, false, false, null)
+        runCurrent()
+        assertTrue(viewModel.state.value.toolSettingsPending)
+        assertFalse(viewModel.send("keep this"))
+        viewModel.regenerateLatest()
+        runCurrent()
+        assertEquals(0, fake.sendMessageCalls)
+        assertEquals(0, fake.regenerateCalls)
+        assertEquals(CloudExecutionMode.REQUIRED, viewModel.state.value.composerCloudExecutionMode)
+
+        viewModel.openConversation(second.id)
+        runCurrent()
+        assertFalse(viewModel.state.value.toolSettingsPending)
+        assertTrue(viewModel.send("another chat"))
+        runCurrent()
+        assertEquals(1, fake.sendMessageCalls)
+        saveGate.complete(Unit)
+        advanceUntilIdle()
+        viewModel.openConversation(first.id)
+        advanceUntilIdle()
+        assertFalse(viewModel.state.value.toolSettingsPending)
+        assertTrue(viewModel.state.value.config.enableInfiniteCloud)
+        assertEquals("keep this", viewModel.state.value.composerText)
+        assertEquals(CloudExecutionMode.REQUIRED, viewModel.state.value.composerCloudExecutionMode)
+        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.AUTO)
+        assertEquals(CloudExecutionMode.AUTO, viewModel.state.value.composerCloudExecutionMode)
+    }
+
+    @Test
     fun toolDialogSettingsUseOneConversationWriteWithReadyServer() = runTest(dispatcher) {
         val server = cloudServer("ready-server", "/srv")
         val fake = FakeChatDataSource(withModel = true).apply {
@@ -2325,6 +2552,12 @@ class AppViewModelTest {
         assertEquals(server.id, request.cloudServerId)
         assertTrue(request.updateCloudServerId)
 
+        val attachment = PendingAttachment("content://fixture/report", "report.txt", "text/plain")
+        viewModel.setComposerText("keep this draft")
+        viewModel.addAttachments(listOf(attachment))
+        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.REQUIRED)
+        val draftBeforeDisabling = viewModel.state.value.drafts.getValue("conversation-cloud")
+        assertEquals(CloudExecutionMode.REQUIRED, draftBeforeDisabling.cloudExecutionMode)
         fake.conversationWrites.clear()
         viewModel.saveToolSettings(false, true, true, true, false, server.id)
         advanceUntilIdle()
@@ -2332,6 +2565,13 @@ class AppViewModelTest {
         assertEquals(false, disabled.enableInfiniteCloud)
         assertEquals(null, disabled.cloudServerId)
         assertTrue(disabled.updateCloudServerId)
+        assertEquals(draftBeforeDisabling.copy(cloudExecutionMode = CloudExecutionMode.AUTO),
+            viewModel.state.value.drafts.getValue("conversation-cloud"))
+        assertEquals(listOf(attachment), viewModel.state.value.pendingAttachments)
+        assertTrue(viewModel.send("keep this draft"))
+        advanceUntilIdle()
+        assertEquals(CloudExecutionMode.AUTO, fake.sentRequest?.cloudExecutionMode)
+        assertEquals(listOf(attachment), fake.sentRequest?.attachments)
     }
 
     @Test
@@ -2616,6 +2856,7 @@ private class FakeChatDataSource(withModel: Boolean, modelVisionStatus: VisionSt
     var initialized = false
     var initializationGate: CompletableDeferred<Unit>? = null
     var sentRequest: SendMessageRequest? = null
+    var contextPreviewRequest: SendMessageRequest? = null
     var createConversationFailure: Throwable? = null
     var createConversationGate: CompletableDeferred<Unit>? = null
     var sendMessageFailureBeforeUser: Throwable? = null
@@ -2667,6 +2908,8 @@ private class FakeChatDataSource(withModel: Boolean, modelVisionStatus: VisionSt
     var conversationUpdateBeforeWrite: suspend (ConversationWriteRequest, Conversation) -> Unit = { _, _ -> }
     var conversationUpdateAfterWrite: suspend (ConversationWriteRequest, Conversation) -> Unit = { _, _ -> }
     var savedAgent: AgentProfile? = null
+    val agents = mutableListOf<AgentProfile>()
+    var agentSaveFailure: Throwable? = null
     val retriedArtifactDeliveries = mutableListOf<String>()
     private var models = if (withModel) listOf(model) else emptyList()
 
@@ -2684,6 +2927,7 @@ private class FakeChatDataSource(withModel: Boolean, modelVisionStatus: VisionSt
             globalSettings = GlobalChatSettings(defaultModelId = models.firstOrNull()?.id),
             bookmarks = bookmarks.toList(),
             notes = notes.toList(),
+            agents = agents.toList(),
             knowledgeDocuments = knowledgeDocuments.toList(),
             cloudServers = cloudServers.toList(),
             cloudMcpServers = cloudMcpServers.toList(),
@@ -2726,6 +2970,10 @@ private class FakeChatDataSource(withModel: Boolean, modelVisionStatus: VisionSt
         )
     }
     override suspend fun conversations() = conversations.toList()
+    override suspend fun contextPreview(id: String, request: SendMessageRequest?): ContextPreview {
+        contextPreviewRequest = request
+        return ContextPreview(ContextPolicy(), 0, null, 0, emptyList(), "")
+    }
     override suspend fun knowledgeSnippets(ids: List<Long>) =
         knowledgeSnippets.filter { it.chunkId in ids }
 
@@ -2809,7 +3057,10 @@ private class FakeChatDataSource(withModel: Boolean, modelVisionStatus: VisionSt
     }
 
     override suspend fun saveAgent(agent: AgentProfile): AgentProfile {
+        agentSaveFailure?.let { throw it }
         savedAgent = agent
+        agents.removeAll { it.id == agent.id }
+        agents += agent
         return agent
     }
 
@@ -2962,11 +3213,19 @@ private class CloseTrackingInputStream(bytes: ByteArray) : ByteArrayInputStream(
 
 private class FakeNoteMarkdownFileAccess : NoteMarkdownFileAccess {
     var imported = ImportedMarkdownNote("Imported", "Body")
+    var readUri: String? = null
+    var readGate: CompletableDeferred<Unit>? = null
+    var readFailure: Throwable? = null
     var writeGate: CompletableDeferred<Unit>? = null
     var writtenUri: String? = null
     var writtenBody: String? = null
 
-    override suspend fun read(uri: String): ImportedMarkdownNote = imported
+    override suspend fun read(uri: String): ImportedMarkdownNote {
+        readUri = uri
+        readFailure?.let { throw it }
+        readGate?.await()
+        return imported
+    }
 
     override suspend fun write(uri: String, body: String) {
         writtenUri = uri

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="cloud_execution_require">Run this message in Cloud</string>
+    <string name="cloud_execution_required_server">Cloud required · %1$s</string>
+    <string name="cloud_execution_cancel">Cancel Cloud requirement</string>
+    <string name="cloud_execution_settings_saving">Saving tool settings…</string>
+    <string name="cloud_execution_budget_zero">Increase tool call limit</string>
+    <string name="cloud_execution_enable_first">Enable Cloud in tools</string>
+    <string name="cloud_execution_server_unavailable">Configure a Cloud server</string>
+    <string name="cloud_execution_not_called">Cloud · Not called</string>
+    <string name="cloud_execution_running">Cloud · Running</string>
+    <string name="cloud_execution_called">Cloud · Called</string>
+    <string name="cloud_execution_failed">Cloud · Failed</string>
+    <string name="cloud_execution_unavailable">Cloud · Unavailable</string>
+    <string name="cloud_execution_interrupted">Cloud · Interrupted, result unconfirmed</string>
+    <string name="cloud_execution_required_no_call">The model did not call Cloud. Cloud execution was required for this message.</string>
+    <string name="cloud_execution_required_unavailable">Enable Cloud, select a configured server, and increase the tool call limit before requiring Cloud execution.</string>
+    <string name="cloud_execution_unadvertised_tool">The model returned a tool unavailable in this round. That call was not executed.</string>
+    <string name="cloud_execution_invalid_arguments">The Cloud tool arguments were invalid. No Cloud execution was started.</string>
+    <string name="cloud_execution_provider_unsupported">This model service does not support required Cloud tool calls. Change the model or cancel the Cloud requirement.</string>
+</resources>

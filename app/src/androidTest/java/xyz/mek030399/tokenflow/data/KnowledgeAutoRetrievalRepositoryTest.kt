@@ -162,7 +162,7 @@ class KnowledgeAutoRetrievalRepositoryTest {
             val searchTool = toolRequest.tools.single { it.name == "search_knowledge" }
             assertEquals("search_knowledge", searchTool.name)
             assertEquals(
-                setOf("calculate", "convert_units", "search_knowledge"),
+                setOf("calculate", "convert_units", "search_knowledge") + DEVICE_INFO_TOOL_NAMES,
                 toolRequest.tools.map(ToolDefinition::name).toSet(),
             )
             assertFalse(toolRequest.systemPrompt.contains("Available tools:"))

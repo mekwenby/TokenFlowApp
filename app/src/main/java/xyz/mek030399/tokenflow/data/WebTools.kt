@@ -472,10 +472,12 @@ data class ToolExecutionResult(
     val ok: Boolean,
     val processEvent: ProcessEvent? = null,
     val citations: List<KnowledgeCitation> = emptyList(),
+    val cloudDispatched: Boolean = false,
 )
 
 interface ToolSession {
     val definitions: List<ToolDefinition>
+    val cloudToolNames: Set<String> get() = emptySet()
     val initializationWarnings: List<ProcessEvent> get() = emptyList()
     suspend fun execute(call: CanonicalToolCall): ToolExecutionResult
     suspend fun close() = Unit
@@ -516,11 +518,13 @@ class WebToolExecutor(
     private val knowledgeStore: KnowledgeStore? = null,
     private val infiniteCloudTools: InfiniteCloudToolExecutor? = null,
     private val infiniteCloudMcp: InfiniteCloudMcpExecutor? = null,
+    private val deviceInfoTools: DeviceInfoTools = DeviceInfoTools(json = json),
 ) : ToolRunner {
     private val offlineTools = OfflineCalculationTools(json)
 
     override fun definitions(enableSearch: Boolean, enableRead: Boolean): List<ToolDefinition> = buildList {
         addAll(offlineTools.definitions())
+        addAll(deviceInfoTools.definitions())
         if (enableSearch && secretStore.read(SecretStore.EXA_KEY) != null) add(
             webSearchToolDefinition(),
         )
@@ -548,6 +552,8 @@ class WebToolExecutor(
         val executor = this
         return object : ToolSession {
             override val definitions = fixedDefinitions + mcpPreparation?.definitions.orEmpty()
+            override val cloudToolNames = infiniteCloudTools?.definitions(options).orEmpty().map { it.name }.toSet() +
+                mcpPreparation?.bindings.orEmpty().keys
             override val initializationWarnings = mcpPreparation?.warnings.orEmpty()
 
             override suspend fun execute(call: CanonicalToolCall): ToolExecutionResult {
@@ -577,6 +583,7 @@ class WebToolExecutor(
         if (call.name == "calculate" || call.name == "convert_units") {
             return offlineTools.execute(call)
         }
+        if (deviceInfoTools.supports(call.name)) return deviceInfoTools.execute(call)
         val args = runCatching { json.parseToJsonElement(call.arguments).jsonObject }
             .getOrElse { return ToolExecutionResult(error("Invalid tool arguments"), false) }
         return try {

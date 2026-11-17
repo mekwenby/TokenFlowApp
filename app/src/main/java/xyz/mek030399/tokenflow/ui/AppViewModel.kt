@@ -27,6 +27,7 @@ import xyz.mek030399.tokenflow.data.ChatMessage
 import xyz.mek030399.tokenflow.data.BookmarkedMessage
 import xyz.mek030399.tokenflow.data.Note
 import xyz.mek030399.tokenflow.data.AgentProfile
+import xyz.mek030399.tokenflow.data.toImportedAgent
 import xyz.mek030399.tokenflow.data.KnowledgeDocument
 import xyz.mek030399.tokenflow.data.KnowledgeDocumentPreview
 import xyz.mek030399.tokenflow.data.KnowledgeImportSource
@@ -59,6 +60,7 @@ import xyz.mek030399.tokenflow.data.PendingAttachment
 import xyz.mek030399.tokenflow.data.UrlReadDiagnostic
 import xyz.mek030399.tokenflow.data.VisionStatus
 import xyz.mek030399.tokenflow.data.CloudServerProfile
+import xyz.mek030399.tokenflow.data.CloudExecutionMode
 import xyz.mek030399.tokenflow.data.CloudServerDraft
 import xyz.mek030399.tokenflow.data.CloudConnectionProbe
 import xyz.mek030399.tokenflow.data.CloudArtifactDelivery
@@ -209,6 +211,7 @@ data class ComposerDraftRecovery(
     val requestId: String,
     val conversationId: String?,
     val content: String,
+    val cloudExecutionMode: CloudExecutionMode = CloudExecutionMode.AUTO,
 )
 
 sealed interface KnowledgePreviewState {
@@ -258,6 +261,7 @@ data class AppUiState(
     val noteSummarizingId: String? = null,
     val noteImportingId: String? = null,
     val agents: List<AgentProfile> = emptyList(),
+    val agentFileImporting: Boolean = false,
     val knowledgeDocuments: List<KnowledgeDocument> = emptyList(),
     val knowledgePreview: KnowledgePreviewState = KnowledgePreviewState.Closed,
     val knowledgeResults: List<KnowledgeSnippet> = emptyList(),
@@ -281,6 +285,7 @@ data class AppUiState(
     val messageSearchError: UiText? = null,
     val highlightMessageId: String? = null,
     val drafts: Map<String, ComposerDraft> = emptyMap(),
+    val pendingToolSettingsConversationIds: Set<String> = emptySet(),
     val incomingShare: IncomingShare? = null,
     val shareBusy: Boolean = false,
     val shareVisible: Boolean = true,
@@ -299,6 +304,9 @@ data class AppUiState(
     val hasModels: Boolean get() = models.isNotEmpty()
     val composerText: String get() = drafts[activeConversationId ?: NEW_DRAFT_KEY]
         ?.takeIf { it.submittedRequestId == null }?.text.orEmpty()
+    val composerCloudExecutionMode: CloudExecutionMode get() = drafts[activeConversationId ?: NEW_DRAFT_KEY]
+        ?.takeIf { it.submittedRequestId == null }?.cloudExecutionMode ?: CloudExecutionMode.AUTO
+    val toolSettingsPending: Boolean get() = activeConversationId in pendingToolSettingsConversationIds
 }
 
 internal const val NEW_DRAFT_KEY = "__new_conversation__"
@@ -387,6 +395,42 @@ class AppViewModel internal constructor(
             state.copy(drafts = state.drafts + (key to previous.copy(text = text, submittedRequestId = null)))
         }
         persistDrafts()
+    }
+
+    fun setComposerCloudExecutionMode(mode: CloudExecutionMode) {
+        val current = mutableState.value
+        if (current.activeGeneration?.active == true) return
+        if (mode == CloudExecutionMode.REQUIRED) {
+            cloudExecutionUnavailableReason(current)?.let { error ->
+                mutableState.update { it.copy(notice = error) }
+                return
+            }
+        }
+        mutableState.update { state ->
+            val key = state.activeConversationId ?: NEW_DRAFT_KEY
+            val previous = state.drafts[key]?.takeIf { it.submittedRequestId == null }
+                ?: ComposerDraft(attachments = state.pendingAttachments)
+            state.copy(drafts = state.drafts + (key to previous.copy(cloudExecutionMode = mode)))
+        }
+        persistDrafts()
+    }
+
+    private fun AppUiState.resetCloudDraftIfDisabled(conversationId: String?, cloudEnabled: Boolean): AppUiState {
+        if (cloudEnabled) return this
+        val key = conversationId ?: NEW_DRAFT_KEY
+        val draft = drafts[key]?.takeIf {
+            it.submittedRequestId == null && it.cloudExecutionMode == CloudExecutionMode.REQUIRED
+        } ?: return this
+        return copy(drafts = drafts + (key to draft.copy(cloudExecutionMode = CloudExecutionMode.AUTO)))
+    }
+
+    private fun cloudExecutionUnavailableReason(state: AppUiState): UiText? = when {
+        state.toolSettingsPending -> uiText(R.string.cloud_execution_settings_saving)
+        state.config.maxToolCalls <= 0 -> uiText(R.string.cloud_execution_budget_zero)
+        !state.config.enableInfiniteCloud -> uiText(R.string.cloud_execution_enable_first)
+        state.cloudServers.none { it.id == state.config.cloudServerId && it.keyConfigured && it.hostKeyFingerprint != null } ->
+            uiText(R.string.cloud_execution_server_unavailable)
+        else -> null
     }
 
     private fun rememberActiveDraft() {
@@ -480,7 +524,8 @@ class AppViewModel internal constructor(
                         else -> null
                     }
                     val state = mutableState.value
-                    val existing = if (state.activeConversationId == id) ComposerDraft(state.composerText, state.pendingAttachments)
+                    val existing = if (state.activeConversationId == id) ComposerDraft(state.composerText, state.pendingAttachments,
+                        cloudExecutionMode = state.composerCloudExecutionMode)
                         else state.drafts[id ?: NEW_DRAFT_KEY] ?: ComposerDraft()
                     val attachments = existing.attachments + currentShare.files.mapNotNull { it.attachment }
                     require(attachments.size <= 5 && attachments.sumOf { it.sizeBytes.coerceAtLeast(0) } <= 20L * 1024 * 1024) {
@@ -494,7 +539,7 @@ class AppViewModel internal constructor(
                             messages = it.messages + (id to detail.messages), attachments = it.attachments + (id to detail.attachments)) }
                         openConversation(id)
                     } else newConversation()
-                    mutableState.update { it.copy(drafts = it.drafts + ((id ?: NEW_DRAFT_KEY) to ComposerDraft(text, attachments)),
+                    mutableState.update { it.copy(drafts = it.drafts + ((id ?: NEW_DRAFT_KEY) to existing.copy(text = text, attachments = attachments)),
                         pendingAttachments = attachments, incomingShare = null, shareVisible = true, screen = AppScreen.CHAT) }
                     persistDrafts()
                 }
@@ -606,7 +651,8 @@ class AppViewModel internal constructor(
     private suspend fun loadContextPreview(id: String) {
         val state = mutableState.value
         val request = SendMessageRequest(state.composerText, state.enableSearch, state.enableRead, state.enableKnowledge,
-            state.pendingKnowledgeChunkIds, TimeZone.getDefault().id, UUID.randomUUID().toString(), state.pendingAttachments)
+            state.pendingKnowledgeChunkIds, TimeZone.getDefault().id, UUID.randomUUID().toString(), state.pendingAttachments,
+            knowledgeScope = state.config.knowledgeScope, cloudExecutionMode = state.composerCloudExecutionMode)
         val preview = repository.contextPreview(id, request)
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
         if (mutableState.value.activeConversationId == id && mutableState.value.contextOpen) mutableState.update { it.copy(contextPreview = preview) }
@@ -1477,7 +1523,7 @@ class AppViewModel internal constructor(
         }
         val cloudEnabled = cloud && readyServerId != null
         mutableState.update {
-            it.copy(
+            val updated = it.copy(
                 enableSearch = search,
                 enableRead = read,
                 enableKnowledge = knowledge,
@@ -1490,13 +1536,18 @@ class AppViewModel internal constructor(
                     cloudServerId = readyServerId,
                 ),
             )
+            if (initialState.activeConversationId == null) updated.resetCloudDraftIfDisabled(null, cloudEnabled) else updated
         }
-        val id = initialState.activeConversationId ?: return
+        val id = initialState.activeConversationId
+        if (id == null) {
+            if (!cloudEnabled) persistDrafts()
+            return
+        }
         val previousConversation = initialState.conversations.firstOrNull { it.id == id }
         val applyPersisted: (Conversation) -> Unit = { updated ->
             mutableState.update {
                 val conversations = upsertConversation(it.conversations, updated)
-                if (it.activeConversationId != id) it.copy(conversations = conversations)
+                val state = if (it.activeConversationId != id) it.copy(conversations = conversations)
                 else it.copy(
                     conversations = conversations,
                     config = updated.toConfig(),
@@ -1504,7 +1555,9 @@ class AppViewModel internal constructor(
                     enableRead = updated.enableRead,
                     enableKnowledge = updated.enableKnowledge,
                 )
+                state.resetCloudDraftIfDisabled(id, updated.enableInfiniteCloud)
             }
+            if (!updated.enableInfiniteCloud) persistDrafts()
         }
         saveConversationToolSettings(
             id,
@@ -1532,6 +1585,7 @@ class AppViewModel internal constructor(
         val generation = (toolSettingsGenerations[conversationId] ?: 0L) + 1L
         toolSettingsGenerations[conversationId] = generation
         toolSettingsJobs.remove(conversationId)?.cancel()
+        mutableState.update { it.copy(pendingToolSettingsConversationIds = it.pendingToolSettingsConversationIds + conversationId) }
         val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
                 val updated = repository.updateConversation(conversationId, request)
@@ -1555,6 +1609,7 @@ class AppViewModel internal constructor(
             } finally {
                 if (toolSettingsGenerations[conversationId] == generation) {
                     toolSettingsJobs.remove(conversationId)
+                    mutableState.update { it.copy(pendingToolSettingsConversationIds = it.pendingToolSettingsConversationIds - conversationId) }
                 }
             }
         }
@@ -1615,7 +1670,11 @@ class AppViewModel internal constructor(
         val normalized = config.copy(maxToolCalls = config.maxToolCalls.coerceIn(0, 20))
         val id = mutableState.value.activeConversationId
         if (id == null) {
-            mutableState.update { it.copy(config = normalized, notice = uiText(R.string.settings_saved)) }
+            mutableState.update {
+                it.copy(config = normalized, notice = uiText(R.string.settings_saved))
+                    .resetCloudDraftIfDisabled(null, normalized.enableInfiniteCloud)
+            }
+            if (!normalized.enableInfiniteCloud) persistDrafts()
             return
         }
         if (mutableState.value.generations[id]?.active == true) {
@@ -1631,8 +1690,9 @@ class AppViewModel internal constructor(
                             conversations = upsertConversation(it.conversations, updated),
                             config = if (it.activeConversationId == id) updated.toConfig() else it.config,
                             notice = uiText(R.string.settings_saved),
-                        )
+                        ).resetCloudDraftIfDisabled(id, updated.enableInfiniteCloud)
                     }
+                    if (!updated.enableInfiniteCloud) persistDrafts()
                 }
                 .onFailure(::handleError)
         }
@@ -1942,6 +2002,49 @@ class AppViewModel internal constructor(
 
     fun deleteNotes(ids: Set<String>) = refreshAfter { repository.deleteNotes(ids) }
 
+    fun importMarkdownAgent(uri: String) {
+        startMarkdownAgentImport {
+            requireNotNull(noteMarkdownFiles) { "Markdown files are unavailable" }.read(uri)
+        }
+    }
+
+    internal fun importMarkdownAgent(imported: ImportedMarkdownNote) {
+        startMarkdownAgentImport { imported }
+    }
+
+    private fun startMarkdownAgentImport(load: suspend () -> ImportedMarkdownNote) {
+        if (mutableState.value.agentFileImporting) return
+        mutableState.update { it.copy(agentFileImporting = true) }
+        viewModelScope.launch {
+            try {
+                val imported = load().toImportedAgent(mutableState.value.globalSettings.defaultModelId)
+                val saved = repository.saveAgent(imported)
+                mutableState.update {
+                    it.copy(
+                        agents = listOf(saved) + it.agents.filterNot { agent -> agent.id == saved.id },
+                        notice = uiText(R.string.agent_import_success),
+                    )
+                }
+                loadWorkspace()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: NoteMarkdownFileException) {
+                val message = when (error.reason) {
+                    NoteMarkdownFileError.UNSUPPORTED_EXTENSION -> R.string.agent_import_invalid_extension
+                    NoteMarkdownFileError.TOO_LARGE -> R.string.agent_import_too_large
+                    NoteMarkdownFileError.EMPTY -> R.string.agent_import_empty
+                    NoteMarkdownFileError.INVALID_UTF8 -> R.string.agent_import_invalid_utf8
+                    NoteMarkdownFileError.READ_FAILED, NoteMarkdownFileError.WRITE_FAILED -> R.string.agent_import_read_failed
+                }
+                mutableState.update { it.copy(notice = uiText(message)) }
+            } catch (_: Exception) {
+                mutableState.update { it.copy(notice = uiText(R.string.agent_import_failed)) }
+            } finally {
+                mutableState.update { it.copy(agentFileImporting = false) }
+            }
+        }
+    }
+
     fun saveAgent(agent: AgentProfile) {
         val serverId = if (agent.enableInfiniteCloud) readyCloudServerId(agent.cloudServerId) else null
         if (agent.enableInfiniteCloud && serverId == null) {
@@ -2123,6 +2226,16 @@ class AppViewModel internal constructor(
     fun send(content: String): Boolean {
         val message = content.trim()
         val current = mutableState.value
+        if (current.toolSettingsPending) {
+            mutableState.update { it.copy(notice = uiText(R.string.cloud_execution_settings_saving)) }
+            return false
+        }
+        if (current.composerCloudExecutionMode == CloudExecutionMode.REQUIRED) {
+            cloudExecutionUnavailableReason(current)?.let { error ->
+                mutableState.update { it.copy(notice = error) }
+                return false
+            }
+        }
         if ((message.isEmpty() && current.pendingAttachments.isEmpty()) || current.models.isEmpty()) return false
         val initialConversationId = current.activeConversationId
         if (initialConversationId == null && isGenerating(NEW_DRAFT_KEY)) return false
@@ -2151,6 +2264,7 @@ class AppViewModel internal constructor(
         val transferredAttachments = current.pendingAttachments
         val request = SendMessageRequest(
             content = message,
+            cloudExecutionMode = current.composerCloudExecutionMode,
             enableSearch = current.enableSearch,
             enableRead = current.enableRead,
             enableKnowledge = current.enableKnowledge,
@@ -2161,7 +2275,8 @@ class AppViewModel internal constructor(
             attachments = transferredAttachments,
         )
         val draftKey = initialConversationId ?: NEW_DRAFT_KEY
-        mutableState.update { it.copy(drafts = it.drafts + (draftKey to ComposerDraft(content, transferredAttachments, request.requestId))) }
+        mutableState.update { it.copy(drafts = it.drafts + (draftKey to ComposerDraft(content, transferredAttachments, request.requestId,
+            request.cloudExecutionMode))) }
         persistDrafts()
         val transferredUris = transferredAttachments.mapTo(mutableSetOf()) { it.uri }
         mutableState.update { state ->
@@ -2193,7 +2308,7 @@ class AppViewModel internal constructor(
                         config = if (stillOnDraft) created.toConfig() else state.config,
                         messages = state.messages + (created.id to emptyList()),
                         drafts = (if (state.drafts[NEW_DRAFT_KEY]?.submittedRequestId == request.requestId) state.drafts - NEW_DRAFT_KEY else state.drafts) +
-                            (created.id to ComposerDraft(content, transferredAttachments, request.requestId)),
+                            (created.id to ComposerDraft(content, transferredAttachments, request.requestId, request.cloudExecutionMode)),
                     )
                 }
                 created.id
@@ -2207,7 +2322,7 @@ class AppViewModel internal constructor(
             launchGeneration(
                 id = conversationId,
                 transferredAttachments = transferredAttachments,
-                transferredDraft = ComposerDraftRecovery(request.requestId, conversationId, content),
+                transferredDraft = ComposerDraftRecovery(request.requestId, conversationId, content, request.cloudExecutionMode),
             ) { appRepository.sendMessage(conversationId, request) }
         }
         return true
@@ -2221,6 +2336,10 @@ class AppViewModel internal constructor(
     }
 
     fun regenerateLatest() {
+        if (mutableState.value.toolSettingsPending) {
+            mutableState.update { it.copy(notice = uiText(R.string.cloud_execution_settings_saving)) }
+            return
+        }
         val id = mutableState.value.activeConversationId ?: return
         if (isGenerating(id)) return
         val request = SendMessageRequest(
@@ -2721,7 +2840,8 @@ class AppViewModel internal constructor(
                             if (state.activeConversationId == null && (provisional?.submittedRequestId == snapshot.requestId ||
                                 (allowManagedSelectionRestore && snapshot.runId in initialRestoreRuns &&
                                     snapshot.active && snapshot.runId == latestActiveNewRun &&
-                                    (provisional == null || (provisional.text.isBlank() && provisional.attachments.isEmpty() && provisional.submittedRequestId == null))))) {
+                                    (provisional == null || (provisional.text.isBlank() && provisional.attachments.isEmpty() &&
+                                        provisional.cloudExecutionMode == CloudExecutionMode.AUTO && provisional.submittedRequestId == null))))) {
                                 state = state.copy(activeConversationId = id)
                             }
                         }
@@ -2792,7 +2912,7 @@ class AppViewModel internal constructor(
         val coordinator = requireNotNull(generationCoordinator)
         val appRepository = repository
         val draftStore = shareDraftStore
-        val submitted = ComposerDraft(originalText, request.attachments, request.requestId)
+        val submitted = ComposerDraft(originalText, request.attachments, request.requestId, request.cloudExecutionMode)
         try {
             val started = coordinator.startResolvingConversation(
                 provisionalConversationId = NEW_DRAFT_KEY,
@@ -2840,7 +2960,7 @@ class AppViewModel internal constructor(
         val coordinator = requireNotNull(generationCoordinator)
         val appRepository = repository
         val draftStore = shareDraftStore
-        val submittedDraft = transferredDraft?.let { ComposerDraft(it.content, transferredAttachments, it.requestId) }
+        val submittedDraft = transferredDraft?.let { ComposerDraft(it.content, transferredAttachments, it.requestId, it.cloudExecutionMode) }
         try {
             val started = coordinator.start(
                 conversationId = id,
@@ -3060,11 +3180,10 @@ class AppViewModel internal constructor(
     }
 
     private fun restoreComposerDraft(ownerConversationId: String?, requestId: String, content: String) {
-        if (content.isEmpty()) return
         val key = ownerConversationId ?: NEW_DRAFT_KEY
         mutableState.update { state ->
             val draft = state.drafts[key] ?: ComposerDraft()
-            val merged = if (draft.text.isBlank() || draft.text == content) content else "$content\n\n${draft.text}"
+            val merged = if (content.isEmpty()) draft.text else if (draft.text.isBlank() || draft.text == content) content else "$content\n\n${draft.text}"
             state.copy(drafts = state.drafts + (key to draft.copy(text = merged, submittedRequestId = null)),
                 composerDraftRecovery = if (state.activeConversationId == ownerConversationId)
                     ComposerDraftRecovery(requestId, ownerConversationId, merged) else state.composerDraftRecovery)
@@ -3089,7 +3208,8 @@ class AppViewModel internal constructor(
         is ApiException -> UiText.Dynamic(if (error.status > 0) "HTTP ${error.status}: ${error.message}" else error.message)
         is NoteChangedDuringSummaryException -> uiText(R.string.note_changed_during_summary)
         is NoteSummaryTooLongException -> uiText(R.string.note_too_long_to_summarize, error.maxCharacters)
-        is ConfigurationException, is IllegalArgumentException -> UiText.Dynamic(error.message ?: "Invalid configuration")
+        is ConfigurationException, is IllegalArgumentException ->
+            cloudExecutionFailureText(error.message) ?: UiText.Dynamic(error.message ?: "Invalid configuration")
         is IOException -> uiText(R.string.error_network)
         else -> UiText.Dynamic(error.message ?: "Request failed")
     }

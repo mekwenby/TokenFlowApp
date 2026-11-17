@@ -98,6 +98,26 @@ data class ConversationEntity(
     val lastMessageAt: Long?,
     @ColumnInfo(defaultValue = "'{}'") val contextPolicyJson: String = "{}",
     @ColumnInfo(defaultValue = "'{}'") val knowledgeScopeJson: String = "{}",
+    @ColumnInfo(defaultValue = "'CHAT'") val kind: String = "CHAT",
+)
+
+// Preserve companion data created by the known v11 build, without enabling its UI.
+@Entity(
+    tableName = "companion_profiles",
+    foreignKeys = [ForeignKey(
+        entity = ConversationEntity::class,
+        parentColumns = ["id"],
+        childColumns = ["conversationId"],
+        onDelete = ForeignKey.CASCADE,
+    )],
+    indices = [Index(value = ["conversationId"], unique = true)],
+)
+data class CompanionProfileEntity(
+    @androidx.room.PrimaryKey val id: Long,
+    val conversationId: String,
+    val name: String,
+    val voice: String,
+    val modelPath: String,
 )
 
 @Entity(
@@ -1052,6 +1072,7 @@ interface LocalDao {
         ProviderEntity::class,
         ModelEntity::class,
         ConversationEntity::class,
+        CompanionProfileEntity::class,
         MessageEntity::class,
         MessageAttachmentEntity::class,
         AppSettingsEntity::class,
@@ -1067,7 +1088,7 @@ interface LocalDao {
         CloudArtifactDeliveryEntity::class,
         ContextSummaryEntity::class,
     ],
-    version = 10,
+    version = 12,
     exportSchema = true,
 )
 abstract class TokenFlowDatabase : RoomDatabase() {
@@ -1089,6 +1110,8 @@ abstract class TokenFlowDatabase : RoomDatabase() {
             MIGRATION_7_9,
             MIGRATION_8_9,
             MIGRATION_9_10,
+            MIGRATION_10_12,
+            MIGRATION_11_12,
         ).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -1254,6 +1277,21 @@ abstract class TokenFlowDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE conversations ADD COLUMN knowledgeScopeJson TEXT NOT NULL DEFAULT '{}'")
             }
         }
+
+        val MIGRATION_10_12 = object : Migration(10, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'CHAT'")
+                db.execSQL("CREATE TABLE companion_profiles (id INTEGER NOT NULL, conversationId TEXT NOT NULL, name TEXT NOT NULL, voice TEXT NOT NULL, modelPath TEXT NOT NULL, PRIMARY KEY(id), FOREIGN KEY(conversationId) REFERENCES conversations(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE UNIQUE INDEX index_companion_profiles_conversationId ON companion_profiles(conversationId)")
+            }
+        }
+
+        // The observed v11 structure already matches v12. Room validates all mapped tables,
+        // columns, foreign keys and indexes before accepting it and updating the identity hash.
+        // Other incompatible v11 structures deliberately fail instead of discarding data.
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) = Unit
+        }
     }
 }
 
@@ -1313,6 +1351,7 @@ fun ConversationEntity.toDomain() = Conversation(
     lastMessageAt = lastMessageAt,
     contextPolicy = runCatching { ConfigArchiveCodec.defaultJson.decodeFromString<ContextPolicy>(contextPolicyJson) }.getOrDefault(ContextPolicy()),
     knowledgeScope = runCatching { ConfigArchiveCodec.defaultJson.decodeFromString<KnowledgeScope>(knowledgeScopeJson) }.getOrDefault(KnowledgeScope()),
+    kind = kind,
 )
 
 fun Conversation.toEntity() = ConversationEntity(
@@ -1348,6 +1387,7 @@ fun Conversation.toEntity() = ConversationEntity(
     lastMessageAt = lastMessageAt,
     contextPolicyJson = ConfigArchiveCodec.defaultJson.encodeToString(contextPolicy),
     knowledgeScopeJson = ConfigArchiveCodec.defaultJson.encodeToString(knowledgeScope),
+    kind = kind,
 )
 
 fun MessageEntity.toDomain() = ChatMessage(

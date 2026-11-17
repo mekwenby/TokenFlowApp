@@ -1610,8 +1610,12 @@ class ChatRepository(
             val regenerationRequest = request.copy(
                 content = "",
                 requestId = request.requestId.ifBlank { UUID.randomUUID().toString() },
+                cloudExecutionMode = sourceUser?.let { user ->
+                    runCatching { json.decodeFromString<UserMessageMetadata>(user.metadata).cloudExecutionMode }.getOrNull()
+                }?.takeIf { it == CloudExecutionMode.REQUIRED } ?: latest.assistantMetadata(json).cloudExecutionMode,
             )
             val conversation = requireNotNull(dao.conversation(id)) { "Conversation not found" }.toDomain()
+            validateRequiredCloud(conversation, regenerationRequest.cloudExecutionMode)
             var stagedServerId: String? = null
             val remoteAttachments = if (conversation.enableInfiniteCloud && sourceAttachments.isNotEmpty()) {
                 val cloud = requireNotNull(infiniteCloud) { "Infinite Cloud is unavailable" }
@@ -1704,6 +1708,7 @@ class ChatRepository(
         try {
         val conversation = requireNotNull(dao.conversation(conversationId)) { "Conversation not found" }.toDomain()
         if (conversation.status == "generating") throw ConfigurationException("Conversation is already generating")
+        validateRequiredCloud(conversation, request.cloudExecutionMode)
         val effective = effectiveSettings(conversation)
         val model = effective.modelId?.let { dao.model(it) }?.toDomain()
             ?: throw ConfigurationException("The conversation model is unavailable")
@@ -1733,7 +1738,8 @@ class ChatRepository(
             }
             val injected = buildInjectedKnowledgeContext(retrieval?.finalSnippets.orEmpty())
             retrieval?.let { result -> knowledgeRetrievalProcessEvent(requestId, result, injected.citations)?.let(process::add) }
-            var metadata = UserMessageMetadata(knowledgeChunkIds = injected.citations.map(KnowledgeCitation::chunkId))
+            var metadata = UserMessageMetadata(knowledgeChunkIds = injected.citations.map(KnowledgeCitation::chunkId),
+                cloudExecutionMode = request.cloudExecutionMode)
             var user = ChatMessage(conversationId = conversationId, requestId = requestId, role = "user",
                 content = content, metadata = json.encodeToString(metadata), createdAt = now)
             storedAttachments = attachmentStore?.prepare(user.id, request.attachments).orEmpty()
@@ -1761,21 +1767,28 @@ class ChatRepository(
         val toolOptions = ToolOptions(request.enableSearch, request.enableRead, request.enableKnowledge,
             effective.urlReaderBackend, conversation.enableInfiniteCloud, conversation.cloudServerId, conversationId,
             requestId, assistantId, explicitlyRequestsCloudTask(userContent ?: raw.lastOrNull { it.role == "user" }?.content.orEmpty()), remoteAttachments,
-            conversation.knowledgeScope)
+            conversation.knowledgeScope, request.cloudExecutionMode)
         preparedSession = engine.openSession(toolOptions, effective.maxToolCalls)
         val definitions = preparedSession?.definitions.orEmpty()
+        if (conversation.enableInfiniteCloud) {
+            process += ProcessEvent(type = "cloud_availability", id = "cloud-availability-$requestId",
+                ok = preparedSession?.cloudToolNames?.isNotEmpty() == true,
+                message = if (preparedSession?.cloudToolNames?.isNotEmpty() == true) "Cloud tools are available" else "Cloud tools are unavailable")
+        }
         val system = SystemPrompts.compose(effective.systemPrompt + cloudAttachmentPrompt(remoteAttachments), effective.nickname,
             request.timeZone, request.enableKnowledge || allCitations.isNotEmpty())
         val baseCall = ModelCallRequest(model, provider, apiKey, system, effective.thinkingEffort, emptyList(), definitions, requestId)
         var newSummary: ContextSummary? = null
-        var preview = previewOf(raw, canonical, conversation.contextPolicy, model, system, definitions, summary)
+        var preview = previewOf(raw, canonical, conversation.contextPolicy, model, system, definitions, summary,
+            cloudRequired = request.cloudExecutionMode == CloudExecutionMode.REQUIRED)
         if (preview.needsCompression && ContextBuilder.hasHistoryToCompress(raw, preview.summary)) {
             val started = ProcessEvent(type = "context_compression", id = "context-$requestId", messageKey = "compressing_context")
             emit(ChatEvent.Process(started))
             newSummary = compressedSummary(conversationId, raw, canonical, conversation.contextPolicy, baseCall, definitions, summary,
                 mergeKnowledgeCitations(allCitations + preview.summary?.citations.orEmpty()))
             summary = newSummary
-            preview = previewOf(raw, canonical, conversation.contextPolicy, model, system, definitions, summary)
+            preview = previewOf(raw, canonical, conversation.contextPolicy, model, system, definitions, summary,
+                cloudRequired = request.cloudExecutionMode == CloudExecutionMode.REQUIRED)
             process += ProcessEvent(type = "context_compressed", id = "context-$requestId", messageKey = "context_compressed",
                 usage = newSummary.usage)
         }
@@ -1812,6 +1825,8 @@ class ChatRepository(
                 usage,
                 "generating",
                 assistantIdentity,
+                cloudEnabled = conversation.enableInfiniteCloud,
+                cloudExecutionMode = request.cloudExecutionMode,
                 knowledgeCitations = initialCitations,
             ),
             status = "generating",
@@ -1849,6 +1864,8 @@ class ChatRepository(
                                 usage,
                                 "generating",
                                 assistantIdentity,
+                                cloudEnabled = conversation.enableInfiniteCloud,
+                                cloudExecutionMode = request.cloudExecutionMode,
                                 knowledgeCitations = aggregateKnowledgeCitations(distinctInjectedCitations, process),
                             ),
                         )
@@ -1865,6 +1882,8 @@ class ChatRepository(
                                 usage,
                                 "completed",
                                 assistantIdentity,
+                                cloudEnabled = conversation.enableInfiniteCloud,
+                                cloudExecutionMode = request.cloudExecutionMode,
                                 knowledgeCitations = aggregateKnowledgeCitations(distinctInjectedCitations, process),
                             ),
                             status = "completed",
@@ -1888,6 +1907,8 @@ class ChatRepository(
                         usage,
                         "completed",
                         assistantIdentity,
+                        cloudEnabled = conversation.enableInfiniteCloud,
+                        cloudExecutionMode = request.cloudExecutionMode,
                         knowledgeCitations = aggregateKnowledgeCitations(distinctInjectedCitations, process),
                     ),
                 )
@@ -1919,6 +1940,8 @@ class ChatRepository(
                         usage,
                         "interrupted",
                         assistantIdentity,
+                        cloudEnabled = conversation.enableInfiniteCloud,
+                        cloudExecutionMode = request.cloudExecutionMode,
                         knowledgeCitations = aggregateKnowledgeCitations(distinctInjectedCitations, process),
                     ),
                     status = "interrupted",
@@ -1942,6 +1965,8 @@ class ChatRepository(
                     usage,
                     "failed",
                     assistantIdentity,
+                    cloudEnabled = conversation.enableInfiniteCloud,
+                    cloudExecutionMode = request.cloudExecutionMode,
                     error = failureMessage,
                     knowledgeCitations = aggregateKnowledgeCitations(distinctInjectedCitations, process),
                 ),
@@ -2304,12 +2329,14 @@ class ChatRepository(
     private fun previewOf(
         raw: List<ChatMessage>, canonical: Map<String, CanonicalMessage>, policy: ContextPolicy,
         model: ModelProfile, system: String, tools: List<ToolDefinition>, summary: ContextSummary?, excludedId: String? = null,
+        cloudRequired: Boolean = false,
     ): ContextPreview {
         val valid = if (policy.mode == ContextMode.SUMMARY) ContextBuilder.validSummary(summary, raw) else null
         val messages = valid?.let { listOf(ContextBuilder.summaryMessage(it)) }.orEmpty() +
             ContextBuilder.select(raw, policy, valid, excludedId).map { canonical.getValue(it.id) }
-        return ContextPreview(policy, ContextBuilder.estimate(system, messages, tools), model.contextWindowTokens,
-            model.maxOutputTokens, messages, system, valid, tools)
+        val executionSystem = SystemPrompts.withCloudCapabilities(system, tools, cloudRequired)
+        return ContextPreview(policy, ContextBuilder.estimate(executionSystem, messages, tools), model.contextWindowTokens,
+            model.maxOutputTokens, messages, executionSystem, valid, tools)
     }
 
     private suspend fun baseContextCall(id: String): ModelCallRequest {
@@ -2356,7 +2383,8 @@ class ChatRepository(
             val options = contextToolOptions(conversation).copy(urlReaderBackend = effectiveSettings(conversation).urlReaderBackend,
                 allowCloudTaskCreation = explicitlyRequestsCloudTask(request?.content.orEmpty()))
             session = engine.openSession(options, conversation.maxToolCalls)
-            previewOf(raw, canonical, conversation.contextPolicy, base.model, base.systemPrompt, session?.definitions.orEmpty(), summary)
+            previewOf(raw, canonical, conversation.contextPolicy, base.model, base.systemPrompt, session?.definitions.orEmpty(), summary,
+                cloudRequired = request?.cloudExecutionMode == CloudExecutionMode.REQUIRED)
         } finally { session?.close(); attachmentStore?.deleteFiles(attachments) }
     }
 
@@ -2500,6 +2528,8 @@ class ChatRepository(
         assistantIdentity: AssistantIdentitySnapshot,
         error: String = "",
         knowledgeCitations: List<KnowledgeCitation> = emptyList(),
+        cloudEnabled: Boolean = false,
+        cloudExecutionMode: CloudExecutionMode = CloudExecutionMode.AUTO,
     ): String =
         json.encodeToString(
             AssistantMetadata(
@@ -2509,6 +2539,8 @@ class ChatRepository(
                 error = error,
                 knowledgeCitations = knowledgeCitations,
                 assistantIdentity = assistantIdentity,
+                cloudEnabled = cloudEnabled,
+                cloudExecutionMode = cloudExecutionMode,
             ),
         )
 
@@ -2569,6 +2601,14 @@ class ChatRepository(
         val ids = runCatching { json.decodeFromString<UserMessageMetadata>(message.metadata).knowledgeChunkIds }
             .getOrDefault(emptyList())
         return buildInjectedKnowledgeContext(knowledgeStore.snippets(ids, scope))
+    }
+
+    private suspend fun validateRequiredCloud(conversation: Conversation, mode: CloudExecutionMode) {
+        if (mode != CloudExecutionMode.REQUIRED) return
+        if (!conversation.enableInfiniteCloud || conversation.cloudServerId == null || conversation.maxToolCalls <= 0) {
+            throw ConfigurationException("Cloud execution requires an enabled server and a positive tool budget")
+        }
+        requireReadyCloudServer(conversation.cloudServerId)
     }
 
     private suspend fun requireReadyCloudServer(id: String?): CloudServerEntity {

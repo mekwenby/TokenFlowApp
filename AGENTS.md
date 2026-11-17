@@ -11,7 +11,7 @@
 - Application ID and Kotlin namespace: `xyz.mek030399.tokenflow`.
 - Debug application ID: `xyz.mek030399.tokenflow.debug`.
 - The project is a single Gradle module, `:app`, using Kotlin, Jetpack Compose, Room, KSP, and OkHttp.
-- Room is version 10 with explicit migrations `1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 9 -> 10` and an additive compatibility migration `8 -> 9` for the pre-release v7 structure labeled v8. Never add destructive fallback. Commit every new schema snapshot under `app/schemas/`.
+- Room is version 12 with explicit migrations `1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 9 -> 10 -> 12` and an additive compatibility migration `8 -> 9` for the pre-release v7 structure labeled v8. `10 -> 12` adds the legacy v11 `conversations.kind` column and `companion_profiles` table/index; `11 -> 12` preserves that existing structure and relies on Room validation to reject incompatible mapped schemas. Preserve existing kind values and companion rows when reading and writing conversations. Never add destructive fallback. Commit every new schema snapshot under `app/schemas/`.
 
 ## Build And Test
 
@@ -22,6 +22,12 @@
 - Use `testDebugUnitTest --rerun-tasks` after package, serialization, database, or shared behavior changes.
 - Instrumentation requires a disposable isolated AVD. Never run it on `127.0.0.1:5557` or another serial with the same Android boot ID.
 - The protected device may only receive an explicit `adb install -r` deployment. Never uninstall, clear data, install the test APK, or run instrumentation there.
+
+## Debug Device
+
+- Default debugging endpoint: `127.0.0.1:5555`. Use `adb connect 127.0.0.1:5555` and explicitly select it with `adb -s 127.0.0.1:5555 ...` for device diagnostics and app debugging.
+- Preserve this device's existing app data. Deploy with `adb install -r`; never uninstall, clear app data, install the AndroidTest APK, or run instrumentation on this daily-use debugging device.
+- Run instrumentation only on a disposable isolated AVD with a different Android boot ID from `127.0.0.1:5555`, the protected `127.0.0.1:5557`, and any aliases of those instances.
 
 ## Signing And Secrets
 

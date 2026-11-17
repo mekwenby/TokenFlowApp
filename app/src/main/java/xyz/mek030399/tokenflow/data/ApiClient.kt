@@ -276,7 +276,7 @@ private class OpenAIChatAdapter(
         }
         if (request.tools.isNotEmpty()) {
             putJsonArray("tools") { request.tools.forEach { add(openAITool(it, nestedFunction = true)) } }
-            put("tool_choice", "auto")
+            put("tool_choice", if (request.toolChoice == ToolChoice.REQUIRED) "required" else "auto")
         }
     }
 
@@ -400,7 +400,7 @@ private class OpenAIResponsesAdapter(
         }
         if (request.tools.isNotEmpty()) {
             putJsonArray("tools") { request.tools.forEach { add(openAITool(it, nestedFunction = false)) } }
-            put("tool_choice", "auto")
+            put("tool_choice", if (request.toolChoice == ToolChoice.REQUIRED) "required" else "auto")
         }
     }
 
@@ -564,7 +564,7 @@ private class AnthropicMessagesAdapter(
         put("system", request.systemPrompt)
         put("stream", true)
         put("max_tokens", request.maxOutputTokens.coerceIn(1, MAX_MODEL_OUTPUT_TOKENS))
-        val budget = thinkingBudget(request.thinkingEffort, request.maxOutputTokens)
+        val budget = if (request.toolChoice == ToolChoice.REQUIRED) 0 else thinkingBudget(request.thinkingEffort, request.maxOutputTokens)
         if (budget > 0) putJsonObject("thinking") { put("type", "enabled"); put("budget_tokens", budget) }
         put("messages", anthropicMessages(request.messages))
         if (request.tools.isNotEmpty()) putJsonArray("tools") {
@@ -573,6 +573,9 @@ private class AnthropicMessagesAdapter(
                 put("description", tool.description)
                 put("input_schema", tool.parameters)
             }) }
+        }
+        if (request.tools.isNotEmpty() && request.toolChoice == ToolChoice.REQUIRED) {
+            putJsonObject("tool_choice") { put("type", "any") }
         }
     }
 }

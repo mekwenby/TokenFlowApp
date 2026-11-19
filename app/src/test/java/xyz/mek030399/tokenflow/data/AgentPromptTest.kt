@@ -1,8 +1,5 @@
 package xyz.mek030399.tokenflow.data
 
-import java.io.File
-import java.security.MessageDigest
-import java.util.UUID
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.jsonArray
@@ -11,28 +8,13 @@ import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class BuiltInAgentsTest {
+class AgentPromptTest {
     @Test
-    fun bundledPromptPreservesTheCompleteOriginalDocument() {
-        val bytes = bundledPrompt().readBytes()
-
-        assertEquals(115_266, bytes.size)
-        assertEquals(44_471, bytes.toString(Charsets.UTF_8).length)
-        assertEquals(
-            "e826d964088bc0b5f9716ae22a4231b01bb708179a03d6e4f47b9a70d6acc7bb",
-            MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) },
-        )
-        assertTrue(BuiltInAgents.isBuiltIn(BuiltInAgents.SYAN_ID))
-        assertFalse(BuiltInAgents.isBuiltIn(UUID.randomUUID().toString()))
-    }
-
-    @Test
-    fun allProtocolsTransmitTheCompleteBundledRolePrompt() = runTest {
-        val prompt = SystemPrompts.compose(bundledPrompt().readText(Charsets.UTF_8), "", "Asia/Hong_Kong")
+    fun allProtocolsTransmitTheCompleteLongCustomRolePrompt() = runTest {
+        val rolePrompt = "# Custom role\n" + "角色说明。".repeat(8_000) + "\nEnd of custom role."
+        val prompt = SystemPrompts.compose(rolePrompt, "", "Asia/Hong_Kong")
         val server = MockWebServer()
         server.start()
 
@@ -49,19 +31,19 @@ class BuiltInAgentsTest {
                 server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(completion))
                 gateway.stream(
                     ModelCallRequest(
-                        model = ModelProfile(providerId = "syan-test", remoteId = "test-model"),
+                        model = ModelProfile(providerId = "custom-agent-test", remoteId = "test-model"),
                         provider = ProviderConfig(
-                            id = "syan-test",
-                            name = "SYAN test",
+                            id = "custom-agent-test",
+                            name = "Custom agent test",
                             baseUrl = server.url("/v1").toString().trimEnd('/'),
                             protocol = protocol,
                         ),
                         apiKey = "test-only-key",
                         systemPrompt = prompt,
                         thinkingEffort = "off",
-                        messages = listOf(CanonicalMessage("user", "下班了吗？")),
+                        messages = listOf(CanonicalMessage("user", "请使用配置的角色说明。")),
                         tools = emptyList(),
-                        requestId = "syan-${protocol.name}",
+                        requestId = "custom-agent-${protocol.name}",
                     ),
                 ).toList()
 
@@ -78,9 +60,4 @@ class BuiltInAgentsTest {
             server.shutdown()
         }
     }
-
-    private fun bundledPrompt(): File = listOf(
-        File("src/main/res/raw/syan_system_prompt.md"),
-        File("app/src/main/res/raw/syan_system_prompt.md"),
-    ).firstOrNull(File::isFile) ?: error("Bundled SYAN prompt is missing")
 }

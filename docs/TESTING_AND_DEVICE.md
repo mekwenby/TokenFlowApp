@@ -19,7 +19,7 @@
 - 中文标点附近的 Markdown 加粗、嵌套行内格式、转义与代码保护，以及没有 URL 的服务内部引用显示
 - Token/排版、主题、笔记重写校验和工作区状态
 - Infinite Cloud 私钥拒绝规则、工具启用边界、MCP 名称规范化和云配置归档泄密边界
-- `BuiltInAgentsTest`：内置 SYAN 的固定身份、完整提示词和默认工具配置、会话模型继承及自定义副本行为
+- `AgentPromptTest`：合成的长智能体提示词在三个模型协议中完整保留，不依赖预装角色资源
 - `MarkdownAgentImportTest` 和 ViewModel 导入回归：标题/文件名、代码围栏、完整提示词、独立 UUID、UTF-8 正文字节上限、重复导入、错误及取消时的状态恢复
 - `DeviceInfoToolsTest`：当前时间与偏移、时区变更和夏令时、电池比例及未知读数、参数拒绝、平台错误及取消传播
 
@@ -32,8 +32,9 @@
 - 2 MiB 及已有更大笔记的分块读取、跨块 UTF-8/NUL、标题与编辑/删除竞争、生成状态与会话设置并发
 - Compose 主要工作流和 Media3 播放状态
 - Markdown 变长单元格的同行等高、手机两列宽度、大字体重排及宽表横向滚动
-- `BuiltInAgentRepositoryTest`：打包提示词完整性、内置原版写入/删除保护、会话提示词快照，以及归档导入导出的保留 ID 边界
-- `TokenFlowAppTest.agentChatSettingsCanEditAndSaveTheCompleteLongPrompt`：完整 SYAN 提示词在大字体手机布局中打开、编辑、保存并重新打开设置，验证长正文保留和后续控件可达
+- `CustomAgentRepositoryTest`：全新工作区没有预装智能体、自定义智能体创建与删除、会话提示词快照、模型选择和容量检查，以及旧版本自定义副本和曾保留 ID 的普通归档读写
+- `TokenFlowAppTest.emptyAgentsWorkspaceOffersCreationAndMarkdownImport`：无智能体时显示创建与 Markdown 导入入口，并可打开普通智能体编辑器
+- `TokenFlowAppTest.agentChatSettingsCanEditAndSaveTheCompleteLongPrompt`：合成的自定义长提示词在大字体手机布局中打开、编辑、保存并重新打开设置，验证长正文保留和后续控件可达
 
 ## 本地门禁
 
@@ -160,8 +161,8 @@ $TokenFlowDebugApk = '.\app\build\outputs\apk\debug\app-debug.apk'
 | 流式 UI | 长正文、过程、Token/cache、完成前后按钮不抖动 |
 | Markdown | 长文、表格、代码、外部 URL、本地 citation、伪造 citation |
 | 工作区 | 收藏级联、笔记重写、快照去重、知识检索过程和来源预览 |
-| 内置 SYAN | 工作区与分享入口仅一个内置项、只读详情、开始聊天与模型继承、复制保存/取消、原版保护、128K 模型的完整请求及容量不足提示 |
-| 智能体聊天设置 | 使用完整 SYAN 长提示词打开聊天设置、滚动输入框、保存并重新打开；确认没有闪退且提示词全文保留 |
+| 自定义智能体 | 全新工作区无预装项、自行创建/Markdown 导入、工作区及分享入口一致、开始聊天、编辑/删除及配置归档；升级保留已有自定义副本和会话提示词 |
+| 智能体聊天设置 | 使用合成的自定义长提示词打开聊天设置、滚动输入框、保存并重新打开；确认没有闪退且提示词全文保留 |
 | 智能体 Markdown 导入 | UTF-8/BOM、`.md` 大小写、512 KiB 边界、非法编码/超限/空正文、取消选择、标题与文件名回退、重复导入生成独立智能体 |
 | 设备信息工具 | 普通聊天和智能体分别读取时间、系统时区、电量及充电状态；更改时区后再次读取、无读数情况、关闭联网工具仍可用、最大工具调用数为 0 时禁用 |
 | 附件 | 图片、相机 EXIF、PDF、Word、Excel、视觉兜底 |

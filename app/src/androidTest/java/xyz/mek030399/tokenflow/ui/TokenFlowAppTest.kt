@@ -103,7 +103,6 @@ import xyz.mek030399.tokenflow.data.AssistantIdentitySnapshot
 import xyz.mek030399.tokenflow.data.AssistantMetadata
 import xyz.mek030399.tokenflow.data.CONTEXT_BOUNDARY_ROLE
 import xyz.mek030399.tokenflow.data.BookmarkedMessage
-import xyz.mek030399.tokenflow.data.BuiltInAgents
 import xyz.mek030399.tokenflow.data.ConfigArchivePayload
 import xyz.mek030399.tokenflow.data.Conversation
 import xyz.mek030399.tokenflow.data.ConversationDetail
@@ -160,10 +159,15 @@ class TokenFlowAppTest {
     @Test
     fun agentChatSettingsCanEditAndSaveTheCompleteLongPrompt() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val prompt = BuiltInAgents.load(context).single { it.id == BuiltInAgents.SYAN_ID }.systemPrompt
+        val prompt = buildString {
+            append("# 自定义智能体长提示词\n\n")
+            repeat(4_000) { index ->
+                append("第 ${index + 1} 条：完整保留自定义角色设定与工具规则 😀。\n")
+            }
+        }
         val conversation = Conversation(
             id = "long-agent-settings",
-            title = "SYAN",
+            title = "Custom long-prompt agent",
             model = "model-1",
             systemPrompt = prompt,
             systemPromptMode = SettingMode.OVERRIDE,
@@ -182,11 +186,11 @@ class TokenFlowAppTest {
             editor.performScrollTo().assertIsDisplayed().assert(
                 SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString(prompt)),
             )
-            val editedPrompt = "$prompt\n\n补充：保持完整角色设定。"
+            val editedPrompt = "$prompt\n\n补充：完整保留原始提示词。"
             editor.performTextReplacement(editedPrompt)
             editor.assert(SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString(editedPrompt)))
             // Controls after the prompt must remain reachable without scrolling
-            // through the full character biography in the outer settings form.
+            // through the entire prompt in the outer settings form.
             composeRule.onNodeWithTag(UiTestTags.CHAT_LINE_SPACING).performScrollTo().assertIsDisplayed()
             composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.save)).performClick()
             composeRule.waitUntil(5_000) {
@@ -200,6 +204,25 @@ class TokenFlowAppTest {
                 .performScrollTo().assertIsDisplayed().assert(
                     SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString(editedPrompt)),
                 )
+        } finally { owner.clear() }
+    }
+
+    @Test
+    fun emptyAgentsWorkspaceOffersCreationAndMarkdownImport() {
+        val fake = UiFakeDataSource(withModel = true)
+        val viewModel = AppViewModel(fake)
+        val owner = ViewModelStore().apply { put("empty-agents", viewModel) }
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        try {
+            composeRule.setContent { TokenFlowTheme { TokenFlowApp(viewModel) } }
+            composeRule.waitUntil(5_000) { viewModel.state.value.phase == AppPhase.READY }
+            composeRule.runOnIdle { viewModel.openScreen(AppScreen.AGENTS) }
+
+            composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.empty_agents)).assertIsDisplayed()
+            composeRule.onNodeWithTag("agent_import_markdown").assertIsDisplayed().assertHasClickAction()
+            composeRule.onNodeWithContentDescription(context.getString(xyz.mek030399.tokenflow.R.string.new_agent))
+                .assertIsDisplayed().performClick()
+            composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.agent_name)).assertIsDisplayed()
         } finally { owner.clear() }
     }
 

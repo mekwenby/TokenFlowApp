@@ -120,13 +120,11 @@ import xyz.mek030399.tokenflow.BuildConfig
 import xyz.mek030399.tokenflow.R
 import xyz.mek030399.tokenflow.ui.theme.LocalTokenFlowDarkTheme
 import xyz.mek030399.tokenflow.data.AgentProfile
-import xyz.mek030399.tokenflow.data.BuiltInAgents
 import xyz.mek030399.tokenflow.data.KnowledgeDocumentPreview
 import xyz.mek030399.tokenflow.data.KnowledgeImportSource
 import xyz.mek030399.tokenflow.data.Note
 import xyz.mek030399.tokenflow.data.markdownNoteFileName
 import java.util.Locale
-import java.util.UUID
 import kotlin.math.roundToInt
 
 @Composable
@@ -712,25 +710,18 @@ private fun NoteEditor(note: Note, onSave: (Note) -> Unit, modifier: Modifier = 
 @Composable
 private fun AgentsScreen(state: AppUiState, viewModel: AppViewModel, showBack: Boolean) {
     var editing by remember { mutableStateOf<AgentProfile?>(null) }
-    var reading by remember { mutableStateOf<AgentProfile?>(null) }
     val importMarkdownLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { viewModel.importMarkdownAgent(it.toString()) }
     }
-    val currentReading = reading?.let { selected -> state.agents.firstOrNull { it.id == selected.id } ?: selected }
     val navigateBack = {
-        when {
-            editing != null -> editing = null
-            reading != null -> reading = null
-            else -> viewModel.openScreen(AppScreen.CHAT)
-        }
+        if (editing != null) editing = null else viewModel.openScreen(AppScreen.CHAT)
     }
-    BackHandler(enabled = showBack || editing != null || currentReading != null) { navigateBack() }
-    val copyName = stringResource(R.string.agent_copy_name, currentReading?.name.orEmpty())
+    BackHandler(enabled = showBack || editing != null) { navigateBack() }
     WorkspaceScaffold(
-        if (editing == null && currentReading != null) currentReading.name else stringResource(R.string.agents),
-        showBack || editing != null || currentReading != null,
+        stringResource(R.string.agents),
+        showBack || editing != null,
         navigateBack,
-        action = if (editing == null && currentReading == null) {{
+        action = if (editing == null) {{
             val importDescription = stringResource(
                 if (state.agentFileImporting) R.string.agent_import_busy else R.string.agent_import_markdown,
             )
@@ -756,84 +747,24 @@ private fun AgentsScreen(state: AppUiState, viewModel: AppViewModel, showBack: B
         if (editing != null) AgentEditor(editing!!, state, { editing = null }, Modifier.padding(padding)) {
             viewModel.saveAgent(it)
             editing = null
-            reading = null
         }
-        else if (currentReading != null) BuiltInAgentDetails(
-            agent = currentReading,
-            onStart = { viewModel.startAgent(currentReading.id) },
-            onCopy = {
-                editing = copyAgentForEditing(currentReading, copyName, state.globalSettings.defaultModelId)
-            },
-            modifier = Modifier.padding(padding),
-        )
         else if (state.agents.isEmpty()) EmptyWorkspace(Icons.Outlined.SmartToy, stringResource(R.string.empty_agents), Modifier.padding(padding).fillMaxSize())
         else LazyColumn(Modifier.padding(padding).fillMaxSize().widthIn(max = 860.dp), contentPadding = PaddingValues(16.dp)) {
             items(state.agents, key = AgentProfile::id) { agent ->
-                val builtIn = BuiltInAgents.isBuiltIn(agent.id)
-                Row(Modifier.fillMaxWidth().clickable {
-                    if (builtIn) reading = agent else editing = agent
-                }.padding(vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().clickable { editing = agent }.padding(vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                     Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(8.dp)) { Icon(Icons.Outlined.SmartToy, null, Modifier.padding(10.dp)) }
                     Column(Modifier.padding(horizontal = 12.dp).weight(1f)) {
                         Text(agent.name, fontWeight = FontWeight.SemiBold)
-                        if (builtIn) Text(stringResource(R.string.built_in_agent), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
-                        Text(agentDisplayDescription(agent), maxLines = 2, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(agent.description, maxLines = 2, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     IconButton(onClick = { viewModel.startAgent(agent.id) }) { Icon(Icons.Outlined.PlayArrow, stringResource(R.string.start_chat)) }
-                    if (!builtIn) IconButton(onClick = { viewModel.deleteAgent(agent.id) }) { Icon(Icons.Outlined.DeleteOutline, stringResource(R.string.delete)) }
+                    IconButton(onClick = { viewModel.deleteAgent(agent.id) }) { Icon(Icons.Outlined.DeleteOutline, stringResource(R.string.delete)) }
                 }
                 HorizontalDivider()
             }
         }
     }
 }
-
-@Composable
-private fun agentDisplayDescription(agent: AgentProfile): String =
-    if (agent.id == BuiltInAgents.SYAN_ID) stringResource(R.string.syan_description) else agent.description
-
-@Composable
-private fun BuiltInAgentDetails(agent: AgentProfile, onStart: () -> Unit, onCopy: () -> Unit, modifier: Modifier = Modifier) {
-    val promptBlocks = remember(agent.systemPrompt) { knowledgePreviewPlainTextBlocks(agent.systemPrompt) }
-    Column(modifier.fillMaxSize().widthIn(max = 860.dp).navigationBarsPadding()) {
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp)) {
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(stringResource(R.string.built_in_agent), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
-                    Text(agentDisplayDescription(agent), style = MaterialTheme.typography.bodyLarge)
-                    Text(stringResource(R.string.built_in_agent_read_only), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(stringResource(R.string.built_in_agent_default_model), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (agent.id == BuiltInAgents.SYAN_ID) Text(stringResource(R.string.syan_context_recommendation), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    HorizontalDivider()
-                    Text(stringResource(R.string.system_prompt), style = MaterialTheme.typography.titleMedium)
-                }
-            }
-            itemsIndexed(promptBlocks) { _, block ->
-                SelectionContainer {
-                    Text(block, Modifier.fillMaxWidth().padding(top = 8.dp), style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-        }
-        HorizontalDivider()
-        Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = onCopy, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.copy_agent_to_edit)) }
-            Button(onClick = onStart, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.start_chat)) }
-        }
-    }
-}
-
-internal fun copyAgentForEditing(
-    agent: AgentProfile,
-    name: String,
-    modelId: String?,
-    now: Long = System.currentTimeMillis(),
-): AgentProfile = agent.copy(
-    id = UUID.randomUUID().toString(),
-    name = name,
-    modelId = modelId,
-    createdAt = now,
-    updatedAt = now,
-)
 
 @Composable
 private fun AgentEditor(agent: AgentProfile, state: AppUiState, onClose: () -> Unit, modifier: Modifier = Modifier, onSave: (AgentProfile) -> Unit) {

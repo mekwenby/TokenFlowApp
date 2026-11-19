@@ -1,6 +1,7 @@
 package xyz.mek030399.tokenflow.data
 
 import java.io.ByteArrayInputStream
+import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -45,7 +46,7 @@ class MarkdownAgentImportTest {
 
         assertEquals("Friendly assistant", first.name)
         assertNotEquals(first.id, second.id)
-        assertFalse(BuiltInAgents.isBuiltIn(first.id))
+        assertEquals(first.id, UUID.fromString(first.id).toString())
         assertEquals("Markdown", ImportedMarkdownNote(" ", "Prompt").toImportedAgent(null).name)
     }
 

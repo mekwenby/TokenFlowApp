@@ -49,6 +49,5 @@ class AppContainer(context: Context) {
         mimoTtsClient = MimoTtsClient(context, secrets, json),
         infoFlowReader = InfoFlowUrlReader(builtIn = builtInUrlReader, json = json),
         infiniteCloud = infiniteCloud,
-        builtInAgents = BuiltInAgents.load(context),
     )
 }

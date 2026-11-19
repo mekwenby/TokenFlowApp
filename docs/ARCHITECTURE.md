@@ -89,6 +89,7 @@ flowchart LR
 ## 持久化边界
 
 - 结构化数据存放于 Room v12；保留已有 v11 的会话 kind 与 companion 资料结构，兼容写入时保留原 kind。
+- 智能体只从 `agents` 表读取用户保存的配置，App 不捆绑默认智能体或角色提示词。既有会话持有独立提示词快照，移除预装定义不删除用户配置、旧版本已保存的自定义副本或历史会话，无需数据库迁移。
 - Infinite Cloud 私钥、口令、MCP 环境值和 HTTP 请求头值只进入 `SecretStore`；Room 保存服务器、固定指纹、非敏感 MCP 定义和任务索引。
 - Assistant/User 扩展信息存放在消息行内 JSON metadata；可选字段使用默认值兼容旧记录，通常不需要修改 Room 表。
 - 附件、知识原文件和头像放在 App 私有文件目录；Room 只保存索引和路径。

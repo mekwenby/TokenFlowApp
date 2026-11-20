@@ -237,6 +237,7 @@ import xyz.mek030399.tokenflow.data.ProcessEvent
 import xyz.mek030399.tokenflow.data.CloudExecutionMode
 import xyz.mek030399.tokenflow.data.PromptTemplate
 import xyz.mek030399.tokenflow.data.ProviderDraft
+import xyz.mek030399.tokenflow.data.ProviderHeaderPolicy
 import xyz.mek030399.tokenflow.data.ProviderProtocol
 import xyz.mek030399.tokenflow.data.RemoteModel
 import xyz.mek030399.tokenflow.data.SettingMode
@@ -652,6 +653,7 @@ private fun TokenFlowAppContent(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(stringResource(R.string.import_summary, preview.newProviders, preview.updatedProviders, preview.newModels, preview.updatedModels))
+                    if (preview.resetsProviderHeaders > 0) Text(stringResource(R.string.provider_header_import_resets, preview.resetsProviderHeaders))
                     Text(stringResource(R.string.import_agents_summary, preview.newAgents, preview.updatedAgents))
                     if (preview.replacesExaKey) Text(stringResource(R.string.import_replaces_exa))
                     if (preview.replacesMimoKey) Text(stringResource(R.string.import_replaces_mimo))
@@ -882,14 +884,15 @@ private fun ProviderList(
 @Composable
 private fun ProviderEditor(state: AppUiState, viewModel: AppViewModel, modifier: Modifier) {
     val editor = state.providerEditor ?: return
-    var showKey by rememberSaveable(editor.draft.id) { mutableStateOf(false) }
-    var manualModel by rememberSaveable(editor.draft.id) { mutableStateOf("") }
+    var showKey by rememberSaveable(editor.sessionId) { mutableStateOf(false) }
+    var manualModel by rememberSaveable(editor.sessionId) { mutableStateOf("") }
     Column(
         modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         OutlinedTextField(
             value = editor.draft.name,
+            enabled = !editor.busy,
             onValueChange = { viewModel.updateProviderDraft(editor.draft.copy(name = it)) },
             label = { Text(stringResource(R.string.provider_name)) },
             singleLine = true,
@@ -900,6 +903,7 @@ private fun ProviderEditor(state: AppUiState, viewModel: AppViewModel, modifier:
             ProviderProtocol.entries.forEach { protocol ->
                 FilterChip(
                     selected = editor.draft.protocol == protocol,
+                    enabled = !editor.busy,
                     onClick = { viewModel.updateProviderDraft(editor.draft.copy(protocol = protocol)) },
                     label = { Text(protocolShortLabel(protocol)) },
                 )
@@ -907,6 +911,7 @@ private fun ProviderEditor(state: AppUiState, viewModel: AppViewModel, modifier:
         }
         OutlinedTextField(
             value = editor.draft.baseUrl,
+            enabled = !editor.busy,
             onValueChange = { viewModel.updateProviderDraft(editor.draft.copy(baseUrl = it)) },
             label = { Text(stringResource(R.string.api_base_url)) },
             supportingText = { Text(stringResource(R.string.api_base_url_hint)) },
@@ -915,16 +920,28 @@ private fun ProviderEditor(state: AppUiState, viewModel: AppViewModel, modifier:
         )
         OutlinedTextField(
             value = editor.draft.apiKey,
+            enabled = !editor.busy,
             onValueChange = { viewModel.updateProviderDraft(editor.draft.copy(apiKey = it)) },
             label = { Text(stringResource(R.string.api_key)) },
+            supportingText = if (ProviderHeaderPolicy.hasCustomAuthentication(editor.draft.requestHeaders)) {
+                { Text(stringResource(R.string.provider_headers_api_key_optional)) }
+            } else null,
             singleLine = true,
             visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
             trailingIcon = {
-                IconButton(onClick = { showKey = !showKey }) {
+                IconButton(onClick = { showKey = !showKey }, enabled = !editor.busy) {
                     Icon(if (showKey) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility, stringResource(R.string.toggle_key_visibility))
                 }
             },
             modifier = Modifier.fillMaxWidth().testTag(UiTestTags.PROVIDER_API_KEY),
+        )
+        ProviderHeadersEditor(
+            rows = editor.draft.requestHeaders,
+            sessionId = editor.sessionId,
+            enabled = !editor.busy,
+            onRowsChanged = viewModel::updateProviderRequestHeaders,
+            onAdd = viewModel::addProviderRequestHeader,
+            onApplyTemplate = viewModel::applyProviderHeaderTemplate,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = viewModel::fetchProviderModels, enabled = !editor.busy) {
@@ -939,6 +956,7 @@ private fun ProviderEditor(state: AppUiState, viewModel: AppViewModel, modifier:
             Text(stringResource(R.string.available_models), style = MaterialTheme.typography.titleSmall)
             OutlinedTextField(
                 value = editor.modelSearch,
+                enabled = !editor.busy,
                 onValueChange = viewModel::setProviderModelSearch,
                 label = { Text(stringResource(R.string.search_models)) },
                 leadingIcon = { Icon(Icons.Outlined.Search, null) },
@@ -950,10 +968,10 @@ private fun ProviderEditor(state: AppUiState, viewModel: AppViewModel, modifier:
             }.take(100).forEach { remote ->
                 val selected = editor.selectedModels.any { it.remoteId == remote.id }
                 Row(
-                    Modifier.fillMaxWidth().clickable { viewModel.toggleProviderModel(remote) }.padding(vertical = 4.dp),
+                    Modifier.fillMaxWidth().clickable(enabled = !editor.busy) { viewModel.toggleProviderModel(remote) }.padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Checkbox(selected, onCheckedChange = { viewModel.toggleProviderModel(remote) })
+                    Checkbox(selected, onCheckedChange = { viewModel.toggleProviderModel(remote) }, enabled = !editor.busy)
                     Column { Text(remote.displayName); if (remote.displayName != remote.id) Text(remote.id, style = MaterialTheme.typography.bodySmall) }
                 }
             }
@@ -963,23 +981,29 @@ private fun ProviderEditor(state: AppUiState, viewModel: AppViewModel, modifier:
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
                 value = manualModel,
+                enabled = !editor.busy,
                 onValueChange = { manualModel = it },
                 label = { Text(stringResource(R.string.model_id)) },
                 singleLine = true,
                 modifier = Modifier.weight(1f),
-                keyboardActions = KeyboardActions(onDone = { viewModel.addManualModel(manualModel); manualModel = "" }),
+                keyboardActions = KeyboardActions(onDone = { if (!editor.busy) { viewModel.addManualModel(manualModel); manualModel = "" } }),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             )
-            IconButton(onClick = { viewModel.addManualModel(manualModel); manualModel = "" }) { Icon(Icons.Outlined.Add, stringResource(R.string.add)) }
+            IconButton(onClick = { viewModel.addManualModel(manualModel); manualModel = "" }, enabled = !editor.busy) { Icon(Icons.Outlined.Add, stringResource(R.string.add)) }
         }
 
         if (editor.selectedModels.isNotEmpty()) {
             Text(stringResource(R.string.added_models), style = MaterialTheme.typography.titleSmall)
+            if (editor.hasUnsavedRequestChanges && state.models.any { saved -> editor.selectedModels.any { it.id == saved.id } }) {
+                Text(stringResource(R.string.provider_headers_save_before_vision), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             editor.selectedModels.forEach { model ->
                 SelectedModelEditor(
                     model,
                     visionTesting = state.visionTestingModelId == model.id,
-                    canTestVision = state.models.any { it.id == model.id },
+                    canTestVision = state.models.any { it.id == model.id } && !editor.hasUnsavedRequestChanges,
+                    enabled = !editor.busy,
                     viewModel = viewModel,
                 )
             }
@@ -995,7 +1019,7 @@ private fun ProviderEditor(state: AppUiState, viewModel: AppViewModel, modifier:
 }
 
 @Composable
-private fun SelectedModelEditor(model: ModelProfile, visionTesting: Boolean, canTestVision: Boolean, viewModel: AppViewModel) {
+private fun SelectedModelEditor(model: ModelProfile, visionTesting: Boolean, canTestVision: Boolean, enabled: Boolean, viewModel: AppViewModel) {
     var alias by remember(model.id, model.displayName) { mutableStateOf(model.displayName) }
     var maxTokens by remember(model.id, model.maxOutputTokens) { mutableStateOf(model.maxOutputTokens.toString()) }
     var capacity by remember(model.id) { mutableStateOf(model.contextWindowTokens?.toString().orEmpty()) }
@@ -1004,6 +1028,7 @@ private fun SelectedModelEditor(model: ModelProfile, visionTesting: Boolean, can
             Row(verticalAlignment = Alignment.CenterVertically) {
                 RadioButton(
                     selected = model.isDefault,
+                    enabled = enabled,
                     onClick = {
                         viewModel.updateSelectedModel(
                             model.id,
@@ -1017,10 +1042,11 @@ private fun SelectedModelEditor(model: ModelProfile, visionTesting: Boolean, can
                     Text(model.remoteId, fontWeight = FontWeight.Medium)
                     Text(stringResource(R.string.default_model), style = MaterialTheme.typography.bodySmall)
                 }
-                IconButton(onClick = { viewModel.removeSelectedModel(model.id) }) { Icon(Icons.Outlined.Close, stringResource(R.string.remove)) }
+                IconButton(onClick = { viewModel.removeSelectedModel(model.id) }, enabled = enabled) { Icon(Icons.Outlined.Close, stringResource(R.string.remove)) }
             }
             OutlinedTextField(
                 value = alias,
+                enabled = enabled,
                 onValueChange = {
                     alias = it
                     viewModel.updateSelectedModel(
@@ -1036,6 +1062,7 @@ private fun SelectedModelEditor(model: ModelProfile, visionTesting: Boolean, can
             )
             OutlinedTextField(
                 value = maxTokens,
+                enabled = enabled,
                 onValueChange = { value ->
                     maxTokens = value.filter(Char::isDigit)
                     maxTokens.toLongOrNull()?.coerceIn(1, MAX_MODEL_OUTPUT_TOKENS.toLong())?.toInt()?.let { parsed ->
@@ -1050,14 +1077,14 @@ private fun SelectedModelEditor(model: ModelProfile, visionTesting: Boolean, can
             OutlinedTextField(capacity, { value ->
                 capacity = value.filter(Char::isDigit).take(10)
                 viewModel.updateModelContextCapacity(model.id, if (capacity.isBlank()) null else capacity.toIntOrNull() ?: -1)
-            }, label = { Text(stringResource(R.string.context_capacity)) },
+            }, enabled = enabled, label = { Text(stringResource(R.string.context_capacity)) },
                 supportingText = { Text(stringResource(if (capacity.isNotBlank() && (capacity.toIntOrNull() ?: 0) <= model.maxOutputTokens)
                     R.string.context_capacity_invalid else R.string.context_capacity_hint)) },
                 isError = capacity.isNotBlank() && (capacity.toIntOrNull() ?: 0) <= model.maxOutputTokens,
                 singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
             OutlinedButton(
                 onClick = { viewModel.testModelVision(model.id) },
-                enabled = !visionTesting && canTestVision,
+                enabled = enabled && !visionTesting && canTestVision,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 if (visionTesting) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)

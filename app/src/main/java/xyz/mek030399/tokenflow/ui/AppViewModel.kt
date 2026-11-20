@@ -50,6 +50,9 @@ import xyz.mek030399.tokenflow.data.NoteSummaryTooLongException
 import xyz.mek030399.tokenflow.data.ProcessEvent
 import xyz.mek030399.tokenflow.data.ProviderConfig
 import xyz.mek030399.tokenflow.data.ProviderDraft
+import xyz.mek030399.tokenflow.data.ProviderRequestHeader
+import xyz.mek030399.tokenflow.data.ProviderHeaderTemplate
+import xyz.mek030399.tokenflow.data.ProviderHeaderTemplates
 import xyz.mek030399.tokenflow.data.RemoteModel
 import xyz.mek030399.tokenflow.data.SettingMode
 import xyz.mek030399.tokenflow.data.SendMessageRequest
@@ -181,7 +184,16 @@ data class ProviderEditorState(
     val modelSearch: String = "",
     val busy: Boolean = false,
     val error: UiText? = null,
-)
+    val sessionId: String = UUID.randomUUID().toString(),
+    val revision: Long = 0,
+    val operationId: Long = 0,
+    val initialDraft: ProviderDraft? = null,
+) {
+    val hasUnsavedRequestChanges: Boolean get() = initialDraft?.let {
+        draft.baseUrl != it.baseUrl || draft.protocol != it.protocol || draft.apiKey != it.apiKey ||
+            draft.requestHeaders != it.requestHeaders
+    } ?: true
+}
 
 data class TransferState(
     val busy: Boolean = false,
@@ -353,6 +365,10 @@ class AppViewModel internal constructor(
     private var messageSearchNavigationVersion = 0L
     private var contextJob: Job? = null
     private var contextVersion = 0L
+    private var providerEditorLoadJob: Job? = null
+    private var providerFetchJob: Job? = null
+    private var providerEditorGeneration = 0L
+    private var providerOperationId = 0L
     private var draftPersistenceJob: Job? = null
     private val draftsLoaded = CompletableDeferred<Unit>()
     private val shareReceipts = mutableSetOf<String>()
@@ -685,6 +701,7 @@ class AppViewModel internal constructor(
 
     fun openScreen(screen: AppScreen) {
         if (screen == AppScreen.CHAT && mutableState.value.models.isEmpty()) return
+        invalidateProviderEditorRequests()
         if (screen != AppScreen.MESSAGE_SEARCH) invalidateSearchNavigation()
         val leavingKnowledge = mutableState.value.screen == AppScreen.KNOWLEDGE && screen != AppScreen.KNOWLEDGE
         val leavingCloudFiles = mutableState.value.screen == AppScreen.INFINITE_CLOUD &&
@@ -2371,51 +2388,105 @@ class AppViewModel internal constructor(
     }
 
     fun beginNewProvider() {
+        invalidateProviderEditorRequests()
         mutableState.update { it.copy(screen = AppScreen.PROVIDERS, providerEditor = ProviderEditorState()) }
     }
 
     fun editProvider(id: String) {
-        viewModelScope.launch {
-            runCatching { repository.provider(id) }
-                .onSuccess { editor ->
-                    if (editor != null) mutableState.update {
-                        it.copy(
-                            screen = AppScreen.PROVIDERS,
-                            providerEditor = ProviderEditorState(editor.draft, editor.models),
-                        )
-                    }
+        invalidateProviderEditorRequests()
+        val generation = providerEditorGeneration
+        mutableState.update { it.copy(screen = AppScreen.PROVIDERS, providerEditor = null) }
+        providerEditorLoadJob = viewModelScope.launch {
+            try {
+                val editor = repository.provider(id)
+                if (generation == providerEditorGeneration && mutableState.value.screen == AppScreen.PROVIDERS && editor != null) {
+                    mutableState.update { it.copy(providerEditor = ProviderEditorState(
+                        draft = editor.draft, selectedModels = editor.models, initialDraft = editor.draft,
+                    )) }
                 }
-                .onFailure(::handleError)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (generation == providerEditorGeneration && mutableState.value.screen == AppScreen.PROVIDERS) handleError(error)
+            }
         }
     }
 
-    fun closeProviderEditor() = mutableState.update { it.copy(providerEditor = null) }
+    private fun invalidateProviderEditorRequests() {
+        providerEditorGeneration++
+        providerEditorLoadJob?.cancel()
+        providerFetchJob?.cancel()
+        providerEditorLoadJob = null
+        providerFetchJob = null
+    }
+
+    fun closeProviderEditor() {
+        invalidateProviderEditorRequests()
+        mutableState.update { it.copy(providerEditor = null) }
+    }
 
     fun updateProviderDraft(draft: ProviderDraft) = mutableState.update { state ->
-        state.copy(providerEditor = state.providerEditor?.copy(draft = draft, error = null))
+        val editor = state.providerEditor ?: return@update state
+        if (editor.busy || editor.draft.id != draft.id) state
+        else state.copy(providerEditor = editor.copy(draft = draft, revision = editor.revision + 1, error = null))
+    }
+
+    fun updateProviderRequestHeaders(rows: List<ProviderRequestHeader>) {
+        val editor = mutableState.value.providerEditor ?: return
+        updateProviderDraft(editor.draft.copy(requestHeaders = rows))
+    }
+
+    fun addProviderRequestHeader() {
+        val editor = mutableState.value.providerEditor ?: return
+        if (!editor.busy) updateProviderRequestHeaders(editor.draft.requestHeaders + ProviderRequestHeader())
+    }
+
+    fun applyProviderHeaderTemplate(template: ProviderHeaderTemplate) {
+        val editor = mutableState.value.providerEditor ?: return
+        if (!editor.busy) updateProviderRequestHeaders(ProviderHeaderTemplates.apply(editor.draft.requestHeaders, template))
     }
 
     fun setProviderModelSearch(value: String) = mutableState.update { state ->
-        state.copy(providerEditor = state.providerEditor?.copy(modelSearch = value))
+        if (state.providerEditor?.busy == true) state else state.copy(providerEditor = state.providerEditor?.copy(modelSearch = value))
     }
 
     fun fetchProviderModels() {
         val editor = mutableState.value.providerEditor ?: return
-        mutableState.update { it.copy(providerEditor = editor.copy(busy = true, error = null)) }
-        viewModelScope.launch {
-            runCatching { repository.fetchModels(editor.draft) }
-                .onSuccess { remote -> mutableState.update { state ->
-                    state.copy(providerEditor = state.providerEditor?.copy(remoteModels = remote, busy = false))
-                } }
-                .onFailure { error -> mutableState.update { state ->
-                    state.copy(providerEditor = state.providerEditor?.copy(busy = false, error = readableError(error)))
-                } }
+        if (editor.busy) return
+        val operation = ++providerOperationId
+        mutableState.update { it.copy(providerEditor = editor.copy(busy = true, error = null, operationId = operation)) }
+        providerFetchJob = viewModelScope.launch {
+            try {
+                val remote = repository.fetchModels(editor.draft)
+                updateProviderOperation(editor, operation) { it.copy(remoteModels = remote, busy = false) }
+            } catch (cancelled: CancellationException) {
+                updateProviderOperation(editor, operation) { it.copy(busy = false) }
+                throw cancelled
+            } catch (error: Throwable) {
+                updateProviderOperation(editor, operation) { it.copy(busy = false, error = readableError(error)) }
+            }
+        }
+    }
+
+    private fun ownsProviderOperation(editor: ProviderEditorState, operation: Long): Boolean {
+        val current = mutableState.value.providerEditor
+        return mutableState.value.screen == AppScreen.PROVIDERS && current != null && current.sessionId == editor.sessionId &&
+            current.revision == editor.revision && current.operationId == operation
+    }
+
+    private fun updateProviderOperation(editor: ProviderEditorState, operation: Long, transform: (ProviderEditorState) -> ProviderEditorState) {
+        mutableState.update { state ->
+            val current = state.providerEditor
+            if (state.screen != AppScreen.PROVIDERS || current == null || current.sessionId != editor.sessionId ||
+                current.revision != editor.revision || current.operationId != operation) state
+            else state.copy(providerEditor = transform(current))
         }
     }
 
     fun toggleProviderModel(remote: RemoteModel) {
         mutableState.update { state ->
             val editor = state.providerEditor ?: return@update state
+            if (editor.busy) return@update state
             val existing = editor.selectedModels.firstOrNull { it.remoteId == remote.id }
             val selected = if (existing == null) {
                 editor.selectedModels + ModelProfile(
@@ -2425,7 +2496,7 @@ class AppViewModel internal constructor(
                     isDefault = state.models.isEmpty() && editor.selectedModels.isEmpty(),
                 )
             } else editor.selectedModels - existing
-            state.copy(providerEditor = editor.copy(selectedModels = selected))
+            state.copy(providerEditor = editor.copy(selectedModels = selected, revision = editor.revision + 1))
         }
     }
 
@@ -2434,9 +2505,11 @@ class AppViewModel internal constructor(
         if (remote.isEmpty()) return
         mutableState.update { state ->
             val editor = state.providerEditor ?: return@update state
+            if (editor.busy) return@update state
             if (editor.selectedModels.any { it.remoteId == remote }) return@update state
             state.copy(
                 providerEditor = editor.copy(
+                    revision = editor.revision + 1,
                     selectedModels = editor.selectedModels + ModelProfile(
                         providerId = editor.draft.id,
                         remoteId = remote,
@@ -2451,7 +2524,8 @@ class AppViewModel internal constructor(
     fun updateModelContextCapacity(id: String, capacity: Int?) {
         mutableState.update { state ->
             val editor = state.providerEditor ?: return@update state
-            state.copy(providerEditor = editor.copy(selectedModels = editor.selectedModels.map {
+            if (editor.busy) return@update state
+            state.copy(providerEditor = editor.copy(revision = editor.revision + 1, selectedModels = editor.selectedModels.map {
                 if (it.id == id) it.copy(contextWindowTokens = capacity) else it
             }))
         }
@@ -2460,6 +2534,7 @@ class AppViewModel internal constructor(
     fun updateSelectedModel(id: String, alias: String, maxOutputTokens: Int, makeDefault: Boolean) {
         mutableState.update { state ->
             val editor = state.providerEditor ?: return@update state
+            if (editor.busy) return@update state
             val models = editor.selectedModels.map { model ->
                 if (model.id == id) model.copy(
                     displayName = alias,
@@ -2467,33 +2542,43 @@ class AppViewModel internal constructor(
                     isDefault = makeDefault,
                 ) else if (makeDefault) model.copy(isDefault = false) else model
             }
-            state.copy(providerEditor = editor.copy(selectedModels = models))
+            state.copy(providerEditor = editor.copy(selectedModels = models, revision = editor.revision + 1))
         }
     }
 
     fun removeSelectedModel(id: String) {
         mutableState.update { state ->
             val editor = state.providerEditor ?: return@update state
-            state.copy(providerEditor = editor.copy(selectedModels = editor.selectedModels.filterNot { it.id == id }))
+            if (editor.busy) return@update state
+            state.copy(providerEditor = editor.copy(selectedModels = editor.selectedModels.filterNot { it.id == id }, revision = editor.revision + 1))
         }
     }
 
     fun saveProvider() {
         val editor = mutableState.value.providerEditor ?: return
+        if (editor.busy) return
         if (editor.selectedModels.isEmpty()) {
             mutableState.update { it.copy(providerEditor = editor.copy(error = UiText.Dynamic("Add at least one model"))) }
             return
         }
-        mutableState.update { it.copy(providerEditor = editor.copy(busy = true, error = null)) }
+        val operation = ++providerOperationId
+        mutableState.update { it.copy(providerEditor = editor.copy(busy = true, error = null, operationId = operation)) }
         viewModelScope.launch {
-            runCatching { repository.saveProvider(editor.draft, editor.selectedModels) }
-                .onSuccess {
-                    mutableState.update { state -> state.copy(providerEditor = null, notice = uiText(R.string.provider_saved)) }
-                    loadWorkspace(openChatWhenReady = true)
-                }
-                .onFailure { error -> mutableState.update { state ->
-                    state.copy(providerEditor = state.providerEditor?.copy(busy = false, error = readableError(error)))
-                } }
+            try {
+                repository.saveProvider(editor.draft, editor.selectedModels)
+                val ownsEditor = ownsProviderOperation(editor, operation)
+                if (ownsEditor) mutableState.update { it.copy(providerEditor = null, notice = uiText(R.string.provider_saved)) }
+                val generation = providerEditorGeneration
+                loadWorkspace(openChatWhenReady = ownsEditor, openChatGuard = {
+                    providerEditorGeneration == generation && mutableState.value.providerEditor == null &&
+                        mutableState.value.screen == AppScreen.PROVIDERS
+                })
+            } catch (cancelled: CancellationException) {
+                updateProviderOperation(editor, operation) { it.copy(busy = false) }
+                throw cancelled
+            } catch (error: Throwable) {
+                updateProviderOperation(editor, operation) { it.copy(busy = false, error = readableError(error)) }
+            }
         }
     }
 
@@ -2514,6 +2599,12 @@ class AppViewModel internal constructor(
     }
 
     fun testModelVision(id: String) {
+        val editor = mutableState.value.providerEditor
+        if (editor?.busy == true) return
+        if (editor != null && editor.hasUnsavedRequestChanges) {
+            mutableState.update { it.copy(notice = uiText(R.string.provider_headers_save_before_vision)) }
+            return
+        }
         if (mutableState.value.visionTestingModelId != null) return
         mutableState.update { it.copy(visionTestingModelId = id) }
         viewModelScope.launch {
@@ -2640,6 +2731,7 @@ class AppViewModel internal constructor(
     private fun loadWorkspace(
         openChatWhenReady: Boolean = false,
         onLoaded: (() -> Unit)? = null,
+        openChatGuard: (() -> Boolean)? = null,
     ) {
         val loadVersion = ++workspaceLoadVersion
         viewModelScope.launch {
@@ -2684,6 +2776,7 @@ class AppViewModel internal constructor(
                     if (taskLogInvalid) invalidateCloudTaskLogRequest()
                     mutableState.update { state ->
                         val hasModels = workspace.models.isNotEmpty()
+                        val openChat = openChatWhenReady && (openChatGuard?.invoke() ?: true)
                         val active = state.activeConversationId?.takeIf { id -> workspace.conversations.any { it.id == id } }
                         val pendingTrustServerId = state.cloud.pendingTrustServerId?.takeIf { id ->
                             val server = workspace.cloudServers.firstOrNull { it.id == id }
@@ -2698,8 +2791,8 @@ class AppViewModel internal constructor(
                         }
                         state.copy(
                             phase = if (hasModels) AppPhase.READY else AppPhase.SETUP,
-                            screen = if (!hasModels) AppScreen.PROVIDERS else if (openChatWhenReady) AppScreen.CHAT else state.screen,
-                            shareVisible = if (hasModels && (openChatWhenReady || state.screen == AppScreen.CHAT)) true else state.shareVisible,
+                            screen = if (!hasModels) AppScreen.PROVIDERS else if (openChat) AppScreen.CHAT else state.screen,
+                            shareVisible = if (hasModels && (openChat || state.screen == AppScreen.CHAT)) true else state.shareVisible,
                             loading = false,
                             providers = workspace.providers,
                             models = workspace.models,
@@ -3205,13 +3298,29 @@ class AppViewModel internal constructor(
     }
 
     private fun readableError(error: Throwable): UiText = when (error) {
-        is ApiException -> UiText.Dynamic(if (error.status > 0) "HTTP ${error.status}: ${error.message}" else error.message)
+        is ApiException -> if (error.code == "provider_redirect_blocked") uiText(R.string.provider_header_redirect_blocked)
+            else UiText.Dynamic(if (error.status > 0) "HTTP ${error.status}: ${error.message}" else error.message)
         is NoteChangedDuringSummaryException -> uiText(R.string.note_changed_during_summary)
         is NoteSummaryTooLongException -> uiText(R.string.note_too_long_to_summarize, error.maxCharacters)
         is ConfigurationException, is IllegalArgumentException ->
-            cloudExecutionFailureText(error.message) ?: UiText.Dynamic(error.message ?: "Invalid configuration")
+            providerHeaderFailureText(error.message) ?: cloudExecutionFailureText(error.message)
+                ?: UiText.Dynamic(error.message ?: "Invalid configuration")
         is IOException -> uiText(R.string.error_network)
         else -> UiText.Dynamic(error.message ?: "Request failed")
+    }
+
+    private fun providerHeaderFailureText(message: String?): UiText? = when (message) {
+        "Invalid request header name" -> uiText(R.string.provider_header_invalid_name)
+        "Invalid request header value" -> uiText(R.string.provider_header_invalid_value)
+        "This request header is managed by the HTTP transport" -> uiText(R.string.provider_header_managed)
+        "Enabled request header names must be unique" -> uiText(R.string.provider_header_duplicate)
+        "Custom authentication header values must not be blank" -> uiText(R.string.provider_header_auth_blank)
+        "API key is required" -> uiText(R.string.provider_header_api_key_required)
+        "Invalid API key header value" -> uiText(R.string.provider_header_invalid_api_key)
+        "Saved provider request headers are invalid" -> uiText(R.string.provider_header_saved_invalid)
+        "Invalid request header row ID" -> uiText(R.string.provider_header_invalid_id)
+        "Request header row IDs must be unique" -> uiText(R.string.provider_header_duplicate_id)
+        else -> null
     }
 }
 

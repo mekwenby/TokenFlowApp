@@ -1045,6 +1045,8 @@ interface LocalDao {
     suspend fun saveProviderWithModels(provider: ProviderEntity, models: List<ModelEntity>) {
         putProvider(provider)
         replaceProviderModels(provider.id, models)
+        models.firstOrNull { it.isDefault }?.let { setDefaultModel(it.id) }
+        if (defaultModel() == null) models.firstOrNull()?.let { setDefaultModel(it.id) }
     }
 
     @Transaction

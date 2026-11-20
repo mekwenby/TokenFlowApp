@@ -82,6 +82,7 @@ data class ProviderDraft(
     val baseUrl: String = "",
     val protocol: ProviderProtocol = ProviderProtocol.OPENAI_RESPONSES,
     val apiKey: String = "",
+    val requestHeaders: List<ProviderRequestHeader> = emptyList(),
 )
 
 @Serializable
@@ -640,6 +641,7 @@ data class ModelCallRequest(
     val requestId: String,
     val maxOutputTokens: Int = model.maxOutputTokens,
     val toolChoice: ToolChoice = ToolChoice.AUTO,
+    val requestHeaders: List<ProviderRequestHeader> = emptyList(),
 )
 
 data class ToolDefinition(
@@ -696,6 +698,7 @@ data class ImportPreview(
     val replacesMimoKey: Boolean = false,
     val replacesInfoFlowKey: Boolean = false,
     val conflicts: List<String> = emptyList(),
+    val resetsProviderHeaders: Int = 0,
 )
 
 class ApiException(

@@ -1,14 +1,20 @@
 # Android 功能与限制
 
-本文记录版本 `2.6.7`（`versionCode 29`）的实现能力。具体交互文案以 App 资源为准，数值上限以源码常量为准。
+本文记录版本 `2.6.8`（`versionCode 30`）的实现能力。具体交互文案以 App 资源为准，数值上限以源码常量为准。
 
 ## 模型与供应商
 
 - 支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages 兼容接口。
 - 可测试供应商连接、读取远端模型列表或手动添加模型。
+- 供应商编辑页支持自定义请求头，每行保存名称、静态值及启用状态，可停用或删除；启用的同名头按不区分大小写的名称覆盖默认值，多个启用行之间不能重名。`Content-Type` 等协议或传输管理头不能作为启用的自定义头。有效且值非空的自定义 `Authorization`、`x-api-key` 或 `api-key` 启用时，不再附加默认鉴权头，API Key 字段可留空。
+- 提供 Claude Code `2.1.327`、OpenCode `1.17.11` 和 Pi（`pi`）模板。应用模板时同名头替换，并清理上一个模板管理的头，保留其他手动配置及鉴权头；模板需要的标识只在应用时生成一次，随后按静态值编辑、保存，不解释运行时变量。更新 App 不会自动改写已经保存的模板值。
+- 请求头随该供应商的全部模型调用和模型列表请求发送，包括工具循环与自动重试；每次操作使用开始时的配置快照。它们不应用于 Exa、URL Reader、Infinite Cloud/MCP 或语音服务。模型请求仅允许同源重定向，不把请求头转发到不同协议、主机或端口。
+- 模板只配置 HTTP 请求头，不改写请求正文、系统提示词或工具定义，也不模拟对应客户端的完整行为；兼容性和识别结果取决于上游服务。
 - Base URL 必须是干净的 HTTPS API 根地址，不允许 userinfo、query 或 fragment。
 - 模型最大输出长度默认 `16,384` Token，可配置范围为 `1..500,000`。
 - 首次启动没有模型时，可新建供应商或导入 `.tfcfg`；归档未指定默认模型时采用其中首个模型。
+
+模板采用固定版本的请求头快照。OpenCode 的应用标识与模型请求参考 [app.ts](https://github.com/anomalyco/opencode/blob/5db6221502eb643bd48620f7e536c09cdb514dd9/packages/core/src/app.ts#L22) 和 [model-request.ts](https://github.com/anomalyco/opencode/blob/5db6221502eb643bd48620f7e536c09cdb514dd9/packages/core/src/session/model-request.ts#L324)；Pi 的标识与 Anthropic 兼容请求头参考 [identity.ts](https://github.com/earendil-works/pi/blob/edfe6b2ef32283d31efc9e26db86fe48be19d3b2/packages/ai/src/utils/identity.ts#L74) 和 [anthropic-messages.ts](https://github.com/earendil-works/pi/blob/edfe6b2ef32283d31efc9e26db86fe48be19d3b2/packages/ai/src/api/anthropic-messages.ts#L1299)。这些链接固定到已核对的提交，保存的配置不会随上游变化自动更新。
 
 ## 对话
 
@@ -169,7 +175,8 @@
 
 ## 配置导入导出
 
-- `.tfcfg` 是密码加密归档，包含供应商/模型（含可选上下文容量）/凭据、默认模型、视觉兜底、Exa/MiMo、全局助手昵称、全局提示词、URL Reader 和用户保存的智能体；旧版本已保存的自定义副本同样参与归档。
+- `.tfcfg` 是密码加密归档，包含供应商/模型（含可选上下文容量）/凭据及自定义请求头、默认模型、视觉兜底、Exa/MiMo、全局助手昵称、全局提示词、URL Reader 和用户保存的智能体；旧版本已保存的自定义副本同样参与归档。
+- 旧归档缺少供应商请求头字段时按空配置读取。导入预览会提示哪些同 ID 供应商的现有请求头将被清空，确认应用后以归档内容替换。
 - 不包含会话、消息、附件、收藏、笔记、知识文件、头像或界面偏好。
 - 笔记 `.md` 只能逐篇导入或导出，不会加入 `.tfcfg`，也不能替代完整数据备份。
 - 导入先生成新增、更新和冲突摘要，确认后按稳定 UUID 合并。

@@ -50,6 +50,9 @@ import xyz.mek030399.tokenflow.data.PendingAttachmentOrigin
 import xyz.mek030399.tokenflow.data.ProcessEvent
 import xyz.mek030399.tokenflow.data.ProviderConfig
 import xyz.mek030399.tokenflow.data.ProviderDraft
+import xyz.mek030399.tokenflow.data.ProviderRequestHeader
+import xyz.mek030399.tokenflow.data.ProviderHeaderTemplate
+import xyz.mek030399.tokenflow.data.ConfigurationException
 import xyz.mek030399.tokenflow.data.ProviderEditorData
 import xyz.mek030399.tokenflow.data.ProviderProtocol
 import xyz.mek030399.tokenflow.data.RemoteModel
@@ -683,6 +686,171 @@ class AppViewModelTest {
         assertEquals(AppPhase.READY, viewModel.state.value.phase)
         assertEquals(AppScreen.CHAT, viewModel.state.value.screen)
         assertTrue(viewModel.state.value.shareVisible)
+    }
+
+    @Test
+    fun providerHeaderTemplateOnlyChangesHeadersAndTestsTheUnsavedDraft() = runTest(dispatcher) {
+        val fake = FakeChatDataSource(true)
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.beginNewProvider()
+        val original = viewModel.state.value.providerEditor!!.draft.copy(name = "Header provider",
+            baseUrl = "https://headers.example.test/v1", protocol = ProviderProtocol.ANTHROPIC_MESSAGES,
+            apiKey = "existing-api-key", requestHeaders = listOf(
+                ProviderRequestHeader(id = "custom-auth", name = "Authorization", value = "Bearer custom", enabled = true),
+                ProviderRequestHeader(id = "disabled", name = "X-Optional", value = "keep disabled", enabled = false),
+                ProviderRequestHeader(id = "old-ua", name = "user-agent", value = "old"),
+            ))
+        viewModel.updateProviderDraft(original)
+        viewModel.addManualModel("manual-model")
+        val selected = viewModel.state.value.providerEditor!!.selectedModels
+        viewModel.applyProviderHeaderTemplate(ProviderHeaderTemplate.CLAUDE_CODE)
+        val templated = viewModel.state.value.providerEditor!!
+        assertEquals(original.copy(requestHeaders = templated.draft.requestHeaders), templated.draft)
+        assertEquals(selected, templated.selectedModels)
+        assertTrue(templated.draft.requestHeaders.any { it.id == "custom-auth" && it.value == "Bearer custom" })
+        assertTrue(templated.draft.requestHeaders.any { it.id == "disabled" && !it.enabled })
+        assertFalse(templated.draft.requestHeaders.any { it.id == "old-ua" })
+        val rows = templated.draft.requestHeaders
+        viewModel.setProviderModelSearch("manual")
+        viewModel.fetchProviderModels()
+        advanceUntilIdle()
+        assertEquals(templated.draft, fake.providerFetchDrafts.single())
+        assertEquals(rows, viewModel.state.value.providerEditor!!.draft.requestHeaders)
+        viewModel.saveProvider()
+        advanceUntilIdle()
+        assertEquals(templated.draft, fake.providerSavedDrafts.single())
+    }
+
+    @Test
+    fun providerFetchFreezesMutationsAndCannotUpdateAReopenedEditor() = runTest(dispatcher) {
+        val gate = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true).apply {
+            providerFetchHandler = { withContext(NonCancellable) { gate.await() }; listOf(RemoteModel("late-model")) }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.editProvider(fake.provider.id)
+        advanceUntilIdle()
+        viewModel.updateProviderRequestHeaders(listOf(ProviderRequestHeader(id = "row", name = "User-Agent", value = "manual")))
+        viewModel.fetchProviderModels()
+        runCurrent()
+        val busy = viewModel.state.value.providerEditor!!
+        assertTrue(busy.busy)
+        viewModel.updateProviderDraft(busy.draft.copy(baseUrl = "https://changed.example.test"))
+        viewModel.updateProviderRequestHeaders(emptyList())
+        viewModel.applyProviderHeaderTemplate(ProviderHeaderTemplate.PI)
+        viewModel.addProviderRequestHeader()
+        viewModel.toggleProviderModel(RemoteModel("other"))
+        viewModel.addManualModel("other")
+        viewModel.updateSelectedModel(fake.model.id, "changed", 4, true)
+        viewModel.updateModelContextCapacity(fake.model.id, 20000)
+        viewModel.removeSelectedModel(fake.model.id)
+        viewModel.setProviderModelSearch("changed")
+        viewModel.saveProvider()
+        viewModel.fetchProviderModels()
+        assertEquals(busy, viewModel.state.value.providerEditor)
+        assertTrue(fake.providerSavedDrafts.isEmpty())
+
+        viewModel.closeProviderEditor()
+        viewModel.editProvider(fake.provider.id)
+        runCurrent()
+        val reopened = viewModel.state.value.providerEditor!!
+        assertFalse(reopened.sessionId == busy.sessionId)
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(reopened, viewModel.state.value.providerEditor)
+        assertEquals(1, fake.providerFetchDrafts.size)
+    }
+
+    @Test
+    fun providerSaveFailureRetainsHeadersAndStaleFailureCannotAffectAnotherEditor() = runTest(dispatcher) {
+        val fake = FakeChatDataSource(true).apply {
+            providerSaveBeforeWrite = { _, _ -> throw ConfigurationException("Invalid request header value") }
+        }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.editProvider(fake.provider.id)
+        advanceUntilIdle()
+        val rows = listOf(ProviderRequestHeader(id = "preserve", name = "X-Header", value = "draft value"))
+        viewModel.updateProviderRequestHeaders(rows)
+        viewModel.saveProvider()
+        advanceUntilIdle()
+        assertEquals(rows, viewModel.state.value.providerEditor!!.draft.requestHeaders)
+        assertEquals(UiText.Resource(R.string.provider_header_invalid_value), viewModel.state.value.providerEditor!!.error)
+        assertFalse(viewModel.state.value.providerEditor!!.busy)
+
+        val gate = CompletableDeferred<Unit>()
+        fake.providerSaveBeforeWrite = { _, _ -> gate.await(); throw ConfigurationException("Invalid request header name") }
+        viewModel.saveProvider()
+        runCurrent()
+        viewModel.closeProviderEditor()
+        viewModel.beginNewProvider()
+        val replacement = viewModel.state.value.providerEditor!!
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(replacement, viewModel.state.value.providerEditor)
+        assertEquals(AppScreen.PROVIDERS, viewModel.state.value.screen)
+    }
+
+    @Test
+    fun completedProviderSaveCannotCloseAnotherEditorOrNavigateAfterDelayedWorkspaceRefresh() = runTest(dispatcher) {
+        val saveGate = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true).apply { providerSaveBeforeWrite = { _, _ -> saveGate.await() } }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.editProvider(fake.provider.id)
+        advanceUntilIdle()
+        viewModel.saveProvider()
+        runCurrent()
+        viewModel.closeProviderEditor()
+        viewModel.beginNewProvider()
+        val replacement = viewModel.state.value.providerEditor!!
+        saveGate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(replacement, viewModel.state.value.providerEditor)
+        assertEquals(AppScreen.PROVIDERS, viewModel.state.value.screen)
+
+        viewModel.addManualModel("saved-model")
+        fake.providerSaveBeforeWrite = { _, _ -> }
+        val workspaceGate = CompletableDeferred<Unit>()
+        fake.workspaceGate = workspaceGate
+        viewModel.saveProvider()
+        runCurrent()
+        assertEquals(null, viewModel.state.value.providerEditor)
+        viewModel.beginNewProvider()
+        val afterSave = viewModel.state.value.providerEditor!!
+        workspaceGate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(afterSave, viewModel.state.value.providerEditor)
+        assertEquals(AppScreen.PROVIDERS, viewModel.state.value.screen)
+    }
+
+    @Test
+    fun providerLoadingCannotReplaceANewerEditorAndVisionRequiresSavedRequestSettings() = runTest(dispatcher) {
+        val loadGate = CompletableDeferred<Unit>()
+        val fake = FakeChatDataSource(true)
+        fake.providerReadHandler = { withContext(NonCancellable) { loadGate.await() }
+            ProviderEditorData(ProviderDraft(fake.provider.id, "Loaded", fake.provider.baseUrl, fake.provider.protocol, "key"), listOf(fake.model)) }
+        val viewModel = AppViewModel(fake)
+        advanceUntilIdle()
+        viewModel.editProvider(fake.provider.id)
+        runCurrent()
+        viewModel.beginNewProvider()
+        val newer = viewModel.state.value.providerEditor!!
+        loadGate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(newer, viewModel.state.value.providerEditor)
+
+        fake.providerReadHandler = null
+        viewModel.editProvider(fake.provider.id)
+        advanceUntilIdle()
+        assertFalse(viewModel.state.value.providerEditor!!.hasUnsavedRequestChanges)
+        viewModel.updateProviderRequestHeaders(listOf(ProviderRequestHeader(id = "vision-header", name = "User-Agent", value = "draft")))
+        viewModel.testModelVision(fake.model.id)
+        runCurrent()
+        assertEquals(0, fake.visionTestCalls)
+        assertEquals(UiText.Resource(R.string.provider_headers_save_before_vision), viewModel.state.value.notice)
     }
 
     @Test
@@ -2879,6 +3047,12 @@ private class FakeChatDataSource(withModel: Boolean, modelVisionStatus: VisionSt
     var conversationFailure: Throwable? = null
     var workspaceGate: CompletableDeferred<Unit>? = null
     var nextImportPreview: ImportPreview? = null
+    var providerReadHandler: (suspend (String) -> ProviderEditorData?)? = null
+    var providerFetchHandler: suspend (ProviderDraft) -> List<RemoteModel> = { listOf(RemoteModel("model-a")) }
+    var providerSaveBeforeWrite: suspend (ProviderDraft, List<ModelProfile>) -> Unit = { _, _ -> }
+    val providerFetchDrafts = mutableListOf<ProviderDraft>()
+    val providerSavedDrafts = mutableListOf<ProviderDraft>()
+    var visionTestCalls = 0
     var appliedImport: ImportPreview? = null
     var previewImportFailure: Throwable? = null
     var applyImportFailure: Throwable? = null
@@ -2938,16 +3112,27 @@ private class FakeChatDataSource(withModel: Boolean, modelVisionStatus: VisionSt
         return snapshot
     }
 
-    override suspend fun provider(id: String) = ProviderEditorData(
-        ProviderDraft(provider.id, provider.name, provider.baseUrl, provider.protocol, "secret"),
-        models,
-    )
+    override suspend fun provider(id: String): ProviderEditorData? {
+        val handler = providerReadHandler
+        if (handler != null) return handler(id)
+        return ProviderEditorData(ProviderDraft(provider.id, provider.name, provider.baseUrl, provider.protocol, "secret"), models)
+    }
 
-    override suspend fun fetchModels(draft: ProviderDraft) = listOf(RemoteModel("model-a"))
+    override suspend fun fetchModels(draft: ProviderDraft): List<RemoteModel> {
+        providerFetchDrafts += draft
+        return providerFetchHandler(draft)
+    }
 
     override suspend fun saveProvider(draft: ProviderDraft, models: List<ModelProfile>): ProviderConfig {
+        providerSavedDrafts += draft
+        providerSaveBeforeWrite(draft, models)
         this.models = models
         return provider
+    }
+
+    override suspend fun testModelVision(modelId: String): VisionStatus {
+        visionTestCalls++
+        return VisionStatus.SUPPORTED
     }
 
     override suspend fun deleteProvider(id: String) {

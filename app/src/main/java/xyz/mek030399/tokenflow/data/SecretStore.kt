@@ -81,6 +81,7 @@ class SecretStore(context: Context) {
     }
 
     fun providerKeyName(providerId: String) = "provider:$providerId"
+    fun providerHeadersName(providerId: String) = "provider-headers:$providerId"
     fun cloudPrivateKeyName(serverId: String) = "cloud-private-key:$serverId"
     fun cloudPrivateKeyPassphraseName(serverId: String) = "cloud-private-key-passphrase:$serverId"
     fun cloudMcpEnvironmentPrefix(mcpServerId: String) = "cloud-mcp-env:$mcpServerId:"

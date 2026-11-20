@@ -586,6 +586,7 @@ class ChatRepository(
     private val conversationOperationLocks = ConcurrentHashMap<String, Mutex>()
     private val conversationUpdateLocks = ConcurrentHashMap<String, Mutex>()
     private val cloudConfigurationMutationLock = Mutex()
+    private val providerConfigurationLock = Mutex()
     private val artifactDeliveryLock = Mutex()
 
     private val initializationLock = Mutex()
@@ -951,33 +952,65 @@ class ChatRepository(
     override suspend fun downloadCloudFileTo(serverId: String, remotePath: String, output: OutputStream) =
         requireNotNull(infiniteCloud) { "Infinite Cloud is unavailable" }.downloadTo(serverId, remotePath, output)
 
-    override suspend fun provider(id: String): ProviderEditorData? {
-        val provider = dao.provider(id) ?: return null
+    private data class ProviderConnection(
+        val provider: ProviderConfig,
+        val apiKey: String,
+        val requestHeaders: List<ProviderRequestHeader>,
+    )
+
+    private fun savedProviderHeaders(id: String): List<ProviderRequestHeader> {
+        val raw = secretStore.read(secretStore.providerHeadersName(id)) ?: return emptyList()
+        return try {
+            ProviderHeaderPolicy.normalize(json.decodeFromString<List<ProviderRequestHeader>>(raw))
+        } catch (_: Exception) {
+            throw ConfigurationException("Saved provider request headers are invalid")
+        }
+    }
+
+    /** Snapshot all credentials with their destination; never read live headers during a model round. */
+    private suspend fun providerConnection(id: String): ProviderConnection = providerConfigurationLock.withLock {
+        val entity = dao.provider(id) ?: throw ConfigurationException("The model provider is unavailable")
+        val key = secretStore.read(secretStore.providerKeyName(id)).orEmpty().trim()
+        val headers = savedProviderHeaders(id)
+        ProviderHeaderPolicy.validateAuthentication(key, headers)
+        ProviderConnection(entity.toDomain(key.isNotBlank()), key, headers)
+    }
+
+    override suspend fun provider(id: String): ProviderEditorData? = providerConfigurationLock.withLock {
+        val provider = dao.provider(id) ?: return@withLock null
         val key = secretStore.read(secretStore.providerKeyName(id)).orEmpty()
-        return ProviderEditorData(
-            ProviderDraft(provider.id, provider.name, provider.baseUrl, ProviderProtocol.valueOf(provider.protocol), key),
+        ProviderEditorData(
+            ProviderDraft(provider.id, provider.name, provider.baseUrl, ProviderProtocol.valueOf(provider.protocol), key,
+                savedProviderHeaders(id)),
             dao.modelsForProvider(id).map(ModelEntity::toDomain),
         )
     }
 
     override suspend fun fetchModels(draft: ProviderDraft): List<RemoteModel> {
-        val key = draft.apiKey.ifBlank { secretStore.read(secretStore.providerKeyName(draft.id)).orEmpty() }
-        return gateway.listModels(draft.copy(apiKey = key))
+        val normalized = ProviderHeaderPolicy.normalize(draft.requestHeaders)
+        val key = providerConfigurationLock.withLock {
+            if (ProviderHeaderPolicy.hasCustomAuthentication(normalized)) draft.apiKey.trim()
+            else draft.apiKey.trim().ifBlank { secretStore.read(secretStore.providerKeyName(draft.id)).orEmpty() }
+        }
+        return gateway.listModels(draft.copy(apiKey = key, requestHeaders = normalized))
     }
 
-    override suspend fun saveProvider(draft: ProviderDraft, models: List<ModelProfile>): ProviderConfig {
+    override suspend fun saveProvider(draft: ProviderDraft, models: List<ModelProfile>): ProviderConfig = providerConfigurationLock.withLock {
         val existing = dao.provider(draft.id)
         val keyName = secretStore.providerKeyName(draft.id)
+        val headerName = secretStore.providerHeadersName(draft.id)
+        val headers = ProviderHeaderPolicy.normalize(draft.requestHeaders)
         val previousKey = secretStore.read(keyName)
-        val apiKey = draft.apiKey.trim().ifBlank { previousKey.orEmpty() }
-        ProviderValidator.validate(draft.copy(apiKey = apiKey))
+        val apiKey = if (ProviderHeaderPolicy.hasCustomAuthentication(headers)) draft.apiKey.trim()
+            else draft.apiKey.trim().ifBlank { previousKey.orEmpty() }
+        ProviderValidator.validate(draft.copy(apiKey = apiKey, requestHeaders = headers))
         val now = System.currentTimeMillis()
         val provider = ProviderConfig(
             id = draft.id,
             name = draft.name.trim(),
             baseUrl = ProviderValidator.normalizeBaseUrl(draft.baseUrl),
             protocol = draft.protocol,
-            apiKeyConfigured = true,
+            apiKeyConfigured = apiKey.isNotBlank(),
             createdAt = existing?.createdAt ?: now,
             updatedAt = now,
         )
@@ -994,21 +1027,31 @@ class ChatRepository(
                 updatedAt = now,
             )
         }
-        secretStore.write(keyName, apiKey)
-        try {
-            dao.saveProviderWithModels(provider.toEntity(), normalizedModels.map(ModelProfile::toEntity))
-            normalizedModels.firstOrNull { it.isDefault }?.let { dao.setDefaultModel(it.id) }
-            if (dao.defaultModel() == null) normalizedModels.firstOrNull()?.let { dao.setDefaultModel(it.id) }
-        } catch (error: Throwable) {
-            secretStore.writeAll(mapOf(keyName to previousKey))
-            throw error
+        withContext(NonCancellable) {
+            val snapshot = secretStore.replaceWithSnapshot(updates = mapOf(
+                keyName to apiKey.takeIf(String::isNotBlank),
+                headerName to headers.takeIf { it.isNotEmpty() }?.let { json.encodeToString(it) },
+            ))
+            try {
+                dao.saveProviderWithModels(provider.toEntity(), normalizedModels.map(ModelProfile::toEntity))
+            } catch (error: Throwable) {
+                secretStore.restore(snapshot)
+                throw error
+            }
         }
-        return provider
+        provider
     }
 
-    override suspend fun deleteProvider(id: String) {
-        dao.deleteProvider(id)
-        secretStore.remove(secretStore.providerKeyName(id))
+    override suspend fun deleteProvider(id: String) = providerConfigurationLock.withLock {
+        withContext(NonCancellable) {
+            val snapshot = secretStore.replaceWithSnapshot(updates = mapOf(
+                secretStore.providerKeyName(id) to null, secretStore.providerHeadersName(id) to null,
+            ))
+            try { dao.deleteProvider(id) } catch (failure: Throwable) {
+                secretStore.restore(snapshot)
+                throw failure
+            }
+        }
     }
 
     override suspend fun setDefaultModel(id: String) {
@@ -1105,13 +1148,12 @@ class ChatRepository(
 
     override suspend fun testModelVision(modelId: String): VisionStatus {
         val model = requireNotNull(dao.model(modelId)) { "Model not found" }.toDomain()
-        val providerEntity = requireNotNull(dao.provider(model.providerId)) { "Provider not found" }
-        val key = secretStore.read(secretStore.providerKeyName(providerEntity.id))
-            ?: throw ConfigurationException("The provider API key is unavailable")
+        val connection = providerConnection(model.providerId)
         val request = ModelCallRequest(
             model = model,
-            provider = providerEntity.toDomain(true),
-            apiKey = key,
+            provider = connection.provider,
+            apiKey = connection.apiKey,
+            requestHeaders = connection.requestHeaders,
             systemPrompt = InternalPrompts.VISION_TEST,
             thinkingEffort = "off",
             messages = listOf(CanonicalMessage(
@@ -1401,15 +1443,17 @@ class ChatRepository(
         if (sourceIndex < 0) return note
         val previousUser = messages.take(sourceIndex).lastOrNull { it.role == "user" }?.content.orEmpty()
         val model = effectiveSettings(conversation).modelId?.let { dao.model(it) }?.toDomain() ?: return note
-        val provider = dao.provider(model.providerId) ?: return note
-        val key = secretStore.read(secretStore.providerKeyName(provider.id)) ?: return note
+        val connection = try { providerConnection(model.providerId) } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) { return note }
         val prompt = InternalPrompts.savedNoteTitleInput(previousUser.take(2_000), note.body.take(6_000))
         val generated = try {
             simpleText(
                 ModelCallRequest(
-                    model, provider.toDomain(true), key,
+                    model, connection.provider, connection.apiKey,
                     InternalPrompts.SAVED_NOTE_TITLE, "off",
                     listOf(CanonicalMessage("user", prompt)), emptyList(), UUID.randomUUID().toString(), 60,
+                    requestHeaders = connection.requestHeaders,
                 ),
                 120,
             )
@@ -1439,15 +1483,14 @@ class ChatRepository(
         val note = requireNotNull(dao.note(noteId)) { "Note not found" }.toDomain()
         val summaryInput = validateNoteSummaryInput(note.body)
         val model = requireNotNull(dao.model(modelId)) { "Model not found" }.toDomain()
-        val provider = requireNotNull(dao.provider(model.providerId)) { "The model provider is unavailable" }
-        val key = secretStore.read(secretStore.providerKeyName(provider.id))
-            ?: throw ConfigurationException("The provider API key is unavailable")
-        val providerConfig = provider.toDomain(true)
+        val connection = providerConnection(model.providerId)
+        val providerConfig = connection.provider
         val summarizedBody = simpleText(
             ModelCallRequest(
                 model = model,
                 provider = providerConfig,
-                apiKey = key,
+                apiKey = connection.apiKey,
+                requestHeaders = connection.requestHeaders,
                 systemPrompt = InternalPrompts.noteRewrite(rewritePrompt),
                 thinkingEffort = "off",
                 messages = listOf(CanonicalMessage("user", summaryInput)),
@@ -1462,7 +1505,8 @@ class ChatRepository(
             ModelCallRequest(
                 model = model,
                 provider = providerConfig,
-                apiKey = key,
+                apiKey = connection.apiKey,
+                requestHeaders = connection.requestHeaders,
                 systemPrompt = InternalPrompts.NOTE_TITLE,
                 thinkingEffort = "off",
                 messages = listOf(CanonicalMessage("user", summarizedBody.take(12_000))),
@@ -1708,10 +1752,9 @@ class ChatRepository(
         val effective = effectiveSettings(conversation)
         val model = effective.modelId?.let { dao.model(it) }?.toDomain()
             ?: throw ConfigurationException("The conversation model is unavailable")
-        val providerEntity = requireNotNull(dao.provider(model.providerId)) { "The model provider is unavailable" }
-        val apiKey = secretStore.read(secretStore.providerKeyName(providerEntity.id))
-            ?: throw ConfigurationException("The provider API key is unavailable")
-        val provider = providerEntity.toDomain(true)
+        val connection = providerConnection(model.providerId)
+        val apiKey = connection.apiKey
+        val provider = connection.provider
         val now = nextMessageCreatedAt(
             dao.messages(conversationId).map(MessageEntity::toDomain),
             System.currentTimeMillis(),
@@ -1773,7 +1816,8 @@ class ChatRepository(
         }
         val system = SystemPrompts.compose(effective.systemPrompt + cloudAttachmentPrompt(remoteAttachments), effective.nickname,
             request.timeZone, request.enableKnowledge || allCitations.isNotEmpty())
-        val baseCall = ModelCallRequest(model, provider, apiKey, system, effective.thinkingEffort, emptyList(), definitions, requestId)
+        val baseCall = ModelCallRequest(model, provider, apiKey, system, effective.thinkingEffort, emptyList(), definitions, requestId,
+            requestHeaders = connection.requestHeaders)
         var newSummary: ContextSummary? = null
         var preview = previewOf(raw, canonical, conversation.contextPolicy, model, system, definitions, summary,
             cloudRequired = request.cloudExecutionMode == CloudExecutionMode.REQUIRED)
@@ -2021,13 +2065,13 @@ class ChatRepository(
         val fallback = unicodePrefix(firstUser, 40)
         val model = effectiveSettings(conversation).modelId?.let { dao.model(it) }?.toDomain()
         val generated = if (model == null) "" else try {
-            val providerEntity = requireNotNull(dao.provider(model.providerId))
-            val key = requireNotNull(secretStore.read(secretStore.providerKeyName(providerEntity.id)))
+            val connection = providerConnection(model.providerId)
             engine.generateTitle(
                 ModelCallRequest(
                     model = model,
-                    provider = providerEntity.toDomain(true),
-                    apiKey = key,
+                    provider = connection.provider,
+                    apiKey = connection.apiKey,
+                    requestHeaders = connection.requestHeaders,
                     systemPrompt = InternalPrompts.CONVERSATION_TITLE,
                     thinkingEffort = "off",
                     messages = listOf(CanonicalMessage("user", firstUser)),
@@ -2059,13 +2103,14 @@ class ChatRepository(
             .synthesize(message.id, message.content, voice, force)
     }
 
-    override suspend fun exportConfiguration(password: CharArray): String {
+    override suspend fun exportConfiguration(password: CharArray): String = providerConfigurationLock.withLock {
         val providers = dao.providers().map { entity ->
-            val provider = entity.toDomain(true)
-            ConfigProviderRecord(provider, secretStore.read(secretStore.providerKeyName(entity.id)).orEmpty())
+            val key = secretStore.read(secretStore.providerKeyName(entity.id)).orEmpty()
+            val provider = entity.toDomain(key.isNotBlank())
+            ConfigProviderRecord(provider, key, savedProviderHeaders(entity.id))
         }
         val settings = globalSettings()
-        return archive.encode(
+        archive.encode(
             ConfigArchivePayload(
                 createdAt = System.currentTimeMillis(),
                 providers = providers,
@@ -2086,7 +2131,7 @@ class ChatRepository(
         )
     }
 
-    override suspend fun previewImport(raw: String, password: CharArray): ImportPreview {
+    override suspend fun previewImport(raw: String, password: CharArray): ImportPreview = providerConfigurationLock.withLock {
         val payload = archive.decode(raw, password)
         payload.cloudServers.forEach { it.normalizedForArchiveImport() }
         payload.cloudMcpServers.forEach { it.normalizedForArchiveImport() }
@@ -2109,6 +2154,7 @@ class ChatRepository(
                     record.provider.baseUrl,
                     record.provider.protocol,
                     record.apiKey,
+                    record.requestHeaders,
                 ),
             )
         }
@@ -2186,7 +2232,7 @@ class ChatRepository(
                 }
             }
         }
-        return ImportPreview(
+        ImportPreview(
             payload = payload,
             newProviders = payload.providers.count { it.provider.id !in localProviderIds },
             updatedProviders = payload.providers.count { it.provider.id in localProviderIds },
@@ -2198,11 +2244,25 @@ class ChatRepository(
             replacesMimoKey = payload.mimoTtsApiKey != null,
             replacesInfoFlowKey = false,
             conflicts = conflicts,
+            resetsProviderHeaders = payload.providers.count {
+                ProviderHeaderPolicy.normalize(it.requestHeaders).isEmpty() &&
+                    secretStore.read(secretStore.providerHeadersName(it.provider.id)) != null
+            },
         )
     }
 
     override suspend fun applyImport(preview: ImportPreview) = cloudConfigurationMutationLock.withLock {
+        providerConfigurationLock.withLock { applyImportLocked(preview) }
+    }
+
+    private suspend fun applyImportLocked(preview: ImportPreview) {
         val payload = preview.payload
+        val importedProviders = payload.providers.map { record ->
+            val headers = ProviderHeaderPolicy.normalize(record.requestHeaders)
+            ProviderValidator.validate(ProviderDraft(record.provider.id, record.provider.name, record.provider.baseUrl,
+                record.provider.protocol, record.apiKey, headers))
+            record.copy(requestHeaders = headers)
+        }
         val normalizedCloudServers = payload.cloudServers.map(CloudServerProfile::normalizedForArchiveImport)
         val normalizedCloudMcpServers = payload.cloudMcpServers.map(CloudMcpServer::normalizedForArchiveImport)
         val defaultModelId = resolveImportedDefaultModelId(
@@ -2211,7 +2271,11 @@ class ChatRepository(
             importedModels = payload.models,
         )
         val secretUpdates = buildMap<String, String?> {
-            payload.providers.forEach { put(secretStore.providerKeyName(it.provider.id), it.apiKey) }
+            importedProviders.forEach {
+                put(secretStore.providerKeyName(it.provider.id), it.apiKey.takeIf(String::isNotBlank))
+                put(secretStore.providerHeadersName(it.provider.id),
+                    it.requestHeaders.takeIf { headers -> headers.isNotEmpty() }?.let { headers -> json.encodeToString(headers) })
+            }
             payload.exaApiKey?.let { put(SecretStore.EXA_KEY, it) }
             payload.mimoTtsApiKey?.let { put(SecretStore.MIMO_TTS_KEY, it) }
         }
@@ -2231,43 +2295,45 @@ class ChatRepository(
         val cloudSecretPrefixes = cloudMcpSecretIds.flatMap { mcpId ->
             listOf(secretStore.cloudMcpEnvironmentPrefix(mcpId), secretStore.cloudMcpHeaderPrefix(mcpId))
         }.toSet()
-        val secretSnapshot = secretStore.replaceWithSnapshot(
-            clearNames = cloudSecretNames,
-            clearPrefixes = cloudSecretPrefixes,
-            updates = secretUpdates,
-        )
-        try {
-            dao.mergeConfiguration(
-                providers = payload.providers.map { it.provider.toEntity() },
-                models = payload.models.map(ModelProfile::toEntity),
-                defaultModelId = defaultModelId,
-                settings = if (
-                    payload.globalSystemPrompt != null ||
-                    payload.globalUrlReaderBackend != null ||
-                    payload.globalAssistantNickname != null
-                ) {
-                    val current = dao.appSettings() ?: AppSettingsEntity()
-                    current.copy(
-                        systemPrompt = payload.globalSystemPrompt ?: current.systemPrompt,
-                        urlReaderBackend = (payload.globalUrlReaderBackend ?: UrlReaderBackend.valueOf(current.urlReaderBackend)).name,
-                        assistantNickname = payload.globalAssistantNickname
-                            ?.trim()
-                            ?.ifBlank { DEFAULT_ASSISTANT_NICKNAME }
-                            ?: current.assistantNickname,
-                        visionFallbackModelId = payload.visionFallbackModelId
-                            ?.takeIf { id -> payload.models.any { it.id == id && it.visionStatus == VisionStatus.SUPPORTED } ||
-                                dao.model(id)?.visionStatus == VisionStatus.SUPPORTED.name }
-                            ?: current.visionFallbackModelId,
-                        mimoTtsVoice = payload.mimoTtsVoice?.takeIf { it in MimoTtsClient.VOICES } ?: current.mimoTtsVoice,
-                    )
-                } else null,
-                agents = payload.agents.map(AgentProfile::toEntity),
-                cloudServers = normalizedCloudServers.map(CloudServerProfile::toEntity),
-                cloudMcpServers = normalizedCloudMcpServers.map(CloudMcpServer::toEntity),
+        withContext(NonCancellable) {
+            val secretSnapshot = secretStore.replaceWithSnapshot(
+                clearNames = cloudSecretNames,
+                clearPrefixes = cloudSecretPrefixes,
+                updates = secretUpdates,
             )
-        } catch (error: Throwable) {
-            secretStore.restore(secretSnapshot)
-            throw error
+            try {
+                dao.mergeConfiguration(
+                    providers = importedProviders.map { it.provider.toEntity() },
+                    models = payload.models.map(ModelProfile::toEntity),
+                    defaultModelId = defaultModelId,
+                    settings = if (
+                        payload.globalSystemPrompt != null ||
+                        payload.globalUrlReaderBackend != null ||
+                        payload.globalAssistantNickname != null
+                    ) {
+                        val current = dao.appSettings() ?: AppSettingsEntity()
+                        current.copy(
+                            systemPrompt = payload.globalSystemPrompt ?: current.systemPrompt,
+                            urlReaderBackend = (payload.globalUrlReaderBackend ?: UrlReaderBackend.valueOf(current.urlReaderBackend)).name,
+                            assistantNickname = payload.globalAssistantNickname
+                                ?.trim()
+                                ?.ifBlank { DEFAULT_ASSISTANT_NICKNAME }
+                                ?: current.assistantNickname,
+                            visionFallbackModelId = payload.visionFallbackModelId
+                                ?.takeIf { id -> payload.models.any { it.id == id && it.visionStatus == VisionStatus.SUPPORTED } ||
+                                    dao.model(id)?.visionStatus == VisionStatus.SUPPORTED.name }
+                                ?: current.visionFallbackModelId,
+                            mimoTtsVoice = payload.mimoTtsVoice?.takeIf { it in MimoTtsClient.VOICES } ?: current.mimoTtsVoice,
+                        )
+                    } else null,
+                    agents = payload.agents.map(AgentProfile::toEntity),
+                    cloudServers = normalizedCloudServers.map(CloudServerProfile::toEntity),
+                    cloudMcpServers = normalizedCloudMcpServers.map(CloudMcpServer::toEntity),
+                )
+            } catch (error: Throwable) {
+                secretStore.restore(secretSnapshot)
+                throw error
+            }
         }
     }
 
@@ -2337,11 +2403,11 @@ class ChatRepository(
         val conversation = requireNotNull(dao.conversation(id)) { "Conversation not found" }.toDomain()
         val effective = effectiveSettings(conversation)
         val model = requireNotNull(effective.modelId?.let { dao.model(it) }) { "Model is unavailable" }.toDomain()
-        val provider = requireNotNull(dao.provider(model.providerId)) { "Provider is unavailable" }
-        val key = secretStore.read(secretStore.providerKeyName(provider.id)) ?: throw ConfigurationException("Provider key is unavailable")
-        return ModelCallRequest(model, provider.toDomain(true), key,
+        val connection = providerConnection(model.providerId)
+        return ModelCallRequest(model, connection.provider, connection.apiKey,
             SystemPrompts.compose(effective.systemPrompt, effective.nickname, java.util.TimeZone.getDefault().id,
-                conversation.enableKnowledge), effective.thinkingEffort, emptyList(), emptyList(), UUID.randomUUID().toString())
+                conversation.enableKnowledge), effective.thinkingEffort, emptyList(), emptyList(), UUID.randomUUID().toString(),
+            requestHeaders = connection.requestHeaders)
     }
 
     private fun contextToolOptions(conversation: Conversation) = ToolOptions(
@@ -2452,15 +2518,14 @@ class ChatRepository(
             ?: throw ConfigurationException("Configure a tested vision fallback model before sending images")
         val model = requireNotNull(dao.model(fallbackId)) { "Vision fallback model is unavailable" }.toDomain()
         require(model.visionStatus == VisionStatus.SUPPORTED) { "Vision fallback model has not passed the vision test" }
-        val provider = requireNotNull(dao.provider(model.providerId)) { "Vision fallback provider is unavailable" }
-        val key = secretStore.read(secretStore.providerKeyName(provider.id))
-            ?: throw ConfigurationException("Vision fallback API key is unavailable")
+        val connection = providerConnection(model.providerId)
         return images.mapIndexed { index, image ->
             simpleText(
                 ModelCallRequest(
                     model = model,
-                    provider = provider.toDomain(true),
-                    apiKey = key,
+                    provider = connection.provider,
+                    apiKey = connection.apiKey,
+                    requestHeaders = connection.requestHeaders,
                     systemPrompt = InternalPrompts.VISION_DESCRIPTION,
                     thinkingEffort = "off",
                     messages = listOf(CanonicalMessage(

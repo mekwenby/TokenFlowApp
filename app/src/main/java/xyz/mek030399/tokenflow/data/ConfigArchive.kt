@@ -40,7 +40,11 @@ data class ConfigArchivePayload(
 }
 
 @Serializable
-data class ConfigProviderRecord(val provider: ProviderConfig, val apiKey: String)
+data class ConfigProviderRecord(
+    val provider: ProviderConfig,
+    val apiKey: String,
+    @SerialName("request_headers") val requestHeaders: List<ProviderRequestHeader> = emptyList(),
+)
 
 @Serializable
 private data class ConfigArchiveEnvelope(

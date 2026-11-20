@@ -117,11 +117,12 @@ Room 数据库、附件正文、知识文件、头像和普通偏好没有额外
 
 ## 凭据存储
 
-供应商 API Key、Exa Key、MiMo Key、Infinite Cloud SSH 私钥与口令，以及 MCP 环境变量值和 HTTP 请求头值均由 [`SecretStore`](../app/src/main/java/xyz/mek030399/tokenflow/data/SecretStore.kt) 管理：
+供应商 API Key 与自定义请求头、Exa Key、MiMo Key、Infinite Cloud SSH 私钥与口令，以及 MCP 环境变量值和 HTTP 请求头值均由 [`SecretStore`](../app/src/main/java/xyz/mek030399/tokenflow/data/SecretStore.kt) 管理：
 
 - 密文存放于私有 SharedPreferences `tokenflow_secrets_v2`。
 - AES 密钥由 Android Keystore 提供，alias 为 `tokenflow_local_secrets_v2`。
 - 算法为 AES-GCM，无明文 key 写入 Room 或配置文件。
+- 供应商请求头的名称、值、启用状态及模板管理信息按 provider ID 序列化为加密 JSON；Room 不保存头值，本功能无需数据库迁移。停用的配置保留在加密存储中，发送时不使用。
 
 Android Keystore 只保护 App 内凭据，不是 APK 发布签名 keystore。设备迁移、系统重置或 Keystore 失效后，密文可能无法恢复，应通过重新配置或受密码保护的 `.tfcfg` 恢复。
 
@@ -137,7 +138,9 @@ Android Keystore 只保护 App 内凭据，不是 APK 发布签名 keystore。�
 - AAD 完整性绑定
 - 最短 10 字符密码
 
-归档包括供应商及其 API Key、模型、默认模型、视觉状态/兜底、Exa/MiMo Key、MiMo 音色、全局助手昵称、全局系统提示词、URL Reader、智能体，以及非敏感的 Infinite Cloud 服务器/MCP 定义和已固定主机指纹。
+归档包括供应商及其 API Key 和自定义请求头、模型、默认模型、视觉状态/兜底、Exa/MiMo Key、MiMo 音色、全局助手昵称、全局系统提示词、URL Reader、智能体，以及非敏感的 Infinite Cloud 服务器/MCP 定义和已固定主机指纹。
+
+供应商请求头可包含鉴权信息，因此完整配置只写入密码保护的归档。旧归档缺少请求头字段时按空配置处理；若将清空同 ID 供应商当前请求头，导入预览先显示提示，确认后以归档配置替换，不隐式合并本机旧头。
 
 智能体归档包含用户保存的智能体，旧版本已保存的自定义副本正常导入导出；导入按稳定 UUID 合并，同名智能体可以并存。移除预装角色不修改已有配置归档，也不依赖 App 提供默认智能体。
 
@@ -175,6 +178,12 @@ Infinite Cloud SSH 私钥与口令、MCP 环境变量值和 HTTP 请求头值绝
 
 Provider Base URL 必须使用 HTTPS，并且不能带 userinfo、query 或 fragment。它是用户明确配置的 API 根地址，允许合法的公网兼容供应商域名。
 
+自定义请求头按供应商作用于模型调用和模型列表请求；启用的同名头覆盖默认头，有效且值非空的 `Authorization`、`x-api-key` 或 `api-key` 启用时抑制协议默认鉴权，允许 API Key 字段留空。一次操作开始时固定配置，后续重试和工具循环不重新生成模板标识或读取中途编辑的头。重定向仅限同源（协议、主机和端口均相同），不同源目标会被拒绝。
+
+启用行的名称和值须通过 HTTP 头语法校验，名称修剪首尾空白并按大小写无关的名称拒绝重复；整行空白不保存。停用行保留但不参与发送或阻断发送。协议/传输管理字段 `Host`、`Content-Length`、`Content-Type`、`Connection`、`Transfer-Encoding`、`Content-Encoding`、`Accept-Encoding`、`TE`、`Trailer`、`Upgrade`、`Proxy-Authorization`、`Keep-Alive` 不允许启用自定义值；`Accept`、`User-Agent`、`anthropic-version` 和普通扩展头仍可配置。校验错误不包含头值。
+
+Claude Code、OpenCode 和 Pi 模板只填充静态 HTTP 头；所需标识在用户应用模板时生成一次，再按普通配置保存。它们不更改模型正文、系统提示词或工具定义，不提供其他客户端的身份、会话或服务权限保证。供应商头不发送到 Exa、URL Reader、Infinite Cloud/MCP 或语音端点。
+
 ### URL Reader
 
 URL Reader 面对模型或网页提供的任意 URL，边界更严格：
@@ -209,7 +218,7 @@ URL Reader 面对模型或网页提供的任意 URL，边界更严格：
 
 | 操作 | 可能发送的数据 | 接收方 |
 | --- | --- | --- |
-| 模型对话 | 系统提示词、上下文消息、附件图片/提取文本、知识片段、离线计算/单位换算的参数与结果、设备时间/时区/电量读数及其他工具结果 | 用户配置的模型供应商 |
+| 模型对话与模型列表 | 对话所需上下文、附件、工具结果，以及所配置的 API Key 或自定义请求头；模型列表不携带对话正文 | 用户配置的模型供应商 |
 | 视觉兜底 | 图片及描述请求 | 用户配置的视觉兜底供应商 |
 | Exa 搜索 | 搜索词 | Exa |
 | 内置 URL 读取 | 目标 URL、标准 HTTP 请求信息 | 目标网站及网络基础设施 |

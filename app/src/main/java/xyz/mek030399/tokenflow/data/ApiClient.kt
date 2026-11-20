@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
@@ -58,7 +59,7 @@ object ProviderValidator {
     fun validate(draft: ProviderDraft) {
         if (draft.name.trim().isEmpty()) throw ConfigurationException("Provider name is required")
         normalizeBaseUrl(draft.baseUrl)
-        if (draft.apiKey.isBlank()) throw ConfigurationException("API key is required")
+        ProviderHeaderPolicy.validateAuthentication(draft.apiKey, draft.requestHeaders)
     }
 }
 
@@ -70,6 +71,19 @@ class DirectApiTransport(
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(45, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS))
+        .addNetworkInterceptor { chain ->
+            val request = chain.request()
+            val origin = request.tag(ProviderRequestOrigin::class.java)
+            if (origin == null || !origin.matches(request.url)) {
+                throw ApiException(
+                    status = 0,
+                    code = "provider_redirect_blocked",
+                    message = "Provider redirect to a different origin was blocked",
+                    retryable = false,
+                )
+            }
+            chain.proceed(request)
+        }
         .build()
     private val streamingClient = this.client.newBuilder().readTimeout(0, TimeUnit.MILLISECONDS).build()
     private val parser = SseParser()
@@ -79,14 +93,15 @@ class DirectApiTransport(
         apiKey: String,
         path: String,
         query: Map<String, String> = emptyMap(),
+        requestHeaders: List<ProviderRequestHeader> = emptyList(),
     ): JsonObject = withContext(Dispatchers.IO) {
         val url = endpoint(provider.baseUrl, path).newBuilder().apply {
             query.forEach { (name, value) -> addQueryParameter(name, value) }
         }.build()
-        val request = authenticated(Request.Builder().url(url).get(), provider.protocol, apiKey).build()
+        val request = authenticated(Request.Builder().url(url).get(), provider.protocol, apiKey, requestHeaders).build()
         client.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
-            if (!response.isSuccessful) throw apiException(response.code, body)
+            if (!response.isSuccessful) throw apiException(response.code, body, apiKey, requestHeaders)
             parseObject(body)
         }
     }
@@ -98,6 +113,7 @@ class DirectApiTransport(
         path: String,
         body: JsonObject,
         requestId: String,
+        requestHeaders: List<ProviderRequestHeader> = emptyList(),
     ): Flow<RawSseEvent> = flow {
         val request = authenticated(
             Request.Builder()
@@ -107,6 +123,7 @@ class DirectApiTransport(
                 .post(json.encodeToString(body).toRequestBody(JSON_MEDIA_TYPE)),
             provider.protocol,
             apiKey,
+            requestHeaders,
         ).build()
         val call = streamingClient.newCall(request)
         val cancellation = currentCoroutineContext().job.invokeOnCompletion(
@@ -118,12 +135,12 @@ class DirectApiTransport(
         try {
             call.execute().use { response ->
                 if (!response.isSuccessful) {
-                    val error = apiException(response.code, response.body?.string().orEmpty())
+                    val error = apiException(response.code, response.body?.string().orEmpty(), apiKey, requestHeaders)
                     runCatching {
                         Log.w(
                             TAG,
                             "Provider request failed: protocol=${provider.protocol}, path=${path.trim('/')}, " +
-                                "status=${response.code}, code=${error.code ?: "none"}",
+                                "status=${response.code}",
                         )
                     }
                     throw error
@@ -140,15 +157,31 @@ class DirectApiTransport(
         }
     }.flowOn(Dispatchers.IO)
 
-    private fun authenticated(builder: Request.Builder, protocol: ProviderProtocol, apiKey: String): Request.Builder {
+    private fun authenticated(
+        builder: Request.Builder,
+        protocol: ProviderProtocol,
+        apiKey: String,
+        requestHeaders: List<ProviderRequestHeader>,
+    ): Request.Builder {
+        val active = ProviderHeaderPolicy.enabled(requestHeaders)
+        ProviderHeaderPolicy.validateAuthentication(apiKey, active)
+        val url = builder.build().url
+        builder.tag(ProviderRequestOrigin::class.java, ProviderRequestOrigin(url.scheme, url.host, url.port))
         builder.header("Content-Type", "application/json")
             .header("User-Agent", "TokenFlow-Android/${BuildConfig.VERSION_NAME}")
         if (protocol == ProviderProtocol.ANTHROPIC_MESSAGES) {
-            builder.header("x-api-key", apiKey).header("anthropic-version", ANTHROPIC_VERSION)
-        } else {
-            builder.header("Authorization", "Bearer $apiKey")
+            builder.header("anthropic-version", ANTHROPIC_VERSION)
         }
+        if (!ProviderHeaderPolicy.hasCustomAuthentication(active)) {
+            if (protocol == ProviderProtocol.ANTHROPIC_MESSAGES) builder.header("x-api-key", apiKey)
+            else builder.header("Authorization", "Bearer $apiKey")
+        }
+        active.forEach { row -> builder.header(row.name, row.value) }
         return builder
+    }
+
+    private data class ProviderRequestOrigin(val scheme: String, val host: String, val port: Int) {
+        fun matches(url: HttpUrl): Boolean = scheme == url.scheme && host == url.host && port == url.port
     }
 
     private fun endpoint(baseUrl: String, path: String): HttpUrl =
@@ -156,9 +189,14 @@ class DirectApiTransport(
 
     private fun parseObject(raw: String): JsonObject = runCatching {
         json.parseToJsonElement(raw).jsonObject
-    }.getOrElse { throw IOException("Provider returned invalid JSON", it) }
+    }.getOrElse { throw IOException("Provider returned invalid JSON") }
 
-    private fun apiException(status: Int, body: String): ApiException {
+    private fun apiException(
+        status: Int,
+        body: String,
+        apiKey: String,
+        requestHeaders: List<ProviderRequestHeader>,
+    ): ApiException {
         val parsed = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
         val errorElement = parsed?.get("error")
         val errorObject = (errorElement as? JsonObject)
@@ -166,7 +204,7 @@ class DirectApiTransport(
             .ifBlank { (errorElement as? JsonPrimitive)?.contentOrNull.orEmpty() }
             .ifBlank { "Provider request failed ($status)" }
         val code = errorObject?.string("code").orEmpty().ifBlank { parsed?.string("code").orEmpty() }.ifBlank { null }
-        return ApiException(status, code, message)
+        return redactProviderError(ApiException(status, code, message), apiKey, requestHeaders)
     }
 
     companion object {
@@ -177,8 +215,23 @@ class DirectApiTransport(
     }
 }
 
+private fun redactProviderError(
+    error: ApiException,
+    apiKey: String,
+    requestHeaders: List<ProviderRequestHeader>,
+): ApiException {
+    val sensitiveValues = (listOf(apiKey) + requestHeaders.filter(ProviderRequestHeader::enabled).map { it.value })
+        .map(String::trim).filter(String::isNotEmpty).distinct().sortedByDescending(String::length)
+    fun redacted(value: String): String = sensitiveValues.fold(value) { text, secret -> text.replace(secret, "[redacted]") }
+    return ApiException(error.status, error.code?.let(::redacted), redacted(error.message), error.retryable)
+}
+
 interface ModelApiAdapter {
-    suspend fun listModels(provider: ProviderConfig, apiKey: String): List<RemoteModel>
+    suspend fun listModels(
+        provider: ProviderConfig,
+        apiKey: String,
+        requestHeaders: List<ProviderRequestHeader> = emptyList(),
+    ): List<RemoteModel>
     fun stream(request: ModelCallRequest): Flow<ModelStreamEvent>
 }
 
@@ -204,13 +257,19 @@ open class ModelGateway(
             createdAt = now,
             updatedAt = now,
         )
-        return adapter(provider.protocol).listModels(provider, draft.apiKey.trim())
+        return adapter(provider.protocol).listModels(provider, draft.apiKey.trim(), draft.requestHeaders)
     }
 
-    suspend fun listModels(provider: ProviderConfig, apiKey: String): List<RemoteModel> =
-        adapter(provider.protocol).listModels(provider, apiKey)
+    suspend fun listModels(
+        provider: ProviderConfig,
+        apiKey: String,
+        requestHeaders: List<ProviderRequestHeader> = emptyList(),
+    ): List<RemoteModel> = adapter(provider.protocol).listModels(provider, apiKey, requestHeaders)
 
-    open fun stream(request: ModelCallRequest): Flow<ModelStreamEvent> = adapter(request.provider.protocol).stream(request)
+    open fun stream(request: ModelCallRequest): Flow<ModelStreamEvent> = adapter(request.provider.protocol).stream(request).catch { failure ->
+        if (failure is ApiException) throw redactProviderError(failure, request.apiKey, request.requestHeaders)
+        throw failure
+    }
 
     private fun adapter(protocol: ProviderProtocol): ModelApiAdapter = requireNotNull(adapters[protocol])
 }
@@ -219,8 +278,12 @@ private abstract class OpenAIAdapter(
     protected val transport: DirectApiTransport,
     protected val json: Json,
 ) : ModelApiAdapter {
-    override suspend fun listModels(provider: ProviderConfig, apiKey: String): List<RemoteModel> {
-        val body = transport.getJson(provider, apiKey, "models")
+    override suspend fun listModels(
+        provider: ProviderConfig,
+        apiKey: String,
+        requestHeaders: List<ProviderRequestHeader>,
+    ): List<RemoteModel> {
+        val body = transport.getJson(provider, apiKey, "models", requestHeaders = requestHeaders)
         return body.array("data").mapNotNull { element ->
             val item = element as? JsonObject ?: return@mapNotNull null
             item.string("id").takeIf(String::isNotBlank)?.let(::RemoteModel)
@@ -233,7 +296,7 @@ private class OpenAIChatAdapter(
     json: Json,
 ) : OpenAIAdapter(transport, json) {
     override fun stream(request: ModelCallRequest): Flow<ModelStreamEvent> = flow {
-        transport.stream(request.provider, request.apiKey, "chat/completions", chatBody(request), request.requestId).collect { raw ->
+        transport.stream(request.provider, request.apiKey, "chat/completions", chatBody(request), request.requestId, request.requestHeaders).collect { raw ->
             if (raw.data.trim() == "[DONE]") return@collect
             val payload = jsonObject(raw.data, json)
             payload["error"]?.let { throw streamError(it) }
@@ -324,7 +387,7 @@ private class OpenAIResponsesAdapter(
     json: Json,
 ) : OpenAIAdapter(transport, json) {
     override fun stream(request: ModelCallRequest): Flow<ModelStreamEvent> = flow {
-        transport.stream(request.provider, request.apiKey, "responses", responsesBody(request), request.requestId).collect { raw ->
+        transport.stream(request.provider, request.apiKey, "responses", responsesBody(request), request.requestId, request.requestHeaders).collect { raw ->
             val payload = jsonObject(raw.data, json)
             val type = payload.string("type").ifBlank { raw.event }
             when (type) {
@@ -471,7 +534,11 @@ private class AnthropicMessagesAdapter(
     private val transport: DirectApiTransport,
     private val json: Json,
 ) : ModelApiAdapter {
-    override suspend fun listModels(provider: ProviderConfig, apiKey: String): List<RemoteModel> {
+    override suspend fun listModels(
+        provider: ProviderConfig,
+        apiKey: String,
+        requestHeaders: List<ProviderRequestHeader>,
+    ): List<RemoteModel> {
         val models = mutableListOf<RemoteModel>()
         var afterId = ""
         var page = 0
@@ -481,6 +548,7 @@ private class AnthropicMessagesAdapter(
                 apiKey,
                 "models",
                 if (afterId.isBlank()) emptyMap() else mapOf("after_id" to afterId),
+                requestHeaders,
             )
             payload.array("data").forEach { element ->
                 val item = element as? JsonObject ?: return@forEach
@@ -497,7 +565,7 @@ private class AnthropicMessagesAdapter(
 
     override fun stream(request: ModelCallRequest): Flow<ModelStreamEvent> = flow {
         val replayBlocks = mutableMapOf<Int, AnthropicReplayAccumulator>()
-        transport.stream(request.provider, request.apiKey, "messages", anthropicBody(request), request.requestId).collect { raw ->
+        transport.stream(request.provider, request.apiKey, "messages", anthropicBody(request), request.requestId, request.requestHeaders).collect { raw ->
             val payload = jsonObject(raw.data, json)
             val type = payload.string("type").ifBlank { raw.event }
             when (type) {
@@ -755,7 +823,7 @@ private fun anthropicUsage(value: JsonObject): Usage {
 
 private fun jsonObject(raw: String, json: Json): JsonObject = runCatching {
     json.parseToJsonElement(raw).jsonObject
-}.getOrElse { throw IOException("Provider returned a malformed stream event", it) }
+}.getOrElse { throw IOException("Provider returned a malformed stream event") }
 
 private fun streamError(value: JsonElement): ApiException {
     val error = value as? JsonObject ?: JsonObject(emptyMap())

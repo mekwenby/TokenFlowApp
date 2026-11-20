@@ -2,7 +2,7 @@
 
 ## 系统边界
 
-一念通流 Android App 是单模块原生客户端，采用 BYOK 直连模式。用户在 App 中配置供应商、API Base URL 和 API Key，模型请求直接发往对应端点；Android App 不依赖仓库中的 Go 网关、网页端或旧 `/mobile/v1` 接口。
+一念通流 Android App 是单模块原生客户端，采用 BYOK 直连模式。用户在 App 中配置供应商、API Base URL 和 API Key 或自定义鉴权头，模型请求直接发往对应端点；Android App 不依赖仓库中的 Go 网关、网页端或旧 `/mobile/v1` 接口。
 
 ```mermaid
 flowchart LR
@@ -84,6 +84,8 @@ flowchart LR
 
 这样 Repository、过程 UI 和持久化不需要按供应商分叉。协议特有字段的新增应先在 `Models.kt` 中定义兼容默认值，再分别补齐请求、SSE 和非流式解析测试。
 
+供应商请求头在模型操作开始时读取为不可变快照，模型调用、工具循环及重试沿用该快照，模型列表请求走同一供应商请求头合并规则。已启用的自定义鉴权头覆盖协议默认鉴权；模板应用是编辑动作，生成标识并保存静态值，不在发送时展开变量。模型 HTTP 传输只跟随同源重定向，其他工具和服务使用各自的客户端，不继承供应商请求头。
+
 `calculate` 和 `convert_units` 与联网工具共用上述定义、调用和结果通道，也计入同一 `maxToolCalls` 额度。只要额度大于零，它们就可供模型调用；额度为零时，引擎不向任何协议发送工具定义。离线执行器不发起网络请求，但工具参数由模型生成，执行结果会进入下一轮模型请求。
 
 ## 持久化边界
@@ -94,6 +96,7 @@ flowchart LR
 - Assistant/User 扩展信息存放在消息行内 JSON metadata；可选字段使用默认值兼容旧记录，通常不需要修改 Room 表。
 - 附件、知识原文件和头像放在 App 私有文件目录；Room 只保存索引和路径。
 - API Key 不存入 Room，由 `SecretStore` 使用 Android Keystore 加密后写入私有 SharedPreferences。
+- 供应商自定义请求头按 provider ID 以加密 JSON 保存在 `SecretStore`，不新增 Room 列或迁移；加密配置归档包含其完整配置，导入应用时替换对应供应商的请求头。
 - TTS 音频是可重建缓存，不进入 Room。
 
 更详细的数据位置和删除语义见 [数据与安全](DATA_AND_SECURITY.md)。

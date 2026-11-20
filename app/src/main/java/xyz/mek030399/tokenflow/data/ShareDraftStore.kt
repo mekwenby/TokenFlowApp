@@ -20,7 +20,6 @@ data class ComposerDraft(
     val text: String = "",
     val attachments: List<PendingAttachment> = emptyList(),
     val submittedRequestId: String? = null,
-    val cloudExecutionMode: CloudExecutionMode = CloudExecutionMode.AUTO,
 )
 @Serializable
 data class SharedFile(val id: String, val name: String, val attachment: PendingAttachment? = null, val error: String? = null)
@@ -101,8 +100,7 @@ class ShareDraftStore(context: Context) {
             if (key != settled.conversationId) drafts.remove(key)
             val newer = drafts[settled.conversationId]?.takeIf {
                 it.submittedRequestId != requestId &&
-                    (it.submittedRequestId != null || it.text.isNotEmpty() || it.attachments.isNotEmpty() ||
-                        it.cloudExecutionMode != CloudExecutionMode.AUTO)
+                    (it.submittedRequestId != null || it.text.isNotEmpty() || it.attachments.isNotEmpty())
             } ?: previous.drafts[settled.conversationId]?.takeIf {
                 it.submittedRequestId != requestId
             }

@@ -52,6 +52,7 @@
     <string name="thinking_medium">Medium</string>
     <string name="thinking_high">High</string>
     <string name="system_prompt">System prompt</string>
+    <string name="system_prompt_empty">No system prompt</string>
     <string name="default_system_prompt">Default TokenFlow prompt</string>
     <string name="nickname">My nickname</string>
     <string name="user_avatar">User avatar (local)</string>

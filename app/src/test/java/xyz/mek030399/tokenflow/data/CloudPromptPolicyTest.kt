@@ -20,17 +20,36 @@ class CloudPromptPolicyTest {
         val definitions = infiniteCloudToolDefinitions(ToolOptions(false, false, enableInfiniteCloud = true, cloudServerId = "server"))
         val prompt = SystemPrompts.withCloudCapabilities(base, definitions, required = false)
         assertTrue(prompt.startsWith(base))
+        assertTrue(prompt.contains("user's selected Linux server"))
         assertTrue(prompt.contains("use the appropriate Cloud or remote MCP tools to complete that work"))
         assertTrue(prompt.contains("code only / no execution"))
         assertTrue(prompt.contains("Do not make a token connection check"))
         assertTrue(prompt.contains("at most 120 seconds"))
         assertTrue(prompt.contains("do not persist between calls"))
         assertTrue(prompt.contains("cloud_register_artifact"))
-        assertTrue(prompt.contains("does not grant background-task permission"))
+        assertFalse(prompt.contains("cloud_create_task"))
+        assertFalse(prompt.contains("The attached mcp__ tools"))
         assertFalse(prompt.contains("This message explicitly requires Cloud"))
-        assertTrue(SystemPrompts.withCloudCapabilities(base, definitions, required = true)
-            .contains("This message explicitly requires Cloud"))
+        val requiredPrompt = SystemPrompts.withCloudCapabilities(base, definitions, required = true)
+        assertTrue(requiredPrompt.contains("This message explicitly requires Cloud"))
+        assertTrue(requiredPrompt.contains("does not grant background-task permission"))
         assertEquals(base, SystemPrompts.withCloudCapabilities(base, emptyList(), required = false))
+    }
+
+    @Test
+    fun mcpOnlyDoesNotAdvertiseLinuxExecutionAndBackgroundRequiresItsSchema() {
+        val mcp = ToolDefinition("mcp__fixture", "Fixture MCP", kotlinx.serialization.json.JsonObject(emptyMap()))
+        val prompt = SystemPrompts.withCloudCapabilities("BASE", listOf(mcp), required = false)
+        assertTrue(prompt.contains("remote MCP services bound to the selected Infinite Cloud server"))
+        assertFalse(prompt.contains("Linux server"))
+        assertFalse(prompt.contains("120 seconds"))
+        assertFalse(prompt.contains("cloud_register_artifact"))
+        assertFalse(prompt.contains("cloud_create_task"))
+
+        val taskOptions = ToolOptions(false, false, enableInfiniteCloud = true, cloudServerId = "server", allowCloudTaskCreation = true)
+        val mixed = SystemPrompts.withCloudCapabilities("BASE", infiniteCloudToolDefinitions(taskOptions) + mcp, required = false)
+        assertTrue(mixed.contains("The attached mcp__ tools"))
+        assertTrue(mixed.contains("Use cloud_create_task only when the current user explicitly asks"))
     }
 
     @Test

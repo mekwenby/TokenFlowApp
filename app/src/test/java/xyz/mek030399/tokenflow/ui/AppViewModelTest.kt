@@ -52,6 +52,7 @@ import xyz.mek030399.tokenflow.data.ProviderConfig
 import xyz.mek030399.tokenflow.data.ProviderDraft
 import xyz.mek030399.tokenflow.data.ProviderRequestHeader
 import xyz.mek030399.tokenflow.data.ProviderHeaderTemplate
+import xyz.mek030399.tokenflow.data.ProviderHeaderTemplates
 import xyz.mek030399.tokenflow.data.ConfigurationException
 import xyz.mek030399.tokenflow.data.ProviderEditorData
 import xyz.mek030399.tokenflow.data.ProviderProtocol
@@ -156,7 +157,7 @@ class AppViewModelTest {
         val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
         val coordinator = GenerationCoordinator(applicationScope)
         val fake = FakeChatDataSource(true).apply {
-            val server = cloudServer("managed-required", "/srv")
+            val server = cloudServer("managed-cloud", "/srv")
             cloudServers += server
             conversations += Conversation(id = "failed-background", model = model.id, enableInfiniteCloud = true, cloudServerId = server.id)
             sendMessageFailureBeforeUser = IllegalStateException("prepare failed")
@@ -168,13 +169,11 @@ class AppViewModelTest {
         advanceUntilIdle()
         val attachment = cameraDraft("background-draft")
         viewModel.setComposerText("Original question")
-        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.REQUIRED)
         viewModel.addAttachments(listOf(attachment))
         assertTrue(viewModel.send("Original question"))
         advanceUntilIdle()
         assertEquals("Original question", viewModel.state.value.composerText)
-        assertEquals(CloudExecutionMode.REQUIRED, viewModel.state.value.composerCloudExecutionMode)
-        assertEquals(CloudExecutionMode.REQUIRED, fake.sentRequest?.cloudExecutionMode)
+        assertEquals(CloudExecutionMode.AUTO, fake.sentRequest?.cloudExecutionMode)
         assertEquals(listOf(attachment), viewModel.state.value.pendingAttachments)
         assertFalse(attachment in fake.discardedAttachments)
         fake.sendMessageFailureBeforeUser = null
@@ -182,7 +181,6 @@ class AppViewModelTest {
         advanceUntilIdle()
         assertEquals(2, fake.sendMessageCalls)
         assertEquals("", viewModel.state.value.composerText)
-        assertEquals(CloudExecutionMode.AUTO, viewModel.state.value.composerCloudExecutionMode)
         assertTrue(attachment in fake.discardedAttachments)
         owner.clear()
         applicationScope.cancel()
@@ -345,7 +343,7 @@ class AppViewModelTest {
     fun managedNewConversationCreationFailureRestoresOriginalDraftWithoutCallingAModel() = runTest(dispatcher) {
         val applicationScope = CoroutineScope(SupervisorJob() + dispatcher)
         val coordinator = GenerationCoordinator(applicationScope)
-        val server = cloudServer("managed-new-required", "/srv")
+        val server = cloudServer("managed-new-cloud", "/srv")
         val fake = FakeChatDataSource(true).apply {
             createConversationFailure = IllegalStateException("create failed")
             cloudServers += server
@@ -354,11 +352,9 @@ class AppViewModelTest {
         val owner = ViewModelStore().apply { put("app", viewModel) }
         advanceUntilIdle()
         viewModel.saveToolSettings(false, false, false, false, true, server.id)
-        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.REQUIRED)
         viewModel.send("Keep this input")
         advanceUntilIdle()
         assertEquals("Keep this input", viewModel.state.value.composerText)
-        assertEquals(CloudExecutionMode.REQUIRED, viewModel.state.value.composerCloudExecutionMode)
         assertTrue(fake.conversations.isEmpty())
         assertEquals(0, fake.sendMessageCalls)
         assertEquals(UiText.Dynamic("create failed"), viewModel.state.value.notice)
@@ -689,7 +685,7 @@ class AppViewModelTest {
     }
 
     @Test
-    fun providerHeaderTemplateOnlyChangesHeadersAndTestsTheUnsavedDraft() = runTest(dispatcher) {
+    fun applyingHeaderEditorChangesOnlyHeadersAndTestsTheUnsavedDraft() = runTest(dispatcher) {
         val fake = FakeChatDataSource(true)
         val viewModel = AppViewModel(fake)
         advanceUntilIdle()
@@ -704,7 +700,7 @@ class AppViewModelTest {
         viewModel.updateProviderDraft(original)
         viewModel.addManualModel("manual-model")
         val selected = viewModel.state.value.providerEditor!!.selectedModels
-        viewModel.applyProviderHeaderTemplate(ProviderHeaderTemplate.CLAUDE_CODE)
+        viewModel.updateProviderRequestHeaders(ProviderHeaderTemplates.apply(original.requestHeaders, ProviderHeaderTemplate.CLAUDE_CODE))
         val templated = viewModel.state.value.providerEditor!!
         assertEquals(original.copy(requestHeaders = templated.draft.requestHeaders), templated.draft)
         assertEquals(selected, templated.selectedModels)
@@ -739,8 +735,6 @@ class AppViewModelTest {
         assertTrue(busy.busy)
         viewModel.updateProviderDraft(busy.draft.copy(baseUrl = "https://changed.example.test"))
         viewModel.updateProviderRequestHeaders(emptyList())
-        viewModel.applyProviderHeaderTemplate(ProviderHeaderTemplate.PI)
-        viewModel.addProviderRequestHeader()
         viewModel.toggleProviderModel(RemoteModel("other"))
         viewModel.addManualModel("other")
         viewModel.updateSelectedModel(fake.model.id, "changed", 4, true)
@@ -2580,7 +2574,7 @@ class AppViewModelTest {
     }
 
     @Test
-    fun requiredCloudModeBelongsToEachDraftAndResetsOnlyAfterAcceptance() = runTest(dispatcher) {
+    fun cloudEnabledDraftUsesAutomaticModeForPreviewAndSend() = runTest(dispatcher) {
         val server = cloudServer("draft-cloud", "/srv")
         val first = Conversation(id = "cloud-first", model = "model-1", enableInfiniteCloud = true, cloudServerId = server.id)
         val second = first.copy(id = "cloud-second")
@@ -2594,35 +2588,31 @@ class AppViewModelTest {
         viewModel.openConversation(first.id)
         advanceUntilIdle()
         viewModel.setComposerText("create the report")
-        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.REQUIRED)
         viewModel.openConversation(second.id)
         advanceUntilIdle()
-        assertEquals(CloudExecutionMode.AUTO, viewModel.state.value.composerCloudExecutionMode)
+        assertEquals("", viewModel.state.value.composerText)
         viewModel.openConversation(first.id)
         advanceUntilIdle()
-        assertEquals(CloudExecutionMode.REQUIRED, viewModel.state.value.composerCloudExecutionMode)
 
         viewModel.openContextManager()
         advanceUntilIdle()
-        assertEquals(CloudExecutionMode.REQUIRED, fake.contextPreviewRequest?.cloudExecutionMode)
+        assertEquals(CloudExecutionMode.AUTO, fake.contextPreviewRequest?.cloudExecutionMode)
         assertEquals("create the report", fake.contextPreviewRequest?.content)
         viewModel.closeContextManager()
 
         assertTrue(viewModel.send("create the report"))
         advanceUntilIdle()
-        assertEquals(CloudExecutionMode.REQUIRED, fake.sentRequest?.cloudExecutionMode)
-        assertEquals(CloudExecutionMode.REQUIRED, viewModel.state.value.composerCloudExecutionMode)
+        assertEquals(CloudExecutionMode.AUTO, fake.sentRequest?.cloudExecutionMode)
         assertEquals("create the report", viewModel.state.value.composerText)
 
         fake.sendMessageFailureBeforeUser = null
         assertTrue(viewModel.send("create the report"))
         advanceUntilIdle()
-        assertEquals(CloudExecutionMode.AUTO, viewModel.state.value.composerCloudExecutionMode)
         assertEquals("", viewModel.state.value.composerText)
     }
 
     @Test
-    fun requiredCloudModeCannotBeSelectedWithoutAnEnabledServerAndToolBudget() = runTest(dispatcher) {
+    fun cloudEnabledChatWithZeroToolBudgetCanStillSend() = runTest(dispatcher) {
         val server = cloudServer("required-budget", "/srv")
         val fake = FakeChatDataSource(withModel = true).apply {
             cloudServers += server
@@ -2631,18 +2621,16 @@ class AppViewModelTest {
         }
         val viewModel = AppViewModel(fake)
         advanceUntilIdle()
-        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.REQUIRED)
-        assertEquals(CloudExecutionMode.AUTO, viewModel.state.value.composerCloudExecutionMode)
-        assertEquals(UiText.Resource(R.string.cloud_execution_enable_first), viewModel.state.value.notice)
         viewModel.openConversation("budget-zero")
         advanceUntilIdle()
-        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.REQUIRED)
-        assertEquals(CloudExecutionMode.AUTO, viewModel.state.value.composerCloudExecutionMode)
-        assertEquals(UiText.Resource(R.string.cloud_execution_budget_zero), viewModel.state.value.notice)
+        assertEquals(0, viewModel.state.value.config.maxToolCalls)
+        assertTrue(viewModel.send("Explain without running"))
+        advanceUntilIdle()
+        assertEquals(CloudExecutionMode.AUTO, fake.sentRequest?.cloudExecutionMode)
     }
 
     @Test
-    fun pendingCloudSettingsBlockOnlyTheirConversationAndFailurePreservesRequiredDraft() = runTest(dispatcher) {
+    fun pendingCloudSettingsBlockOnlyTheirConversationAndFailurePreservesDraft() = runTest(dispatcher) {
         val server = cloudServer("pending-cloud", "/srv")
         val first = Conversation(id = "settings-first", model = "model-1", enableInfiniteCloud = true, cloudServerId = server.id)
         val second = first.copy(id = "settings-second")
@@ -2659,7 +2647,6 @@ class AppViewModelTest {
         viewModel.openConversation(first.id)
         advanceUntilIdle()
         viewModel.setComposerText("keep this")
-        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.REQUIRED)
         viewModel.saveToolSettings(false, true, false, false, false, null)
         runCurrent()
         assertTrue(viewModel.state.value.toolSettingsPending)
@@ -2668,7 +2655,6 @@ class AppViewModelTest {
         runCurrent()
         assertEquals(0, fake.sendMessageCalls)
         assertEquals(0, fake.regenerateCalls)
-        assertEquals(CloudExecutionMode.REQUIRED, viewModel.state.value.composerCloudExecutionMode)
 
         viewModel.openConversation(second.id)
         runCurrent()
@@ -2683,9 +2669,6 @@ class AppViewModelTest {
         assertFalse(viewModel.state.value.toolSettingsPending)
         assertTrue(viewModel.state.value.config.enableInfiniteCloud)
         assertEquals("keep this", viewModel.state.value.composerText)
-        assertEquals(CloudExecutionMode.REQUIRED, viewModel.state.value.composerCloudExecutionMode)
-        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.AUTO)
-        assertEquals(CloudExecutionMode.AUTO, viewModel.state.value.composerCloudExecutionMode)
     }
 
     @Test
@@ -2723,9 +2706,7 @@ class AppViewModelTest {
         val attachment = PendingAttachment("content://fixture/report", "report.txt", "text/plain")
         viewModel.setComposerText("keep this draft")
         viewModel.addAttachments(listOf(attachment))
-        viewModel.setComposerCloudExecutionMode(CloudExecutionMode.REQUIRED)
         val draftBeforeDisabling = viewModel.state.value.drafts.getValue("conversation-cloud")
-        assertEquals(CloudExecutionMode.REQUIRED, draftBeforeDisabling.cloudExecutionMode)
         fake.conversationWrites.clear()
         viewModel.saveToolSettings(false, true, true, true, false, server.id)
         advanceUntilIdle()
@@ -2733,8 +2714,7 @@ class AppViewModelTest {
         assertEquals(false, disabled.enableInfiniteCloud)
         assertEquals(null, disabled.cloudServerId)
         assertTrue(disabled.updateCloudServerId)
-        assertEquals(draftBeforeDisabling.copy(cloudExecutionMode = CloudExecutionMode.AUTO),
-            viewModel.state.value.drafts.getValue("conversation-cloud"))
+        assertEquals(draftBeforeDisabling, viewModel.state.value.drafts.getValue("conversation-cloud"))
         assertEquals(listOf(attachment), viewModel.state.value.pendingAttachments)
         assertTrue(viewModel.send("keep this draft"))
         advanceUntilIdle()

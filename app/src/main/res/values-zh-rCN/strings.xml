@@ -51,6 +51,7 @@
     <string name="thinking_medium">中</string>
     <string name="thinking_high">高</string>
     <string name="system_prompt">系统提示词</string>
+    <string name="system_prompt_empty">未设置系统提示词</string>
     <string name="default_system_prompt">一念通流默认提示词</string>
     <string name="nickname">我的昵称</string>
     <string name="user_avatar">用户头像（本地）</string>

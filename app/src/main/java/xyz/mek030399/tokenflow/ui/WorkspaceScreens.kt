@@ -783,7 +783,11 @@ private fun AgentEditor(agent: AgentProfile, state: AppUiState, onClose: () -> U
             OutlinedButton(onClick = { modelMenu = true }, modifier = Modifier.fillMaxWidth()) { Text(state.models.firstOrNull { it.id == draft.modelId }?.displayName ?: stringResource(R.string.select_model), Modifier.weight(1f)) }
             DropdownMenu(modelMenu, { modelMenu = false }) { state.models.forEach { model -> DropdownMenuItem({ Text(model.displayName) }, { draft = draft.copy(modelId = model.id); modelMenu = false }) } }
         }
-        OutlinedTextField(draft.systemPrompt, { draft = draft.copy(systemPrompt = it) }, label = { Text(stringResource(R.string.system_prompt)) }, minLines = 5, maxLines = 12, modifier = Modifier.fillMaxWidth())
+        SystemPromptEditorEntry(
+            value = draft.systemPrompt,
+            onValueChange = { draft = draft.copy(systemPrompt = it) },
+            modifier = Modifier.testTag("agent_system_prompt"),
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { listOf("off", "low", "medium", "high").forEach { effort -> FilterChip(draft.thinkingEffort == effort, { draft = draft.copy(thinkingEffort = effort) }, label = { Text(effort) }) } }
         Text("${stringResource(R.string.max_tool_calls)}: ${draft.maxToolCalls}")
         Slider(draft.maxToolCalls.toFloat(), { draft = draft.copy(maxToolCalls = it.roundToInt()) }, valueRange = 0f..20f, steps = 19)

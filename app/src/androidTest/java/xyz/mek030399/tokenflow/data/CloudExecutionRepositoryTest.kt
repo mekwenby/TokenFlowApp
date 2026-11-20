@@ -110,17 +110,41 @@ class CloudExecutionRepositoryTest {
     }
 
     @Test
-    fun agentConversationUsesTheSameCloudGuidanceAndRequiredMode() = runBlocking {
+    fun agentConversationAutomaticallyOffersCloudToolsAndPreservesRoleInstructions() = runBlocking {
         val agent = repository.saveAgent(AgentProfile(id = UUID.randomUUID().toString(), name = "Cloud agent",
             modelId = model.id, systemPrompt = "Keep this complete role", enableInfiniteCloud = true, cloudServerId = server.id))
         val conversation = repository.createConversationFromAgent(agent.id)
         dao.putConversation(conversation.copy(title = "Agent fixture").toEntity())
-        repository.sendMessage(conversation.id, request()).toList()
+        repository.sendMessage(conversation.id, request(CloudExecutionMode.AUTO)).toList()
         val call = gateway.requests.first()
-        assertEquals(ToolChoice.REQUIRED, call.toolChoice)
+        assertEquals(ToolChoice.AUTO, call.toolChoice)
         assertTrue(call.systemPrompt.contains("Keep this complete role"))
         assertTrue(call.systemPrompt.contains("Current Infinite Cloud execution capabilities"))
+        assertFalse(call.systemPrompt.contains("This message explicitly requires Cloud"))
         assertEquals(listOf("cloud_run_python"), call.tools.map(ToolDefinition::name))
+    }
+
+    @Test
+    fun autoChatAndPreviewOmitCloudWhenCredentialsAreMissingOrBudgetIsZero() = runBlocking {
+        val enabled = conversation()
+        val budgetless = conversation(budget = 0)
+        val autoRequest = request(CloudExecutionMode.AUTO)
+        val available = repository.contextPreview(enabled.id, autoRequest)
+        assertEquals(listOf("cloud_run_python"), available.tools.map(ToolDefinition::name))
+        assertTrue(available.systemPrompt.contains("user's selected Linux server"))
+
+        val noBudget = repository.contextPreview(budgetless.id, autoRequest)
+        secrets.remove(secrets.cloudPrivateKeyName(server.id))
+        val noKey = repository.contextPreview(enabled.id, autoRequest)
+        listOf(noBudget, noKey).forEach { preview ->
+            assertTrue(preview.tools.isEmpty())
+            assertFalse(preview.systemPrompt.contains("Current Infinite Cloud execution capabilities"))
+        }
+        repository.sendMessage(enabled.id, autoRequest).toList()
+        val call = gateway.requests.single()
+        assertEquals(ToolChoice.AUTO, call.toolChoice)
+        assertTrue(call.tools.isEmpty())
+        assertFalse(call.systemPrompt.contains("Current Infinite Cloud execution capabilities"))
     }
 
     @Test

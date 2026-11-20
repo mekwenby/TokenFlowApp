@@ -1,17 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="provider_headers_title">Custom request headers (%1$d)</string>
-    <string name="provider_headers_hint">Enabled headers apply to this provider’s model requests and model discovery. Disabling a row keeps its saved value.</string>
-    <string name="provider_header_add">Add header</string>
+    <string name="provider_headers_edit_json">Edit JSON</string>
+    <string name="provider_headers_json_title">Request headers JSON</string>
+    <string name="provider_headers_apply_json">Apply</string>
+    <string name="provider_headers_format_json">Format</string>
+    <string name="provider_headers_json_hint">[{\"name\":\"X-Header\",\"value\":\"text\",\"enabled\":true}]</string>
+    <string name="provider_header_json_invalid">Enter a JSON array with string name and value fields and an optional Boolean enabled field.</string>
     <string name="provider_header_apply_template">Apply template</string>
-    <string name="provider_header_template_hint">Templates replace previous template rows and headers with matching names. Other custom headers stay in this draft. Review and save to apply.</string>
     <string name="provider_header_template_claude_code">Claude Code</string>
     <string name="provider_header_template_opencode">OpenCode</string>
     <string name="provider_header_template_pi">Pi</string>
-    <string name="provider_header_enabled">Enabled</string>
-    <string name="provider_header_name">Header name</string>
-    <string name="provider_header_value">Header value</string>
-    <string name="provider_headers_custom_auth">An enabled Authorization, x-api-key, or api-key header overrides automatic authentication. You may leave the API key blank.</string>
     <string name="provider_headers_api_key_optional">Optional while a custom authentication header is enabled.</string>
     <string name="provider_headers_save_before_vision">Save provider changes before testing vision. Vision tests use the saved provider configuration.</string>
     <string name="provider_header_invalid_name">A request header name is invalid.</string>

@@ -1,17 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="provider_headers_title">自定义请求头（%1$d）</string>
-    <string name="provider_headers_hint">已启用的请求头会用于此供应商的模型请求和模型列表获取。关闭某行会保留已保存的值。</string>
-    <string name="provider_header_add">添加请求头</string>
+    <string name="provider_headers_edit_json">编辑 JSON</string>
+    <string name="provider_headers_json_title">请求头 JSON</string>
+    <string name="provider_headers_apply_json">应用</string>
+    <string name="provider_headers_format_json">格式化</string>
+    <string name="provider_headers_json_hint">[{\"name\":\"X-Header\",\"value\":\"text\",\"enabled\":true}]</string>
+    <string name="provider_header_json_invalid">请输入 JSON 数组。name 和 value 为字符串，enabled 为可选布尔值。</string>
     <string name="provider_header_apply_template">应用模板</string>
-    <string name="provider_header_template_hint">应用模板会替换旧模板行和同名请求头，其余自定义行保留。请检查草稿并保存后生效。</string>
     <string name="provider_header_template_claude_code">Claude Code</string>
     <string name="provider_header_template_opencode">OpenCode</string>
     <string name="provider_header_template_pi">Pi</string>
-    <string name="provider_header_enabled">启用</string>
-    <string name="provider_header_name">请求头名称</string>
-    <string name="provider_header_value">请求头值</string>
-    <string name="provider_headers_custom_auth">启用 Authorization、x-api-key 或 api-key 请求头后，会覆盖自动认证，此时 API Key 可留空。</string>
     <string name="provider_headers_api_key_optional">已启用自定义认证请求头，API Key 可留空。</string>
     <string name="provider_headers_save_before_vision">请先保存供应商修改，再测试视觉能力。视觉测试使用已保存的供应商配置。</string>
     <string name="provider_header_invalid_name">请求头名称无效。</string>

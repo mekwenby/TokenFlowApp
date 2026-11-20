@@ -51,8 +51,6 @@ import xyz.mek030399.tokenflow.data.ProcessEvent
 import xyz.mek030399.tokenflow.data.ProviderConfig
 import xyz.mek030399.tokenflow.data.ProviderDraft
 import xyz.mek030399.tokenflow.data.ProviderRequestHeader
-import xyz.mek030399.tokenflow.data.ProviderHeaderTemplate
-import xyz.mek030399.tokenflow.data.ProviderHeaderTemplates
 import xyz.mek030399.tokenflow.data.RemoteModel
 import xyz.mek030399.tokenflow.data.SettingMode
 import xyz.mek030399.tokenflow.data.SendMessageRequest
@@ -63,7 +61,6 @@ import xyz.mek030399.tokenflow.data.PendingAttachment
 import xyz.mek030399.tokenflow.data.UrlReadDiagnostic
 import xyz.mek030399.tokenflow.data.VisionStatus
 import xyz.mek030399.tokenflow.data.CloudServerProfile
-import xyz.mek030399.tokenflow.data.CloudExecutionMode
 import xyz.mek030399.tokenflow.data.CloudServerDraft
 import xyz.mek030399.tokenflow.data.CloudConnectionProbe
 import xyz.mek030399.tokenflow.data.CloudArtifactDelivery
@@ -223,7 +220,6 @@ data class ComposerDraftRecovery(
     val requestId: String,
     val conversationId: String?,
     val content: String,
-    val cloudExecutionMode: CloudExecutionMode = CloudExecutionMode.AUTO,
 )
 
 sealed interface KnowledgePreviewState {
@@ -316,8 +312,6 @@ data class AppUiState(
     val hasModels: Boolean get() = models.isNotEmpty()
     val composerText: String get() = drafts[activeConversationId ?: NEW_DRAFT_KEY]
         ?.takeIf { it.submittedRequestId == null }?.text.orEmpty()
-    val composerCloudExecutionMode: CloudExecutionMode get() = drafts[activeConversationId ?: NEW_DRAFT_KEY]
-        ?.takeIf { it.submittedRequestId == null }?.cloudExecutionMode ?: CloudExecutionMode.AUTO
     val toolSettingsPending: Boolean get() = activeConversationId in pendingToolSettingsConversationIds
 }
 
@@ -413,42 +407,6 @@ class AppViewModel internal constructor(
         persistDrafts()
     }
 
-    fun setComposerCloudExecutionMode(mode: CloudExecutionMode) {
-        val current = mutableState.value
-        if (current.activeGeneration?.active == true) return
-        if (mode == CloudExecutionMode.REQUIRED) {
-            cloudExecutionUnavailableReason(current)?.let { error ->
-                mutableState.update { it.copy(notice = error) }
-                return
-            }
-        }
-        mutableState.update { state ->
-            val key = state.activeConversationId ?: NEW_DRAFT_KEY
-            val previous = state.drafts[key]?.takeIf { it.submittedRequestId == null }
-                ?: ComposerDraft(attachments = state.pendingAttachments)
-            state.copy(drafts = state.drafts + (key to previous.copy(cloudExecutionMode = mode)))
-        }
-        persistDrafts()
-    }
-
-    private fun AppUiState.resetCloudDraftIfDisabled(conversationId: String?, cloudEnabled: Boolean): AppUiState {
-        if (cloudEnabled) return this
-        val key = conversationId ?: NEW_DRAFT_KEY
-        val draft = drafts[key]?.takeIf {
-            it.submittedRequestId == null && it.cloudExecutionMode == CloudExecutionMode.REQUIRED
-        } ?: return this
-        return copy(drafts = drafts + (key to draft.copy(cloudExecutionMode = CloudExecutionMode.AUTO)))
-    }
-
-    private fun cloudExecutionUnavailableReason(state: AppUiState): UiText? = when {
-        state.toolSettingsPending -> uiText(R.string.cloud_execution_settings_saving)
-        state.config.maxToolCalls <= 0 -> uiText(R.string.cloud_execution_budget_zero)
-        !state.config.enableInfiniteCloud -> uiText(R.string.cloud_execution_enable_first)
-        state.cloudServers.none { it.id == state.config.cloudServerId && it.keyConfigured && it.hostKeyFingerprint != null } ->
-            uiText(R.string.cloud_execution_server_unavailable)
-        else -> null
-    }
-
     private fun rememberActiveDraft() {
         mutableState.update { state ->
             val key = state.activeConversationId ?: NEW_DRAFT_KEY
@@ -540,8 +498,7 @@ class AppViewModel internal constructor(
                         else -> null
                     }
                     val state = mutableState.value
-                    val existing = if (state.activeConversationId == id) ComposerDraft(state.composerText, state.pendingAttachments,
-                        cloudExecutionMode = state.composerCloudExecutionMode)
+                    val existing = if (state.activeConversationId == id) ComposerDraft(state.composerText, state.pendingAttachments)
                         else state.drafts[id ?: NEW_DRAFT_KEY] ?: ComposerDraft()
                     val attachments = existing.attachments + currentShare.files.mapNotNull { it.attachment }
                     require(attachments.size <= 5 && attachments.sumOf { it.sizeBytes.coerceAtLeast(0) } <= 20L * 1024 * 1024) {
@@ -668,7 +625,7 @@ class AppViewModel internal constructor(
         val state = mutableState.value
         val request = SendMessageRequest(state.composerText, state.enableSearch, state.enableRead, state.enableKnowledge,
             state.pendingKnowledgeChunkIds, TimeZone.getDefault().id, UUID.randomUUID().toString(), state.pendingAttachments,
-            knowledgeScope = state.config.knowledgeScope, cloudExecutionMode = state.composerCloudExecutionMode)
+            knowledgeScope = state.config.knowledgeScope)
         val preview = repository.contextPreview(id, request)
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
         if (mutableState.value.activeConversationId == id && mutableState.value.contextOpen) mutableState.update { it.copy(contextPreview = preview) }
@@ -1540,7 +1497,7 @@ class AppViewModel internal constructor(
         }
         val cloudEnabled = cloud && readyServerId != null
         mutableState.update {
-            val updated = it.copy(
+            it.copy(
                 enableSearch = search,
                 enableRead = read,
                 enableKnowledge = knowledge,
@@ -1553,18 +1510,13 @@ class AppViewModel internal constructor(
                     cloudServerId = readyServerId,
                 ),
             )
-            if (initialState.activeConversationId == null) updated.resetCloudDraftIfDisabled(null, cloudEnabled) else updated
         }
-        val id = initialState.activeConversationId
-        if (id == null) {
-            if (!cloudEnabled) persistDrafts()
-            return
-        }
+        val id = initialState.activeConversationId ?: return
         val previousConversation = initialState.conversations.firstOrNull { it.id == id }
         val applyPersisted: (Conversation) -> Unit = { updated ->
             mutableState.update {
                 val conversations = upsertConversation(it.conversations, updated)
-                val state = if (it.activeConversationId != id) it.copy(conversations = conversations)
+                if (it.activeConversationId != id) it.copy(conversations = conversations)
                 else it.copy(
                     conversations = conversations,
                     config = updated.toConfig(),
@@ -1572,9 +1524,7 @@ class AppViewModel internal constructor(
                     enableRead = updated.enableRead,
                     enableKnowledge = updated.enableKnowledge,
                 )
-                state.resetCloudDraftIfDisabled(id, updated.enableInfiniteCloud)
             }
-            if (!updated.enableInfiniteCloud) persistDrafts()
         }
         saveConversationToolSettings(
             id,
@@ -1689,9 +1639,7 @@ class AppViewModel internal constructor(
         if (id == null) {
             mutableState.update {
                 it.copy(config = normalized, notice = uiText(R.string.settings_saved))
-                    .resetCloudDraftIfDisabled(null, normalized.enableInfiniteCloud)
             }
-            if (!normalized.enableInfiniteCloud) persistDrafts()
             return
         }
         if (mutableState.value.generations[id]?.active == true) {
@@ -1707,9 +1655,8 @@ class AppViewModel internal constructor(
                             conversations = upsertConversation(it.conversations, updated),
                             config = if (it.activeConversationId == id) updated.toConfig() else it.config,
                             notice = uiText(R.string.settings_saved),
-                        ).resetCloudDraftIfDisabled(id, updated.enableInfiniteCloud)
+                        )
                     }
-                    if (!updated.enableInfiniteCloud) persistDrafts()
                 }
                 .onFailure(::handleError)
         }
@@ -2247,12 +2194,6 @@ class AppViewModel internal constructor(
             mutableState.update { it.copy(notice = uiText(R.string.cloud_execution_settings_saving)) }
             return false
         }
-        if (current.composerCloudExecutionMode == CloudExecutionMode.REQUIRED) {
-            cloudExecutionUnavailableReason(current)?.let { error ->
-                mutableState.update { it.copy(notice = error) }
-                return false
-            }
-        }
         if ((message.isEmpty() && current.pendingAttachments.isEmpty()) || current.models.isEmpty()) return false
         val initialConversationId = current.activeConversationId
         if (initialConversationId == null && isGenerating(NEW_DRAFT_KEY)) return false
@@ -2281,7 +2222,6 @@ class AppViewModel internal constructor(
         val transferredAttachments = current.pendingAttachments
         val request = SendMessageRequest(
             content = message,
-            cloudExecutionMode = current.composerCloudExecutionMode,
             enableSearch = current.enableSearch,
             enableRead = current.enableRead,
             enableKnowledge = current.enableKnowledge,
@@ -2292,8 +2232,7 @@ class AppViewModel internal constructor(
             attachments = transferredAttachments,
         )
         val draftKey = initialConversationId ?: NEW_DRAFT_KEY
-        mutableState.update { it.copy(drafts = it.drafts + (draftKey to ComposerDraft(content, transferredAttachments, request.requestId,
-            request.cloudExecutionMode))) }
+        mutableState.update { it.copy(drafts = it.drafts + (draftKey to ComposerDraft(content, transferredAttachments, request.requestId))) }
         persistDrafts()
         val transferredUris = transferredAttachments.mapTo(mutableSetOf()) { it.uri }
         mutableState.update { state ->
@@ -2325,7 +2264,7 @@ class AppViewModel internal constructor(
                         config = if (stillOnDraft) created.toConfig() else state.config,
                         messages = state.messages + (created.id to emptyList()),
                         drafts = (if (state.drafts[NEW_DRAFT_KEY]?.submittedRequestId == request.requestId) state.drafts - NEW_DRAFT_KEY else state.drafts) +
-                            (created.id to ComposerDraft(content, transferredAttachments, request.requestId, request.cloudExecutionMode)),
+                            (created.id to ComposerDraft(content, transferredAttachments, request.requestId)),
                     )
                 }
                 created.id
@@ -2339,7 +2278,7 @@ class AppViewModel internal constructor(
             launchGeneration(
                 id = conversationId,
                 transferredAttachments = transferredAttachments,
-                transferredDraft = ComposerDraftRecovery(request.requestId, conversationId, content, request.cloudExecutionMode),
+                transferredDraft = ComposerDraftRecovery(request.requestId, conversationId, content),
             ) { appRepository.sendMessage(conversationId, request) }
         }
         return true
@@ -2434,16 +2373,6 @@ class AppViewModel internal constructor(
     fun updateProviderRequestHeaders(rows: List<ProviderRequestHeader>) {
         val editor = mutableState.value.providerEditor ?: return
         updateProviderDraft(editor.draft.copy(requestHeaders = rows))
-    }
-
-    fun addProviderRequestHeader() {
-        val editor = mutableState.value.providerEditor ?: return
-        if (!editor.busy) updateProviderRequestHeaders(editor.draft.requestHeaders + ProviderRequestHeader())
-    }
-
-    fun applyProviderHeaderTemplate(template: ProviderHeaderTemplate) {
-        val editor = mutableState.value.providerEditor ?: return
-        if (!editor.busy) updateProviderRequestHeaders(ProviderHeaderTemplates.apply(editor.draft.requestHeaders, template))
     }
 
     fun setProviderModelSearch(value: String) = mutableState.update { state ->
@@ -2934,7 +2863,7 @@ class AppViewModel internal constructor(
                                 (allowManagedSelectionRestore && snapshot.runId in initialRestoreRuns &&
                                     snapshot.active && snapshot.runId == latestActiveNewRun &&
                                     (provisional == null || (provisional.text.isBlank() && provisional.attachments.isEmpty() &&
-                                        provisional.cloudExecutionMode == CloudExecutionMode.AUTO && provisional.submittedRequestId == null))))) {
+                                        provisional.submittedRequestId == null))))) {
                                 state = state.copy(activeConversationId = id)
                             }
                         }
@@ -3005,7 +2934,7 @@ class AppViewModel internal constructor(
         val coordinator = requireNotNull(generationCoordinator)
         val appRepository = repository
         val draftStore = shareDraftStore
-        val submitted = ComposerDraft(originalText, request.attachments, request.requestId, request.cloudExecutionMode)
+        val submitted = ComposerDraft(originalText, request.attachments, request.requestId)
         try {
             val started = coordinator.startResolvingConversation(
                 provisionalConversationId = NEW_DRAFT_KEY,
@@ -3053,7 +2982,7 @@ class AppViewModel internal constructor(
         val coordinator = requireNotNull(generationCoordinator)
         val appRepository = repository
         val draftStore = shareDraftStore
-        val submittedDraft = transferredDraft?.let { ComposerDraft(it.content, transferredAttachments, it.requestId, it.cloudExecutionMode) }
+        val submittedDraft = transferredDraft?.let { ComposerDraft(it.content, transferredAttachments, it.requestId) }
         try {
             val started = coordinator.start(
                 conversationId = id,
@@ -3309,19 +3238,6 @@ class AppViewModel internal constructor(
         else -> UiText.Dynamic(error.message ?: "Request failed")
     }
 
-    private fun providerHeaderFailureText(message: String?): UiText? = when (message) {
-        "Invalid request header name" -> uiText(R.string.provider_header_invalid_name)
-        "Invalid request header value" -> uiText(R.string.provider_header_invalid_value)
-        "This request header is managed by the HTTP transport" -> uiText(R.string.provider_header_managed)
-        "Enabled request header names must be unique" -> uiText(R.string.provider_header_duplicate)
-        "Custom authentication header values must not be blank" -> uiText(R.string.provider_header_auth_blank)
-        "API key is required" -> uiText(R.string.provider_header_api_key_required)
-        "Invalid API key header value" -> uiText(R.string.provider_header_invalid_api_key)
-        "Saved provider request headers are invalid" -> uiText(R.string.provider_header_saved_invalid)
-        "Invalid request header row ID" -> uiText(R.string.provider_header_invalid_id)
-        "Request header row IDs must be unique" -> uiText(R.string.provider_header_duplicate_id)
-        else -> null
-    }
 }
 
 private suspend fun settleManagedSubmittedDraft(

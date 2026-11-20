@@ -182,15 +182,22 @@ class TokenFlowAppTest {
             composeRule.waitUntil(5_000) { viewModel.state.value.config.systemPrompt == prompt }
 
             composeRule.onNodeWithTag(UiTestTags.SETTINGS).performClick()
-            val editor = composeRule.onNodeWithTag(UiTestTags.CHAT_SYSTEM_PROMPT)
-            editor.performScrollTo().assertIsDisplayed().assert(
+            composeRule.onNodeWithTag(UiTestTags.CHAT_SYSTEM_PROMPT).performScrollTo().performClick()
+            composeRule.onNodeWithTag("system_prompt_fullscreen").assertIsDisplayed()
+            composeRule.onNodeWithTag("system_prompt_text_preview").assertIsDisplayed()
+            composeRule.onNodeWithTag("system_prompt_edit_tab").performClick()
+            val editor = composeRule.onNodeWithTag("system_prompt_text_editor")
+            editor.assertIsDisplayed().assert(
                 SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString(prompt)),
             )
             val editedPrompt = "$prompt\n\n补充：完整保留原始提示词。"
             editor.performTextReplacement(editedPrompt)
             editor.assert(SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString(editedPrompt)))
-            // Controls after the prompt must remain reachable without scrolling
-            // through the entire prompt in the outer settings form.
+            composeRule.onNodeWithTag("system_prompt_preview_tab").performClick()
+            composeRule.onNodeWithTag("system_prompt_text_preview").assertIsDisplayed()
+            composeRule.onNodeWithTag("system_prompt_back").performClick()
+            composeRule.onNodeWithTag("system_prompt_fullscreen").assertDoesNotExist()
+            assertEquals(prompt, fake.conversations.single().systemPrompt)
             composeRule.onNodeWithTag(UiTestTags.CHAT_LINE_SPACING).performScrollTo().assertIsDisplayed()
             composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.save)).performClick()
             composeRule.waitUntil(5_000) {
@@ -200,10 +207,9 @@ class TokenFlowAppTest {
             assertEquals(SettingMode.OVERRIDE, fake.conversations.single().systemPromptMode)
 
             composeRule.onNodeWithTag(UiTestTags.SETTINGS).performClick()
-            composeRule.onNodeWithTag(UiTestTags.CHAT_SYSTEM_PROMPT)
-                .performScrollTo().assertIsDisplayed().assert(
-                    SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString(editedPrompt)),
-                )
+            composeRule.onNodeWithTag(UiTestTags.CHAT_SYSTEM_PROMPT).performScrollTo().performClick()
+            composeRule.onNodeWithTag("system_prompt_edit_tab").performClick()
+            editor.assert(SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString(editedPrompt)))
         } finally { owner.clear() }
     }
 
@@ -223,6 +229,19 @@ class TokenFlowAppTest {
             composeRule.onNodeWithContentDescription(context.getString(xyz.mek030399.tokenflow.R.string.new_agent))
                 .assertIsDisplayed().performClick()
             composeRule.onNodeWithText(context.getString(xyz.mek030399.tokenflow.R.string.agent_name)).assertIsDisplayed()
+            composeRule.onNodeWithTag("agent_system_prompt").performScrollTo().performClick()
+            composeRule.onNodeWithTag("system_prompt_text_preview").assertIsDisplayed()
+            composeRule.onNode(
+                hasText(context.getString(xyz.mek030399.tokenflow.R.string.system_prompt_empty)) and
+                    hasAnyAncestor(hasTestTag("system_prompt_text_preview")),
+            ).assertIsDisplayed()
+            composeRule.onNodeWithTag("system_prompt_edit_tab").performClick()
+            composeRule.onNodeWithTag("system_prompt_text_editor").performTextReplacement("Agent draft prompt")
+            composeRule.onNodeWithTag("system_prompt_back").performClick()
+            composeRule.onNodeWithTag("agent_system_prompt").assertTextEquals(
+                context.getString(xyz.mek030399.tokenflow.R.string.system_prompt),
+                "Agent draft prompt",
+            )
         } finally { owner.clear() }
     }
 

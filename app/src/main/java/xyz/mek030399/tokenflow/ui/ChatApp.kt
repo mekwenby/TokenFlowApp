@@ -234,7 +234,6 @@ import xyz.mek030399.tokenflow.data.PendingAttachment
 import xyz.mek030399.tokenflow.data.PendingAttachmentOrigin
 import xyz.mek030399.tokenflow.data.MimoTtsClient
 import xyz.mek030399.tokenflow.data.ProcessEvent
-import xyz.mek030399.tokenflow.data.CloudExecutionMode
 import xyz.mek030399.tokenflow.data.PromptTemplate
 import xyz.mek030399.tokenflow.data.ProviderDraft
 import xyz.mek030399.tokenflow.data.ProviderHeaderPolicy
@@ -940,8 +939,6 @@ private fun ProviderEditor(state: AppUiState, viewModel: AppViewModel, modifier:
             sessionId = editor.sessionId,
             enabled = !editor.busy,
             onRowsChanged = viewModel::updateProviderRequestHeaders,
-            onAdd = viewModel::addProviderRequestHeader,
-            onApplyTemplate = viewModel::applyProviderHeaderTemplate,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = viewModel::fetchProviderModels, enabled = !editor.busy) {
@@ -1938,20 +1935,14 @@ private fun ChatPane(
             onRemoveAttachment = viewModel::removeAttachment,
             onCameraFailure = viewModel::reportCameraCaptureFailure,
             onDraftRecoveryConsumed = viewModel::consumeComposerDraftRecovery,
-            onCloudExecutionMode = viewModel::setComposerCloudExecutionMode,
-            onCloudConfiguration = {
-                when {
-                    state.toolSettingsPending -> Unit
-                    state.config.maxToolCalls <= 0 -> settings = true
-                    state.cloudServers.none { it.keyConfigured && it.hostKeyFingerprint != null } -> viewModel.openScreen(AppScreen.INFINITE_CLOUD)
-                    else -> tools = true
-                }
-            },
             onSend = viewModel::send,
             onStop = viewModel::stopGeneration,
         )
     }
-    if (tools) ToolsDialog(state, { tools = false }) { search, read, knowledge, process, cloud, serverId ->
+    if (tools) ToolsDialog(state, { tools = false }, onCloudConfiguration = {
+        tools = false
+        viewModel.openScreen(AppScreen.INFINITE_CLOUD)
+    }) { search, read, knowledge, process, cloud, serverId ->
         viewModel.saveToolSettings(search, read, knowledge, process, cloud, serverId)
         tools = false
     }
@@ -2866,8 +2857,6 @@ internal fun Composer(
     onRemoveAttachment: (String) -> Unit,
     onCameraFailure: () -> Unit,
     onDraftRecoveryConsumed: (String) -> Unit,
-    onCloudExecutionMode: (CloudExecutionMode) -> Unit,
-    onCloudConfiguration: () -> Unit,
     onSend: (String) -> Boolean,
     onStop: () -> Unit,
 ) {
@@ -2929,40 +2918,6 @@ internal fun Composer(
             shadowElevation = 1.dp,
         ) {
             Column(Modifier.fillMaxWidth().padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                val requiredCloud = state.composerCloudExecutionMode == CloudExecutionMode.REQUIRED
-                val server = state.cloudServers.firstOrNull { it.id == state.config.cloudServerId }
-                val cloudProblem = when {
-                    state.toolSettingsPending -> R.string.cloud_execution_settings_saving
-                    state.config.maxToolCalls <= 0 -> R.string.cloud_execution_budget_zero
-                    !state.config.enableInfiniteCloud -> R.string.cloud_execution_enable_first
-                    server == null || !server.keyConfigured || server.hostKeyFingerprint == null -> R.string.cloud_execution_server_unavailable
-                    else -> null
-                }
-                if (state.config.enableInfiniteCloud) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    FilterChip(
-                        selected = requiredCloud,
-                        onClick = { onCloudExecutionMode(if (requiredCloud) CloudExecutionMode.AUTO else CloudExecutionMode.REQUIRED) },
-                        enabled = !generating && (requiredCloud || cloudProblem == null),
-                        leadingIcon = { Icon(Icons.Outlined.Cloud, null, Modifier.size(16.dp)) },
-                        trailingIcon = if (requiredCloud) ({ Icon(Icons.Outlined.Close, stringResource(R.string.cloud_execution_cancel), Modifier.size(16.dp)) }) else null,
-                        label = {
-                            Text(
-                                if (requiredCloud && server != null) stringResource(R.string.cloud_execution_required_server, server.name)
-                                else stringResource(R.string.cloud_execution_require),
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            )
-                        },
-                        modifier = Modifier.weight(1f, fill = false).testTag("cloud_execution_mode"),
-                    )
-                    if (cloudProblem != null) TextButton(
-                        onClick = onCloudConfiguration,
-                        enabled = !generating && !state.toolSettingsPending,
-                        modifier = Modifier.weight(1f).testTag("cloud_execution_configure"),
-                        contentPadding = PaddingValues(horizontal = 4.dp),
-                    ) {
-                        Text(stringResource(cloudProblem), style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    }
-                }
                 if (state.pendingAttachments.isNotEmpty()) Row(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -3018,7 +2973,7 @@ internal fun Composer(
                             }
                         },
                         enabled = generating || (!cameraProcessing && !state.toolSettingsPending &&
-                            (!requiredCloud || cloudProblem == null) && (value.isNotBlank() || state.pendingAttachments.isNotEmpty())),
+                            (value.isNotBlank() || state.pendingAttachments.isNotEmpty())),
                         modifier = Modifier.size(44.dp).testTag(UiTestTags.MESSAGE_ACTION),
                     ) {
                         Icon(
@@ -3178,6 +3133,7 @@ private fun formatBytes(value: Long): String = when {
 private fun ToolsDialog(
     state: AppUiState,
     onDismiss: () -> Unit,
+    onCloudConfiguration: () -> Unit,
     onSave: (Boolean, Boolean, Boolean, Boolean, Boolean, String?) -> Unit,
 ) {
     val readyCloudServers = state.cloudServers.filter { it.keyConfigured && it.hostKeyFingerprint != null }
@@ -3196,7 +3152,7 @@ private fun ToolsDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.tools)) },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 ToggleRow(stringResource(R.string.search_web), search, state.exaConfigured) { search = it }
                 if (!state.exaConfigured) Text(stringResource(R.string.exa_required), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 ToggleRow(stringResource(R.string.read_web), read, true) { read = it }
@@ -3216,6 +3172,21 @@ private fun ToolsDialog(
                             )
                         }
                     }
+                    Text(
+                        stringResource(
+                            if (state.config.maxToolCalls <= 0) R.string.cloud_execution_budget_zero
+                            else R.string.cloud_execution_auto,
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (readyCloudServers.isEmpty()) {
+                    TextButton(onClick = onCloudConfiguration) {
+                        Text(stringResource(R.string.cloud_execution_server_unavailable))
+                    }
+                }
+                if (state.toolSettingsPending) {
+                    Text(stringResource(R.string.cloud_execution_settings_saving), style = MaterialTheme.typography.bodySmall)
                 }
             }
         },
@@ -3302,17 +3273,11 @@ private fun SettingsDialog(
                             ) }
                         }
                     }
-                    OutlinedTextField(
+                    SystemPromptEditorEntry(
                         value = effectivePrompt,
                         onValueChange = { draft = draft.copy(systemPrompt = it, systemPromptMode = SettingMode.OVERRIDE) },
-                        enabled = draft.systemPromptMode == SettingMode.OVERRIDE,
-                        label = { Text(stringResource(R.string.system_prompt)) },
-                        minLines = 4,
-                        // Agent prompts can span thousands of lines. Bound the editor's
-                        // viewport so the surrounding scroll layout never measures the
-                        // entire prompt as one exceptionally tall Compose child.
-                        maxLines = 12,
-                        modifier = Modifier.fillMaxWidth().testTag(UiTestTags.CHAT_SYSTEM_PROMPT),
+                        editable = draft.systemPromptMode == SettingMode.OVERRIDE,
+                        modifier = Modifier.testTag(UiTestTags.CHAT_SYSTEM_PROMPT),
                     )
                     OutlinedTextField(value = draft.nickname, onValueChange = { draft = draft.copy(nickname = it) }, label = { Text(stringResource(R.string.nickname)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     Text(stringResource(R.string.user_avatar), style = MaterialTheme.typography.labelLarge)

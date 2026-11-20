@@ -1654,63 +1654,28 @@ class ChatRepository(
                     runCatching { json.decodeFromString<UserMessageMetadata>(user.metadata).cloudExecutionMode }.getOrNull()
                 }?.takeIf { it == CloudExecutionMode.REQUIRED } ?: latest.assistantMetadata(json).cloudExecutionMode,
             )
-            val conversation = requireNotNull(dao.conversation(id)) { "Conversation not found" }.toDomain()
-            validateRequiredCloud(conversation, regenerationRequest.cloudExecutionMode)
-            var stagedServerId: String? = null
-            val remoteAttachments = if (conversation.enableInfiniteCloud && sourceAttachments.isNotEmpty()) {
-                val cloud = requireNotNull(infiniteCloud) { "Infinite Cloud is unavailable" }
-                val serverId = requireNotNull(conversation.cloudServerId) { "Infinite Cloud server is not selected" }
-                stagedServerId = serverId
-                try {
-                    cloud.stageAttachments(
-                        serverId,
-                        regenerationRequest.requestId,
-                        sourceAttachments.map { attachment ->
-                            CloudAttachmentUpload(attachment.id, attachment.fileName, attachment.storedPath)
-                        },
-                    )
-                } catch (failure: Throwable) {
-                    cleanupStagedCloudAttachments(cloud, serverId, regenerationRequest.requestId)
-                    throw failure
-                }
-            } else {
-                emptyList()
-            }
-            var replaced = false
-            try {
-                generateLocked(
-                    conversationId = id,
-                    request = regenerationRequest,
-                    userContent = null,
-                    initialRemoteAttachments = remoteAttachments,
-                    excludedHistoryMessageId = latest.id,
-                    persistTurn = { commit ->
-                        artifactDeliveryLock.withLock {
-                            val oldAttachments = attachmentStore?.forMessages(listOf(latest.id)).orEmpty()
-                            val oldCloudCachePaths = dao.cloudArtifactDeliveriesForMessage(latest.id)
-                                .map(CloudArtifactDeliveryEntity::localCachePath)
-                            currentCoroutineContext().ensureActive()
-                            withContext(NonCancellable) {
-                                commit()
-                                replaced = true
-                                attachmentStore?.deleteFiles(oldAttachments)
-                                oldCloudCachePaths.forEach { path ->
-                                    runCatching { attachmentStore?.deleteCloudArtifactCache(path) }
-                                }
+            generateLocked(
+                conversationId = id,
+                request = regenerationRequest,
+                userContent = null,
+                sourceAttachments = sourceAttachments,
+                excludedHistoryMessageId = latest.id,
+                persistTurn = { commit ->
+                    artifactDeliveryLock.withLock {
+                        val oldAttachments = attachmentStore?.forMessages(listOf(latest.id)).orEmpty()
+                        val oldCloudCachePaths = dao.cloudArtifactDeliveriesForMessage(latest.id)
+                            .map(CloudArtifactDeliveryEntity::localCachePath)
+                        currentCoroutineContext().ensureActive()
+                        withContext(NonCancellable) {
+                            commit()
+                            attachmentStore?.deleteFiles(oldAttachments)
+                            oldCloudCachePaths.forEach { path ->
+                                runCatching { attachmentStore?.deleteCloudArtifactCache(path) }
                             }
                         }
-                    },
-                ).collect { emit(it) }
-            } catch (failure: Throwable) {
-                if (!replaced && stagedServerId != null) {
-                    cleanupStagedCloudAttachments(
-                        requireNotNull(infiniteCloud),
-                        requireNotNull(stagedServerId),
-                        regenerationRequest.requestId,
-                    )
-                }
-                throw failure
-            }
+                    }
+                },
+            ).collect { emit(it) }
         } finally {
             lock.unlock()
         }
@@ -1734,7 +1699,7 @@ class ChatRepository(
         conversationId: String,
         request: SendMessageRequest,
         userContent: String?,
-        initialRemoteAttachments: List<RemoteAttachmentMapping> = emptyList(),
+        sourceAttachments: List<MessageAttachment> = emptyList(),
         excludedHistoryMessageId: String? = null,
         persistTurn: suspend (suspend () -> Unit) -> Unit = { commit -> commit() },
     ): Flow<ChatEvent> = flow {
@@ -1748,7 +1713,7 @@ class ChatRepository(
         try {
         val conversation = requireNotNull(dao.conversation(conversationId)) { "Conversation not found" }.toDomain()
         if (conversation.status == "generating") throw ConfigurationException("Conversation is already generating")
-        validateRequiredCloud(conversation, request.cloudExecutionMode)
+        val cloudServerId = cloudServerForTurn(conversation, request.cloudExecutionMode)
         val effective = effectiveSettings(conversation)
         val model = effective.modelId?.let { dao.model(it) }?.toDomain()
             ?: throw ConfigurationException("The conversation model is unavailable")
@@ -1760,14 +1725,6 @@ class ChatRepository(
             System.currentTimeMillis(),
         )
         val process = mutableListOf<ProcessEvent>()
-        var remoteAttachments: List<RemoteAttachmentMapping> = initialRemoteAttachments
-        if (initialRemoteAttachments.isNotEmpty()) {
-            process += ProcessEvent(
-                type = "cloud_attachments_uploaded",
-                id = "cloud-attachments-$requestId",
-                message = "Uploaded ${initialRemoteAttachments.size} attachment(s) to Infinite Cloud",
-            )
-        }
         val assistantId = UUID.randomUUID().toString()
         userContent?.let { content ->
             val retrieval = knowledgeStore?.let { store ->
@@ -1787,16 +1744,19 @@ class ChatRepository(
                 user = user.copy(metadata = json.encodeToString(metadata))
             }
             preparedUser = user
-            if (conversation.enableInfiniteCloud && storedAttachments.isNotEmpty()) {
-                val cloud = requireNotNull(infiniteCloud) { "Infinite Cloud is unavailable" }
-                val serverId = requireNotNull(conversation.cloudServerId) { "Infinite Cloud server is not selected" }
-                stagedServerId = serverId
-                remoteAttachments = cloud.stageAttachments(serverId, requestId, storedAttachments.map {
-                    CloudAttachmentUpload(it.id, it.fileName, it.storedPath)
-                })
+        }
+        val cloudAttachments = if (userContent == null) sourceAttachments else storedAttachments
+        val remoteAttachments = if (cloudServerId != null && cloudAttachments.isNotEmpty()) {
+            val cloud = requireNotNull(infiniteCloud) { "Infinite Cloud is unavailable" }
+            stagedServerId = cloudServerId
+            cloud.stageAttachments(cloudServerId, requestId, cloudAttachments.map {
+                CloudAttachmentUpload(it.id, it.fileName, it.storedPath)
+            }).also { uploaded ->
                 process += ProcessEvent(type = "cloud_attachments_uploaded", id = "cloud-attachments-$requestId",
-                    message = "Uploaded ${remoteAttachments.size} attachment(s) to Infinite Cloud")
+                    message = "Uploaded ${uploaded.size} attachment(s) to Infinite Cloud")
             }
+        } else {
+            emptyList()
         }
         val raw = dao.messages(conversationId).map(MessageEntity::toDomain)
             .filterNot { it.id == excludedHistoryMessageId } + listOfNotNull(preparedUser)
@@ -1804,7 +1764,7 @@ class ChatRepository(
         val selectedRaw = ContextBuilder.select(raw, conversation.contextPolicy, summary)
         val (canonical, allCitations) = canonicalContext(selectedRaw, preparedUser?.let { mapOf(it.id to storedAttachments) }.orEmpty(), conversation.knowledgeScope)
         val toolOptions = ToolOptions(request.enableSearch, request.enableRead, request.enableKnowledge,
-            effective.urlReaderBackend, conversation.enableInfiniteCloud, conversation.cloudServerId, conversationId,
+            effective.urlReaderBackend, cloudServerId != null, cloudServerId, conversationId,
             requestId, assistantId, explicitlyRequestsCloudTask(userContent ?: raw.lastOrNull { it.role == "user" }?.content.orEmpty()), remoteAttachments,
             conversation.knowledgeScope, request.cloudExecutionMode)
         preparedSession = engine.openSession(toolOptions, effective.maxToolCalls)
@@ -2410,12 +2370,15 @@ class ChatRepository(
             requestHeaders = connection.requestHeaders)
     }
 
-    private fun contextToolOptions(conversation: Conversation) = ToolOptions(
-        conversation.enableSearch, conversation.enableRead, conversation.enableKnowledge,
-        conversation.urlReaderBackend ?: UrlReaderBackend.BUILT_IN,
-        conversation.enableInfiniteCloud, conversation.cloudServerId, conversation.id,
-        knowledgeScope = conversation.knowledgeScope,
-    )
+    private suspend fun contextToolOptions(conversation: Conversation): ToolOptions {
+        val cloudServerId = cloudServerForTurn(conversation, CloudExecutionMode.AUTO)
+        return ToolOptions(
+            conversation.enableSearch, conversation.enableRead, conversation.enableKnowledge,
+            conversation.urlReaderBackend ?: UrlReaderBackend.BUILT_IN,
+            cloudServerId != null, cloudServerId, conversation.id,
+            knowledgeScope = conversation.knowledgeScope,
+        )
+    }
 
     override suspend fun contextPreview(id: String, request: SendMessageRequest?): ContextPreview = withContextOperation(id) {
         val conversation = requireNotNull(dao.conversation(id)).toDomain()
@@ -2662,26 +2625,38 @@ class ChatRepository(
         return buildInjectedKnowledgeContext(knowledgeStore.snippets(ids, scope))
     }
 
-    private suspend fun validateRequiredCloud(conversation: Conversation, mode: CloudExecutionMode) {
-        if (mode != CloudExecutionMode.REQUIRED) return
-        if (!conversation.enableInfiniteCloud || conversation.cloudServerId == null || conversation.maxToolCalls <= 0) {
-            throw ConfigurationException("Cloud execution requires an enabled server and a positive tool budget")
+    private suspend fun cloudServerForTurn(conversation: Conversation, mode: CloudExecutionMode): String? {
+        val serverId = conversation.cloudServerId.takeIf { conversation.enableInfiniteCloud && conversation.maxToolCalls > 0 }
+        if (serverId == null) {
+            if (mode == CloudExecutionMode.REQUIRED) {
+                throw ConfigurationException("Cloud execution requires an enabled server and a positive tool budget")
+            }
+            return null
         }
-        requireReadyCloudServer(conversation.cloudServerId)
+        return cloudConfigurationMutationLock.withLock {
+            val error = cloudServerConfigurationError(serverId)
+            if (mode == CloudExecutionMode.REQUIRED && error != null) throw ConfigurationException(error)
+            serverId.takeIf { error == null }
+        }
     }
 
-    private suspend fun requireReadyCloudServer(id: String?): CloudServerEntity {
-        val serverId = requireNotNull(id) { "Infinite Cloud server is required" }
-        val server = requireNotNull(dao.cloudServer(serverId)) { "Infinite Cloud server not found" }
-        require(!secretStore.read(secretStore.cloudPrivateKeyName(serverId)).isNullOrBlank()) {
-            "Infinite Cloud server private key is required"
+    private suspend fun requireReadyCloudServer(id: String?) {
+        cloudServerConfigurationError(id)?.let { throw IllegalArgumentException(it) }
+    }
+
+    private suspend fun cloudServerConfigurationError(id: String?): String? {
+        if (id == null) return "Infinite Cloud server is required"
+        val server = dao.cloudServer(id) ?: return "Infinite Cloud server not found"
+        if (secretStore.read(secretStore.cloudPrivateKeyName(id)).isNullOrBlank()) {
+            return "Infinite Cloud server private key is required"
         }
-        require(
-            !server.hostKeyAlgorithm.isNullOrBlank() &&
-                !server.hostKeyBase64.isNullOrBlank() &&
-                !server.hostKeyFingerprint.isNullOrBlank(),
-        ) { "Infinite Cloud server host key is not pinned" }
-        return server
+        if (server.hostKeyAlgorithm.isNullOrBlank() ||
+            server.hostKeyBase64.isNullOrBlank() ||
+            server.hostKeyFingerprint.isNullOrBlank()
+        ) {
+            return "Infinite Cloud server host key is not pinned"
+        }
+        return null
     }
 
 }
